@@ -1,10 +1,13 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v3-formatting';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v5-staff-actions';
 const APP_SHELL = [
   '/mobile',
   '/mobile/offline',
+  '/staff/mobile',
   '/static/mobile.css?v=20260622',
   '/static/mobile.js?v=20260622',
   '/static/easyadmin-formatters.js?v=20260622-format',
+  '/static/staff-portal.css?v=20260623-staff2',
+  '/static/staff-portal.js?v=20260623-staff2',
   '/static/easy_admin_logo.png',
   '/static/pwa-icon-192.png',
   '/static/pwa-icon-512.png',

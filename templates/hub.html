@@ -54,6 +54,19 @@
                     </div>
                 </div>
             </div>
+
+            {% if session.get('can_payroll') or session.get('is_company_admin') or session.get('is_superadmin') %}
+            <div class="col-md-3">
+                <div class="card app-card text-center border border-success shadow-sm" onclick="window.location.href='/staff_admin'">
+                    <div class="card-body p-4">
+                        <div class="app-icon text-success">🧑‍💼</div>
+                        <h5 class="fw-bold text-dark">Staff Portal</h5>
+                        <p class="text-muted small">Create staff logins and approve leave requests.</p>
+                        <span class="btn btn-outline-success mt-2 w-100 fw-bold">Manage Portal</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
             
             {% if session.get('can_booking') or session.get('is_superadmin') %}
             <div class="col-md-3">
@@ -146,6 +159,9 @@
                 </div>
                 <div class="col-md-2">
                     <button class="btn btn-outline-secondary w-100 mb-2 fw-bold" onclick="openUsersModal()">🔐 Accounts</button>
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-outline-primary w-100 mb-2 fw-bold" onclick="window.location.href='/system_email_settings'">📧 System Email Settings</button>
                 </div>
                 <div class="col-md-2">
                     <button class="btn btn-outline-dark w-100 mb-2 fw-bold" onclick="openAuditModal()">📜 Audit Trail</button>
@@ -594,7 +610,7 @@
                     <button class="btn btn-primary mb-3 fw-bold" onclick="openUserForm(null)">+ Add New User</button>
                     <table class="table table-hover bg-white border shadow-sm align-middle">
                         <thead class="table-light">
-                            <tr><th>Username</th><th>Assigned Company</th><th>Role</th><th>App Permissions</th><th>Actions</th></tr>
+                            <tr><th>Username</th><th>Email</th><th>Assigned Company</th><th>Role</th><th>App Permissions</th><th>Actions</th></tr>
                         </thead>
                         <tbody id="usersTableBody"></tbody>
                     </table>
@@ -615,6 +631,10 @@
                     <div class="mb-3">
                         <label class="form-label fw-bold small">Username</label>
                         <input type="text" id="userName" class="form-control" required autocomplete="off">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold small">Email Address</label>
+                        <input type="email" id="userEmail" class="form-control" placeholder="Required for Forgot Password" autocomplete="email">
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-bold small">Password</label>
@@ -1654,6 +1674,7 @@
                     tbody.innerHTML += `
                         <tr>
                             <td><strong>${u.username}</strong></td>
+                            <td>${u.email || '<span class="text-muted small">Not set</span>'}</td>
                             <td>${u.company_name || 'N/A'}</td>
                             <td>${roles.join(' ')}</td>
                             <td>${apps.join(' ') || '<span class="text-muted small">No Access</span>'}</td>
@@ -1670,6 +1691,7 @@
             document.getElementById('userFormTitle').innerText = user ? "Edit User" : "New User";
             document.getElementById('userId').value = user ? user.id : "";
             document.getElementById('userName').value = user ? user.username : "";
+            document.getElementById('userEmail').value = user ? (user.email || "") : "";
             document.getElementById('userPassword').value = "";
             document.getElementById('userCompanyId').value = user ? user.company_id : (isSuperAdmin && companiesList.length > 0 ? companiesList[0].id : currentCompanyId);
             
@@ -1689,6 +1711,7 @@
             const data = {
                 id: document.getElementById('userId').value,
                 username: document.getElementById('userName').value,
+                email: document.getElementById('userEmail').value,
                 password: document.getElementById('userPassword').value,
                 company_id: document.getElementById('userCompanyId').value,
                 can_booking: document.getElementById('userCanBooking').checked,
@@ -1702,6 +1725,7 @@
             if(isCompAdminCb) data.is_company_admin = isCompAdminCb.checked;
 
             if(!data.username) return alert("Username required.");
+            if(!data.email) return alert("Email address required for Forgot Password functionality.");
             if(!data.id && !data.password) return alert("Password required for new users.");
 
             fetch('/admin/users/save', {

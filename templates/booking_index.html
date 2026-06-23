@@ -88,6 +88,28 @@
         </div>
     </div>
 
+    <div class="modal fade" id="bookingDetailsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title fw-bold">{{ booking_label }} Details</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div id="bookingDetailsBody" class="small">Loading {{ booking_label|lower }} details...</div>
+                    <div class="bg-white border rounded p-3 mt-3 shadow-sm">
+                        <h6 class="fw-bold text-secondary border-bottom pb-2 mb-3">{{ booking_label }} Photos / Files</h6>
+                        <div id="bookingDetailsAttachmentList" class="small text-muted">No attachments loaded yet.</div>
+                    </div>
+                </div>
+                <div class="modal-footer d-flex justify-content-between bg-dark">
+                    <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="btn btn-warning fw-bold" onclick="editBookingFromDetails()">Edit {{ booking_label }}</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="modal fade" id="newBookingModal" tabindex="-1" data-bs-backdrop="static">
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
@@ -249,6 +271,11 @@
                             <div id="wizardAttachmentList" class="small mb-2 text-muted">No attachments uploaded yet.</div>
                             <input type="file" id="wizardAttachmentFiles" class="form-control form-control-sm" multiple>
                             <div class="form-text small">Attach files such as photos, signed job cards, site instructions, or supporting documents. Files are uploaded after the {{ booking_label|lower }} is saved.</div>
+                        </div>
+                        <div class="bg-white border rounded p-3 mb-3 shadow-sm" id="staffJobUpdatesSection" style="display:none;">
+                            <h6 class="fw-bold text-success border-bottom pb-2 mb-3">Staff Job Updates</h6>
+                            <div id="staffJobUpdatesBody" class="small text-muted">No staff updates yet.</div>
+                            <div class="form-text small mt-2">Photos and files uploaded by staff are shown in the {{ booking_label|lower }} attachments list above.</div>
                         </div>
                     </div>
 
@@ -838,6 +865,7 @@
         let calendar; let currentClientReportData = [];
         const newBookingModal = new bootstrap.Modal(document.getElementById('newBookingModal'));
         const editModal = new bootstrap.Modal(document.getElementById('editModal'));
+        const bookingDetailsModal = new bootstrap.Modal(document.getElementById('bookingDetailsModal'));
         const bulkBookingModal = new bootstrap.Modal(document.getElementById('bulkBookingModal'));
         const clientDirModal = new bootstrap.Modal(document.getElementById('clientDirModal'));
         const clientProfileModal = new bootstrap.Modal(document.getElementById('clientProfileModal'));
@@ -1004,7 +1032,7 @@
                     const d = info.event.start;
                     const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
                     const timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-                    openEditBooking(info.event.id, info.event.extendedProps, dateStr, timeStr);
+                    openBookingDetails(info.event.id, info.event.extendedProps, dateStr, timeStr);
                 }
             });
             loadDashboardLists();
@@ -1028,11 +1056,12 @@
                     const bookingTypeDisplay = ev.extendedProps.booking_type ? ev.extendedProps.booking_type.split(',')[0] : 'Standard Home Clean';
                     
                     const itemHTML = `
-                        <div class="list-group-item booking-item py-3" onclick='openEditBooking(${ev.id}, ${JSON.stringify(ev.extendedProps).replace(/'/g, "'")}, "${evDateStr}", "${evTimeStr}")'>
+                        <div class="list-group-item booking-item py-3" onclick='openBookingDetailsFromEncoded("${ev.id}", "${encodeURIComponent(JSON.stringify(ev.extendedProps || {}))}", "${evDateStr}", "${evTimeStr}")'>
                             <div class="d-flex justify-content-between align-items-center">
                                 <strong>🕒 ${evTimeStr}</strong>
                                 <span class="badge bg-primary rounded-pill">${bookingTypeDisplay}</span>
                             </div>
+                            <div class="mt-1">${bookingJobStatusBadge(ev.extendedProps.mobile_status || 'Scheduled')}</div>
                             <div class="mt-1 text-dark fw-bold">${ev.extendedProps.client}</div>
                             ${ev.extendedProps.project_name ? `<div class="small text-secondary fw-bold">Project: ${ev.extendedProps.project_name}</div>` : ''}
                             <small class="text-muted">Staff: ${ev.extendedProps.employee || 'Unassigned'}</small>
@@ -1238,6 +1267,7 @@
             resetWizardCustomFields();
             clearAttachmentInput('wizardAttachmentFiles');
             loadAttachments('booking', null, 'wizardAttachmentList');
+            renderStaffJobUpdates(null);
             
             Array.from(document.getElementById('wizardService').options).forEach(o => o.selected = false);
             const wizardProject = document.getElementById('wizardProject');
@@ -1766,6 +1796,174 @@
         // EXISTING EDIT / DIRECTORY FUNCTIONS
         // ==========================================
 
+        function bookingJobStatusClass(status) {
+            status = String(status || 'Scheduled').toLowerCase();
+            if (status === 'completed') return 'bg-success';
+            if (status === 'in progress') return 'bg-warning text-dark';
+            if (status === 'cancelled') return 'bg-danger';
+            return 'bg-secondary';
+        }
+
+        function bookingJobStatusBadge(status) {
+            const safeStatus = escapeHtml(status || 'Scheduled');
+            return `<span class="badge ${bookingJobStatusClass(status)}">${safeStatus}</span>`;
+        }
+
+        function formatJobTimestamp(value) {
+            value = String(value || '').trim();
+            if (!value) return 'Not recorded';
+            return escapeHtml(value.replace('T', ' ').slice(0, 16));
+        }
+
+        function renderStaffJobUpdates(props) {
+            const section = document.getElementById('staffJobUpdatesSection');
+            const body = document.getElementById('staffJobUpdatesBody');
+            if (!section || !body) return;
+            if (!props || wizardMode !== 'edit') {
+                section.style.display = 'none';
+                body.innerHTML = 'No staff updates yet.';
+                return;
+            }
+            const status = props.mobile_status || 'Scheduled';
+            const updatedBy = props.mobile_status_updated_by || 'Not recorded';
+            const attachmentCount = Number(props.attachment_count || 0);
+            const notes = props.booking_notes || '';
+            section.style.display = 'block';
+            body.innerHTML = `
+                <div class="row g-2">
+                    <div class="col-md-6"><strong>Status:</strong><br>${bookingJobStatusBadge(status)}</div>
+                    <div class="col-md-6"><strong>Updated by:</strong><br>${escapeHtml(updatedBy)}</div>
+                    <div class="col-md-6"><strong>Started at:</strong><br>${formatJobTimestamp(props.mobile_started_at)}</div>
+                    <div class="col-md-6"><strong>Completed at:</strong><br>${formatJobTimestamp(props.mobile_completed_at)}</div>
+                    <div class="col-md-6"><strong>Last status update:</strong><br>${formatJobTimestamp(props.mobile_status_updated_at)}</div>
+                    <div class="col-md-6"><strong>Uploaded files:</strong><br>${attachmentCount} file${attachmentCount === 1 ? '' : 's'}</div>
+                </div>
+                <div class="mt-3"><strong>Staff / Booking Notes:</strong>${notes ? `<pre class="bg-light border rounded p-2 mt-1 mb-0 small" style="white-space:pre-wrap;">${escapeHtml(notes)}</pre>` : '<div class="text-muted mt-1">No notes recorded.</div>'}</div>
+            `;
+        }
+
+        let detailBookingId = null;
+        let detailBookingProps = null;
+        let detailBookingDate = '';
+        let detailBookingTime = '';
+
+        function detailValue(value, fallback='-') {
+            value = String(value || '').trim();
+            return value ? escapeHtml(value) : `<span class="text-muted">${fallback}</span>`;
+        }
+
+        function detailRow(label, value) {
+            return `<div class="col-md-6 mb-2"><strong>${escapeHtml(label)}:</strong><br>${detailValue(value)}</div>`;
+        }
+
+        function detailFullRow(label, value) {
+            value = String(value || '').trim();
+            return `<div class="col-12 mb-2"><strong>${escapeHtml(label)}:</strong>${value ? `<pre class="bg-light border rounded p-2 mt-1 mb-0 small" style="white-space:pre-wrap;">${escapeHtml(value)}</pre>` : '<div class="text-muted mt-1">-</div>'}</div>`;
+        }
+
+        function renderBookingCustomFields(props) {
+            const customFields = props && props.custom_fields ? props.custom_fields : {};
+            const entries = Object.entries(customFields).filter(([k, v]) => String(v || '').trim() !== '');
+            if (!entries.length) return '';
+            return `
+                <div class="bg-white border rounded p-3 mt-3 shadow-sm">
+                    <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">Custom Fields</h6>
+                    <div class="row g-2">
+                        ${entries.map(([key, value]) => detailRow(key.replace(/_/g, ' '), value)).join('')}
+                    </div>
+                </div>`;
+        }
+
+        async function loadBookingDetailsAttachments(bookingId) {
+            const list = document.getElementById('bookingDetailsAttachmentList');
+            if (!list) return;
+            if (!bookingId) {
+                list.innerHTML = '<span class="text-muted">No booking selected.</span>';
+                return;
+            }
+            list.innerHTML = '<span class="text-muted">Loading attachments...</span>';
+            try {
+                const res = await fetch(`/api/attachments/booking/${bookingId}`);
+                const data = await parseJsonOrError(res);
+                const files = data.attachments || [];
+                if (!files.length) {
+                    list.innerHTML = '<span class="text-muted">No photos/files uploaded for this booking yet.</span>';
+                    return;
+                }
+                list.innerHTML = files.map(file => `
+                    <div class="border rounded p-2 mb-2 bg-light">
+                        <a href="/download_attachment/${file.id}" class="fw-bold" target="_blank">${escapeHtml(file.original_filename)}</a>
+                        <span class="text-muted ms-2">${formatFileSize(file.file_size)}</span>
+                        <div class="text-muted small">Uploaded ${escapeHtml(file.uploaded_at || '')}${file.uploaded_by ? ' by ' + escapeHtml(file.uploaded_by) : ''}</div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                list.innerHTML = `<span class="text-danger">${escapeHtml(err.message || 'Could not load booking attachments.')}</span>`;
+            }
+        }
+
+        function openBookingDetailsFromEncoded(id, encodedProps, dateStr, timeStr) {
+            let props = {};
+            try { props = JSON.parse(decodeURIComponent(encodedProps || '%7B%7D')); }
+            catch (err) { props = {}; }
+            openBookingDetails(id, props, dateStr, timeStr);
+        }
+
+        function openBookingDetails(id, props, dateStr, timeStr) {
+            props = props || {};
+            detailBookingId = id;
+            detailBookingProps = props;
+            detailBookingDate = dateStr || '';
+            detailBookingTime = timeStr || '';
+
+            const body = document.getElementById('bookingDetailsBody');
+            const service = props.booking_type || 'Standard Home Clean';
+            const project = props.project_name ? `${props.project_name}${props.project_code ? ' (' + props.project_code + ')' : ''}` : '';
+            const invoiceStatus = props.is_invoiced ? 'Invoiced' : 'Not invoiced';
+            const attachmentCount = Number(props.attachment_count || 0);
+
+            body.innerHTML = `
+                <div class="bg-white border rounded p-3 shadow-sm">
+                    <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">Booking Information</h6>
+                    <div class="row g-2">
+                        ${detailRow('Client', props.client)}
+                        ${detailRow('Date', dateStr)}
+                        ${detailRow('Time', String(timeStr || '').slice(0, 5))}
+                        ${detailRow('Service', service)}
+                        ${detailRow('Assigned Staff', props.employee)}
+                        ${detailRow('Project', project)}
+                        ${detailRow('Transport', props.transport)}
+                        ${detailRow('Overtime Hours', props.overtime_hours)}
+                        ${detailRow('Invoice Status', invoiceStatus)}
+                        ${detailRow('Uploaded Files', `${attachmentCount} file${attachmentCount === 1 ? '' : 's'}`)}
+                        ${detailRow('Client Phone', props.client_phone)}
+                        ${detailRow('Client Email', props.client_email)}
+                        ${detailFullRow('Client Address', props.client_address)}
+                        ${detailFullRow('Booking Notes', props.booking_notes)}
+                    </div>
+                </div>
+                <div class="bg-white border rounded p-3 mt-3 shadow-sm">
+                    <h6 class="fw-bold text-success border-bottom pb-2 mb-3">Staff / Mobile Job Updates</h6>
+                    <div class="row g-2">
+                        <div class="col-md-6 mb-2"><strong>Status:</strong><br>${bookingJobStatusBadge(props.mobile_status || 'Scheduled')}</div>
+                        ${detailRow('Updated By', props.mobile_status_updated_by)}
+                        <div class="col-md-6 mb-2"><strong>Started At:</strong><br>${formatJobTimestamp(props.mobile_started_at)}</div>
+                        <div class="col-md-6 mb-2"><strong>Completed At:</strong><br>${formatJobTimestamp(props.mobile_completed_at)}</div>
+                        <div class="col-md-6 mb-2"><strong>Last Status Update:</strong><br>${formatJobTimestamp(props.mobile_status_updated_at)}</div>
+                    </div>
+                </div>
+                ${renderBookingCustomFields(props)}
+            `;
+            loadBookingDetailsAttachments(id);
+            bookingDetailsModal.show();
+        }
+
+        function editBookingFromDetails() {
+            if (!detailBookingId) return;
+            bookingDetailsModal.hide();
+            setTimeout(() => openEditBooking(detailBookingId, detailBookingProps || {}, detailBookingDate, detailBookingTime), 200);
+        }
+
         function openEditBooking(id, props, dateStr, timeStr) {
             wizardMode = 'edit';
             editingBookingId = id;
@@ -1816,6 +2014,7 @@
             populateWizardCustomFields(props.custom_fields || {});
             clearAttachmentInput('wizardAttachmentFiles');
             loadAttachments('booking', editingBookingId, 'wizardAttachmentList');
+            renderStaffJobUpdates(props);
 
             const bTypes = (props.booking_type || 'Standard Home Clean').split(',').map(s => s.trim());
             const bSel = document.getElementById('wizardService');

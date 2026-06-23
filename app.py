@@ -10,6 +10,8 @@ import calendar
 import threading
 import json
 import re
+import secrets
+import string
 from datetime import datetime, timedelta
 from functools import wraps
 import smtplib
@@ -834,7 +836,18 @@ def init_db():
     try: conn.execute('ALTER TABLE users ADD COLUMN can_invoicing INTEGER DEFAULT 0')
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE users ADD COLUMN can_accounting INTEGER DEFAULT 0')
-    except sqlite3.OperationalError: pass 
+    except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE users ADD COLUMN employee_id INTEGER')
+    except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE users ADD COLUMN is_staff INTEGER DEFAULT 0')
+    except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE users ADD COLUMN email TEXT')
+    except sqlite3.OperationalError: pass
+
+    conn.execute('''CREATE TABLE IF NOT EXISTS system_email_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value TEXT
+    )''')
     
     conn.execute('UPDATE users SET company_id = ? WHERE company_id IS NULL', (default_company_id,))
 
@@ -976,6 +989,24 @@ def init_db():
         action TEXT,
         details TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+    conn.execute('''CREATE TABLE IF NOT EXISTS staff_leave_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        employee_id INTEGER NOT NULL,
+        leave_type TEXT DEFAULT 'Annual Leave',
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        days REAL DEFAULT 1,
+        reason TEXT,
+        status TEXT DEFAULT 'Pending',
+        attachment_file TEXT,
+        requested_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        reviewed_by TEXT,
+        reviewed_at TEXT,
+        admin_note TEXT,
+        leave_record_id INTEGER
     )''')
 
     conn.execute('''CREATE TABLE IF NOT EXISTS tax_brackets (
@@ -1218,6 +1249,21 @@ def init_db():
             try: conn.execute(f'ALTER TABLE {t_name} ADD COLUMN {c_name} {c_type}')
             except: pass
 
+    for c_name, c_type in [
+        ('company_id', 'INTEGER'), ('employee_id', 'INTEGER'), ('leave_type', 'TEXT DEFAULT "Annual Leave"'),
+        ('start_date', 'TEXT'), ('end_date', 'TEXT'), ('days', 'REAL DEFAULT 1'), ('reason', 'TEXT'),
+        ('status', 'TEXT DEFAULT "Pending"'), ('attachment_file', 'TEXT'), ('requested_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+        ('reviewed_by', 'TEXT'), ('reviewed_at', 'TEXT'), ('admin_note', 'TEXT'), ('leave_record_id', 'INTEGER')
+    ]:
+        try: conn.execute(f'ALTER TABLE staff_leave_requests ADD COLUMN {c_name} {c_type}')
+        except Exception: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_staff_leave_requests_company_status ON staff_leave_requests(company_id, status, start_date)')
+    except sqlite3.OperationalError: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_staff_leave_requests_employee ON staff_leave_requests(company_id, employee_id, start_date)')
+    except sqlite3.OperationalError: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_users_staff_employee ON users(company_id, employee_id, is_staff)')
+    except sqlite3.OperationalError: pass
+
     # Payroll compliance migrations: age-based PAYE rebates and employee date of birth.
     rebate_cols = [
         ('secondary_rebate', 'REAL DEFAULT 0'),
@@ -1325,6 +1371,10 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE bookings ADD COLUMN mobile_status_updated_by TEXT')
     except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE bookings ADD COLUMN mobile_started_at TEXT')
+    except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE bookings ADD COLUMN mobile_completed_at TEXT')
+    except sqlite3.OperationalError: pass
     try: conn.execute('UPDATE bookings SET mobile_status="Scheduled" WHERE mobile_status IS NULL OR mobile_status=""')
     except sqlite3.Error: pass
 
@@ -1407,6 +1457,96 @@ def get_setting(key):
     res = conn.execute('SELECT value FROM settings WHERE key = ? AND company_id = ?', (key, session.get('company_id', 0))).fetchone()
     conn.close()
     return res['value'] if res else ""
+
+SYSTEM_EMAIL_SETTING_KEYS = ['smtp_server', 'smtp_port', 'smtp_user', 'smtp_pass', 'sender_email']
+
+def get_system_email_settings(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_db_connection()
+        should_close = True
+    try:
+        rows = conn.execute('SELECT setting_key, setting_value FROM system_email_settings').fetchall()
+        return {row['setting_key']: row['setting_value'] for row in rows}
+    except Exception:
+        return {}
+    finally:
+        if should_close:
+            conn.close()
+
+def save_system_email_settings(values):
+    conn = get_db_connection()
+    try:
+        for key in SYSTEM_EMAIL_SETTING_KEYS:
+            val = (values.get(key) or '').strip()
+            exists = conn.execute('SELECT 1 FROM system_email_settings WHERE setting_key=?', (key,)).fetchone()
+            if exists:
+                conn.execute('UPDATE system_email_settings SET setting_value=? WHERE setting_key=?', (val, key))
+            else:
+                conn.execute('INSERT INTO system_email_settings (setting_key, setting_value) VALUES (?, ?)', (key, val))
+        conn.commit()
+    finally:
+        conn.close()
+
+def _system_email_missing(settings):
+    required = ['smtp_server', 'smtp_port', 'smtp_user', 'smtp_pass']
+    return [k for k in required if not (settings.get(k) or '').strip()]
+
+def _send_system_email(to_email, subject, body):
+    settings = get_system_email_settings()
+    missing = _system_email_missing(settings)
+    if missing:
+        raise RuntimeError('System Email Settings are incomplete.')
+    server_host = settings.get('smtp_server', '').strip()
+    port = int(settings.get('smtp_port') or 465)
+    user = settings.get('smtp_user', '').strip()
+    password = settings.get('smtp_pass', '')
+    sender = (settings.get('sender_email') or user).strip()
+
+    msg = EmailMessage()
+    msg['Subject'] = subject
+    msg['From'] = sender
+    msg['To'] = to_email
+    msg.set_content(body)
+
+    if port == 587:
+        with smtplib.SMTP(server_host, port, timeout=20) as smtp:
+            smtp.starttls()
+            smtp.login(user, password)
+            smtp.send_message(msg)
+    else:
+        with smtplib.SMTP_SSL(server_host, port, timeout=20) as smtp:
+            smtp.login(user, password)
+            smtp.send_message(msg)
+
+def generate_temporary_password(length=12):
+    alphabet = string.ascii_letters + string.digits + '!@#$%&*?'
+    while True:
+        password = ''.join(secrets.choice(alphabet) for _ in range(length))
+        if (any(c.islower() for c in password) and any(c.isupper() for c in password)
+                and any(c.isdigit() for c in password) and any(c in '!@#$%&*?' for c in password)):
+            return password
+
+def _row_has_key(row, key):
+    try:
+        return key in row.keys()
+    except Exception:
+        return False
+
+def _normalise_email(value):
+    return (value or '').strip().lower()
+
+def _account_email_for_password_reset(conn, user):
+    user_dict = dict(user)
+    account_email = user_dict.get('email') or ''
+    if not account_email and user_dict.get('employee_id') and user_dict.get('company_id'):
+        try:
+            emp = conn.execute('SELECT email FROM employees WHERE id=? AND company_id=?', (user_dict.get('employee_id'), user_dict.get('company_id'))).fetchone()
+            if emp:
+                account_email = dict(emp).get('email') or ''
+        except Exception:
+            account_email = ''
+    return account_email
 
 def calculate_uif(monthly_gross): 
     return round(min(monthly_gross * 0.01, 177.12), 2)
@@ -2276,7 +2416,7 @@ def calculate_financials(start_date, end_date):
 # ==========================================================
 @app.before_request
 def restrict_access():
-    public_endpoints = ['landing', 'login', 'static', 'manifest_webmanifest', 'service_worker', 'mobile_offline', 'health_check']
+    public_endpoints = ['landing', 'login', 'forgot_password', 'static', 'manifest_webmanifest', 'service_worker', 'mobile_offline', 'health_check']
     if request.endpoint in public_endpoints:
         return
     if 'logged_in' not in session: return redirect(url_for('login'))
@@ -2284,15 +2424,33 @@ def restrict_access():
     if not session.get('company_id') and not session.get('is_superadmin'):
         return "Fatal Error: Account is not assigned to a company.", 403
 
+    path = request.path
+
+    if session.get('is_staff'):
+        allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/api/staff/', '/logout')
+        if path == '/mobile':
+            return redirect(url_for('staff_mobile'))
+        if path == '/hub':
+            return redirect(url_for('staff_portal'))
+        if path.startswith('/uploads/leave/'):
+            return
+        if not any(path == p or path.startswith(p) for p in allowed_staff_paths):
+            return "Access Denied: Staff portal access only.", 403
+        return
+
     if session.get('is_superadmin'): return
 
-    path = request.path
     if path.startswith('/admin/'):
         if not session.get('is_company_admin'):
             return "Access Denied: Admin privileges required.", 403
         if path in ['/admin/companies', '/admin/companies/save', '/admin/switch_company', '/admin/tax_config', '/admin/holidays']:
             return "Access Denied: Superadmin privileges required.", 403
         return 
+
+    if path == '/staff_admin' or path.startswith('/api/staff/admin'):
+        if not (session.get('is_company_admin') or session.get('can_payroll')):
+            return "Access Denied: Staff Portal administration requires Company Admin or HR & Payroll access.", 403
+        return
         
     if path == '/update_client':
         if not (session.get('can_booking') or session.get('can_invoicing')):
@@ -2327,6 +2485,8 @@ def login():
             session['username'] = user['username']
             session['is_superadmin'] = bool(user['is_superadmin'])
             session['is_company_admin'] = bool(dict(user).get('is_company_admin', 0))
+            session['is_staff'] = bool(dict(user).get('is_staff', 0))
+            session['employee_id'] = dict(user).get('employee_id')
             session['can_booking'] = bool(user['can_booking'])
             session['can_finance'] = bool(user['can_finance'])
             session['can_payroll'] = bool(user['can_payroll'])
@@ -2351,10 +2511,49 @@ def login():
                 
             conn.close()
             log_action('System', 'Login', f"User {user['username']} logged in.")
+            if session.get('is_staff'):
+                return redirect(url_for('staff_portal'))
             return redirect(url_for('hub'))
         else: error = 'Invalid credentials.'
         conn.close()
     return render_template('login.html', error=error)
+
+@app.route('/forgot_password', methods=['GET', 'POST'])
+def forgot_password():
+    success_msg = None
+    error_msg = None
+    if request.method == 'POST':
+        username = (request.form.get('username') or '').strip()
+        email = _normalise_email(request.form.get('email'))
+        generic_msg = 'If the username and email address match an account, a new temporary password will be emailed.'
+        if not username or not email:
+            error_msg = 'Please enter both your username and email address.'
+        else:
+            conn = get_db_connection()
+            try:
+                user = conn.execute('SELECT * FROM users WHERE LOWER(username)=LOWER(?)', (username,)).fetchone()
+                if user:
+                    account_email = _normalise_email(_account_email_for_password_reset(conn, user))
+                    if account_email and account_email == email:
+                        temp_password = generate_temporary_password()
+                        body = (
+                            'Good day,\n\n'
+                            'A password reset was requested for your Easy Admin account.\n\n'
+                            f'Username: {user["username"]}\n'
+                            f'Temporary password: {temp_password}\n\n'
+                            'Please log in and ask your administrator to change this password if required. '
+                            'If you did not request this reset, please contact your administrator immediately.\n\n'
+                            'Easy Admin System Email'
+                        )
+                        _send_system_email(account_email, 'Easy Admin password reset', body)
+                        conn.execute('UPDATE users SET password_hash=? WHERE id=?', (generate_password_hash(temp_password), user['id']))
+                        conn.commit()
+                success_msg = generic_msg
+            except Exception as exc:
+                error_msg = f'Password reset could not be completed: {exc}'
+            finally:
+                conn.close()
+    return render_template('forgot_password.html', success_msg=success_msg, error_msg=error_msg)
 
 @app.route('/logout')
 def logout(): 
@@ -2369,6 +2568,658 @@ def landing():
 
 @app.route('/hub')
 def hub(): return render_template('hub.html', session=session)
+
+
+# ==========================================================
+# STAFF PORTAL ROUTES
+# ==========================================================
+STAFF_LEAVE_TYPES = ['Annual Leave', 'Sick Leave', 'Family Responsibility', 'Unpaid Leave', 'Other Leave']
+STAFF_LEAVE_STATUSES = {'Pending', 'Approved', 'Declined'}
+
+
+def _staff_is_admin():
+    return bool(session.get('is_superadmin') or session.get('is_company_admin') or session.get('can_payroll'))
+
+
+def _staff_is_user():
+    return bool(session.get('is_staff') and session.get('employee_id'))
+
+
+def _staff_json_error(message, status_code=400):
+    return jsonify({'status': 'error', 'message': message}), status_code
+
+
+def _staff_employee_row(conn):
+    employee_id = session.get('employee_id')
+    cid = session.get('company_id')
+    if not employee_id or not cid:
+        return None
+    return conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (employee_id, cid)).fetchone()
+
+
+def _staff_date_range(default_days=30):
+    today = datetime.now().strftime('%Y-%m-%d')
+    start_date = (request.args.get('start_date') or today).strip()
+    end_date = (request.args.get('end_date') or (datetime.now() + timedelta(days=default_days)).strftime('%Y-%m-%d')).strip()
+    try:
+        datetime.strptime(start_date, '%Y-%m-%d')
+        datetime.strptime(end_date, '%Y-%m-%d')
+    except Exception:
+        start_date = today
+        end_date = (datetime.now() + timedelta(days=default_days)).strftime('%Y-%m-%d')
+    return start_date, end_date
+
+
+def _staff_leave_days(start_date, end_date):
+    try:
+        start = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end = datetime.strptime(end_date, '%Y-%m-%d').date()
+        if end < start:
+            return 0
+        return float((end - start).days + 1)
+    except Exception:
+        return 0
+
+
+def _staff_save_leave_attachment(file_obj):
+    if not file_obj or not file_obj.filename:
+        return None
+    filename = secure_filename(file_obj.filename)
+    if not filename:
+        return None
+    base, ext = os.path.splitext(filename)
+    stored = f"staff_leave_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{secure_filename(base)[:40]}{ext.lower()}"
+    os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], 'leave'), exist_ok=True)
+    file_obj.save(os.path.join(app.config['UPLOAD_FOLDER'], 'leave', stored))
+    return stored
+
+
+def _staff_booking_rows(conn, cid, employee_name, start_date, end_date, limit=300):
+    if not _mobile_table_exists(conn, 'bookings'):
+        return []
+    booking_cols, selects, joins = _mobile_booking_select_parts(conn, include_client_contact=True)
+    if 'start' not in booking_cols or 'employee' not in booking_cols:
+        return []
+    params = []
+    where_parts = [_mobile_company_where(booking_cols, 'b', cid, params)]
+    where_parts.append("substr(COALESCE(CAST(b.start AS TEXT), ''), 1, 10) BETWEEN ? AND ?")
+    params.extend([start_date, end_date])
+    where_parts.append("LOWER(COALESCE(CAST(b.employee AS TEXT), '')) LIKE ?")
+    params.append(f"%{str(employee_name or '').strip().lower()}%")
+    sql = f'''SELECT {', '.join(selects)}
+              FROM bookings b
+              {' '.join(joins)}
+              WHERE {' AND '.join(where_parts)}
+              ORDER BY b.start ASC, b.id ASC
+              LIMIT {int(limit)}'''
+    return conn.execute(sql, params).fetchall()
+
+
+def _staff_booking_is_assigned(employee_field, employee_name):
+    target = str(employee_name or '').strip().lower()
+    if not target:
+        return False
+    raw = str(employee_field or '').strip().lower()
+    if not raw:
+        return False
+    parts = [p.strip() for chunk in raw.replace(';', ',').replace('|', ',').split(',') for p in chunk.split(' and ')]
+    return target in parts or target in raw
+
+
+def _staff_booking_detail_for_current_user(conn, cid, employee_name, booking_id):
+    row = _mobile_booking_detail_row(conn, cid, booking_id)
+    if not row:
+        return None
+    if not _staff_booking_is_assigned(dict(row).get('employee'), employee_name):
+        return None
+    return row
+
+
+def _staff_update_booking_status(conn, cid, employee, booking_id, status):
+    if status not in MOBILE_STATUS_VALUES:
+        raise ValueError('Invalid job status.')
+    row = _staff_booking_detail_for_current_user(conn, cid, employee['name'], booking_id)
+    if not row:
+        return None
+    for sql in [
+        'ALTER TABLE bookings ADD COLUMN mobile_status TEXT DEFAULT "Scheduled"',
+        'ALTER TABLE bookings ADD COLUMN mobile_status_updated_at TEXT',
+        'ALTER TABLE bookings ADD COLUMN mobile_status_updated_by TEXT',
+        'ALTER TABLE bookings ADD COLUMN mobile_started_at TEXT',
+        'ALTER TABLE bookings ADD COLUMN mobile_completed_at TEXT'
+    ]:
+        try:
+            conn.execute(sql)
+        except Exception:
+            pass
+    booking_cols = _mobile_columns(conn, 'bookings')
+    params = []
+    where_parts = [_mobile_company_where(booking_cols, 'bookings', cid, params), 'id=?']
+    params.append(booking_id)
+    update_cols = ['mobile_status=?']
+    update_params = [status]
+    updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if 'mobile_status_updated_at' in booking_cols:
+        update_cols.append('mobile_status_updated_at=?')
+        update_params.append(updated_at)
+    if 'mobile_status_updated_by' in booking_cols:
+        update_cols.append('mobile_status_updated_by=?')
+        update_params.append(session.get('username') or employee['name'] or 'Staff')
+    if status == 'In Progress' and 'mobile_started_at' in booking_cols:
+        update_cols.append('mobile_started_at=COALESCE(NULLIF(mobile_started_at, ?), ?)')
+        update_params.extend(['', updated_at])
+    if status == 'Completed' and 'mobile_completed_at' in booking_cols:
+        update_cols.append('mobile_completed_at=?')
+        update_params.append(updated_at)
+    conn.execute(f"UPDATE bookings SET {', '.join(update_cols)} WHERE {' AND '.join(where_parts)}", update_params + params)
+    return updated_at
+
+
+def _staff_append_booking_note(conn, cid, employee, booking_id, note):
+    row = _staff_booking_detail_for_current_user(conn, cid, employee['name'], booking_id)
+    if not row:
+        return None
+    note = str(note or '').strip()
+    if not note:
+        raise ValueError('Please enter a booking note.')
+    try:
+        conn.execute('ALTER TABLE bookings ADD COLUMN booking_notes TEXT')
+    except Exception:
+        pass
+    existing = dict(row).get('booking_notes') or ''
+    stamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+    author = employee['name'] or session.get('username') or 'Staff'
+    entry = f"[{stamp}] {author}: {note}"
+    combined = (str(existing).rstrip() + '\n' + entry).strip() if existing else entry
+    booking_cols = _mobile_columns(conn, 'bookings')
+    params = []
+    where_parts = [_mobile_company_where(booking_cols, 'bookings', cid, params), 'id=?']
+    params.append(booking_id)
+    conn.execute(f"UPDATE bookings SET booking_notes=? WHERE {' AND '.join(where_parts)}", [combined] + params)
+    return combined
+
+
+def _staff_save_booking_attachments(conn, cid, employee, booking_id, files):
+    row = _staff_booking_detail_for_current_user(conn, cid, employee['name'], booking_id)
+    if not row:
+        return None
+    files = files or []
+    saved = []
+    for f in files:
+        if not f or not getattr(f, 'filename', ''):
+            continue
+        if not is_allowed_attachment(f.filename):
+            raise ValueError(f'File type not allowed: {f.filename}')
+        f.stream.seek(0, os.SEEK_END)
+        size = f.stream.tell()
+        f.stream.seek(0)
+        if size > MAX_ATTACHMENT_SIZE:
+            raise ValueError(f'File too large: {f.filename}. Maximum size is 20MB.')
+        safe_original = secure_filename(f.filename) or 'attachment'
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        stored_filename = f'{timestamp}_{safe_original}'
+        folder = os.path.join(app.config['UPLOAD_FOLDER'], 'attachments', f'company_{cid}', 'bookings', f'booking_{booking_id}')
+        os.makedirs(folder, exist_ok=True)
+        target_path = os.path.join(folder, stored_filename)
+        f.save(target_path)
+        rel_path = os.path.relpath(target_path, app.config['UPLOAD_FOLDER'])
+        cur = conn.execute('''INSERT INTO attachments
+                              (company_id, linked_type, linked_id, original_filename, stored_filename, file_path, file_size, mime_type, uploaded_by)
+                              VALUES (?, 'booking', ?, ?, ?, ?, ?, ?, ?)''',
+                           (cid, booking_id, f.filename, stored_filename, rel_path, size, f.mimetype or '', employee['name'] or session.get('username', 'Staff')))
+        saved.append(cur.lastrowid)
+    return saved
+
+
+def _staff_attachment_to_dict(row):
+    data = attachment_to_dict(row)
+    data['download_url'] = url_for('staff_download_attachment', attachment_id=row['id'])
+    return data
+
+
+def _staff_leave_request_dict(row, employee_name=''):
+    r = dict(row)
+    return {
+        'id': r.get('id'),
+        'employee_id': r.get('employee_id'),
+        'employee_name': r.get('employee_name') or employee_name,
+        'leave_type': r.get('leave_type') or 'Annual Leave',
+        'start_date': format_display_date(r.get('start_date')),
+        'end_date': format_display_date(r.get('end_date')),
+        'days': float(r.get('days') or 0),
+        'reason': r.get('reason') or '',
+        'status': r.get('status') or 'Pending',
+        'attachment_file': r.get('attachment_file') or '',
+        'requested_at': format_display_date(r.get('requested_at')),
+        'reviewed_by': r.get('reviewed_by') or '',
+        'reviewed_at': format_display_date(r.get('reviewed_at')),
+        'admin_note': r.get('admin_note') or '',
+        'leave_record_id': r.get('leave_record_id') or ''
+    }
+
+
+def _staff_leave_balances(employee):
+    balances = {'annual': '', 'sick': '', 'family': ''}
+    try:
+        balances['annual'] = round(float(calculate_leave_balance(employee['id'], employee['start_date'] or datetime.now().strftime('%Y-%m-%d'), employee['emp_type'] or 'Full-time (5 Days)', employee['name'] or '')), 2)
+    except Exception:
+        balances['annual'] = 'N/A'
+    try:
+        balances['sick'] = round(float(calculate_sick_leave_balance(employee['id'], employee['start_date'] or datetime.now().strftime('%Y-%m-%d'), employee['emp_type'] or 'Full-time (5 Days)', employee['name'] or '')), 2)
+    except Exception:
+        balances['sick'] = 'N/A'
+    try:
+        balances['family'] = round(float(calculate_family_leave_balance(employee['id'], employee['start_date'] or datetime.now().strftime('%Y-%m-%d'), employee['emp_type'] or 'Full-time (5 Days)', employee['name'] or '')), 2)
+    except Exception:
+        balances['family'] = 'N/A'
+    return balances
+
+
+@app.route('/staff')
+def staff_portal():
+    if not _staff_is_user():
+        return redirect(url_for('hub'))
+    return render_template('staff_portal.html', session=session)
+
+
+@app.route('/staff/mobile')
+def staff_mobile():
+    if not _staff_is_user():
+        return redirect(url_for('hub'))
+    return render_template('staff_portal.html', session=session, mobile_only=True)
+
+
+@app.route('/staff_admin')
+def staff_admin_page():
+    if not _staff_is_admin():
+        return "Forbidden", 403
+    return render_template('staff_admin.html', session=session)
+
+
+@app.route('/api/staff/dashboard')
+def api_staff_dashboard():
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        today = datetime.now().strftime('%Y-%m-%d')
+        future = (datetime.now() + timedelta(days=14)).strftime('%Y-%m-%d')
+        today_rows = _staff_booking_rows(conn, cid, employee['name'], today, today)
+        upcoming_rows = _staff_booking_rows(conn, cid, employee['name'], today, future)
+        leave_rows = conn.execute('''SELECT * FROM staff_leave_requests
+                                     WHERE company_id=? AND employee_id=?
+                                     ORDER BY requested_at DESC, id DESC LIMIT 20''',
+                                  (cid, employee['id'])).fetchall()
+        return jsonify({
+            'status': 'success',
+            'employee': {
+                'id': employee['id'], 'name': employee['name'] or '', 'job_title': employee['job_title'] or '',
+                'emp_number': employee['emp_number'] or '', 'status': employee['status'] or '',
+                'start_date': format_display_date(employee['start_date'] or '')
+            },
+            'balances': _staff_leave_balances(employee),
+            'today_bookings': [_mobile_booking_to_dict(r) for r in today_rows],
+            'upcoming_bookings': [_mobile_booking_to_dict(r, include_notes=False) for r in upcoming_rows[:20]],
+            'leave_requests': [_staff_leave_request_dict(r, employee['name']) for r in leave_rows],
+            'leave_types': STAFF_LEAVE_TYPES
+        })
+    except Exception as exc:
+        return _staff_json_error(f'Staff dashboard could not be loaded: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/bookings')
+def api_staff_bookings():
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    start_date, end_date = _staff_date_range(default_days=30)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        rows = _staff_booking_rows(conn, cid, employee['name'], start_date, end_date)
+        return jsonify({'status': 'success', 'bookings': [_mobile_booking_to_dict(r) for r in rows], 'start_date': start_date, 'end_date': end_date})
+    except Exception as exc:
+        return _staff_json_error(f'Staff bookings could not be loaded: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/bookings/<int:booking_id>')
+def api_staff_booking_detail(booking_id):
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        row = _staff_booking_detail_for_current_user(conn, cid, employee['name'], booking_id)
+        if not row:
+            return _staff_json_error('Booking not found for your staff profile.', 404)
+        item = _mobile_booking_to_dict(row)
+        item['client_phone'] = dict(row).get('client_phone') or ''
+        item['client_email'] = dict(row).get('client_email') or ''
+        item['client_address'] = dict(row).get('client_address') or ''
+        attachments = _mobile_attachment_rows(conn, cid, 'booking', booking_id)
+        item['attachments'] = [_staff_attachment_to_dict(a) for a in attachments]
+        return jsonify({'status': 'success', 'booking': item})
+    except Exception as exc:
+        return _staff_json_error(f'Booking details could not be loaded: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/bookings/<int:booking_id>/start', methods=['POST'])
+def api_staff_start_booking(booking_id):
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        updated_at = _staff_update_booking_status(conn, cid, employee, booking_id, 'In Progress')
+        if not updated_at:
+            return _staff_json_error('Booking not found for your staff profile.', 404)
+        conn.commit()
+        log_action('Staff Portal', 'Started Job', f"{employee['name']} started booking ID {booking_id}.")
+        return jsonify({'status': 'success', 'mobile_status': 'In Progress', 'updated_at': updated_at, 'message': 'Job started.'})
+    except Exception as exc:
+        return _staff_json_error(f'Job could not be started: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/bookings/<int:booking_id>/complete', methods=['POST'])
+def api_staff_complete_booking(booking_id):
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        updated_at = _staff_update_booking_status(conn, cid, employee, booking_id, 'Completed')
+        if not updated_at:
+            return _staff_json_error('Booking not found for your staff profile.', 404)
+        conn.commit()
+        log_action('Staff Portal', 'Completed Job', f"{employee['name']} completed booking ID {booking_id}.")
+        return jsonify({'status': 'success', 'mobile_status': 'Completed', 'updated_at': updated_at, 'message': 'Job completed.'})
+    except Exception as exc:
+        return _staff_json_error(f'Job could not be completed: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/bookings/<int:booking_id>/notes', methods=['POST'])
+def api_staff_booking_notes(booking_id):
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    data = request.get_json(silent=True) or {}
+    note = (data.get('note') or data.get('notes') or '').strip()
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        notes = _staff_append_booking_note(conn, cid, employee, booking_id, note)
+        if notes is None:
+            return _staff_json_error('Booking not found for your staff profile.', 404)
+        conn.commit()
+        log_action('Staff Portal', 'Added Booking Note', f"{employee['name']} added a note to booking ID {booking_id}.")
+        return jsonify({'status': 'success', 'notes': notes, 'message': 'Booking note added.'})
+    except ValueError as exc:
+        return _staff_json_error(str(exc), 400)
+    except Exception as exc:
+        return _staff_json_error(f'Booking note could not be saved: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/bookings/<int:booking_id>/attachments', methods=['GET', 'POST'])
+def api_staff_booking_attachments(booking_id):
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        row = _staff_booking_detail_for_current_user(conn, cid, employee['name'], booking_id)
+        if not row:
+            return _staff_json_error('Booking not found for your staff profile.', 404)
+        if request.method == 'POST':
+            files = request.files.getlist('files')
+            if not files:
+                return _staff_json_error('No files selected.', 400)
+            saved = _staff_save_booking_attachments(conn, cid, employee, booking_id, files)
+            if saved is None:
+                return _staff_json_error('Booking not found for your staff profile.', 404)
+            conn.commit()
+            log_action('Staff Portal', 'Uploaded Booking Attachment', f"{employee['name']} uploaded {len(saved)} file(s) to booking ID {booking_id}.")
+        attachments = _mobile_attachment_rows(conn, cid, 'booking', booking_id)
+        return jsonify({'status': 'success', 'attachments': [_staff_attachment_to_dict(a) for a in attachments], 'message': 'File upload complete.' if request.method == 'POST' else ''})
+    except ValueError as exc:
+        return _staff_json_error(str(exc), 400)
+    except Exception as exc:
+        return _staff_json_error(f'Booking files could not be processed: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/staff/download_attachment/<int:attachment_id>')
+def staff_download_attachment(attachment_id):
+    if not _staff_is_user():
+        return redirect(url_for('hub'))
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return 'Staff profile not found.', 404
+        row = conn.execute("SELECT * FROM attachments WHERE id=? AND company_id=? AND linked_type='booking'", (attachment_id, cid)).fetchone()
+        if not row:
+            return 'Attachment not found.', 404
+        booking = _staff_booking_detail_for_current_user(conn, cid, employee['name'], row['linked_id'])
+        if not booking:
+            return 'Forbidden', 403
+        abs_path = os.path.abspath(os.path.join(app.config['UPLOAD_FOLDER'], row['file_path']))
+        uploads_root = os.path.abspath(app.config['UPLOAD_FOLDER'])
+        if not abs_path.startswith(uploads_root) or not os.path.exists(abs_path):
+            return 'Attachment file missing.', 404
+        return send_file(abs_path, as_attachment=True, download_name=row['original_filename'])
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/leave_requests', methods=['GET', 'POST'])
+def api_staff_leave_requests():
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        if request.method == 'POST':
+            data = request.form if request.form else (request.get_json(silent=True) or {})
+            leave_type = (data.get('leave_type') or 'Annual Leave').strip()
+            if leave_type not in STAFF_LEAVE_TYPES:
+                leave_type = 'Other Leave'
+            start_date = (data.get('start_date') or '').strip()
+            end_date = (data.get('end_date') or start_date).strip()
+            days = _staff_leave_days(start_date, end_date)
+            if days <= 0:
+                return _staff_json_error('Please select a valid leave start and end date.', 400)
+            reason = (data.get('reason') or '').strip()
+            attachment_file = _staff_save_leave_attachment(request.files.get('attachment')) if request.files else None
+            conn.execute('''INSERT INTO staff_leave_requests
+                            (company_id, employee_id, leave_type, start_date, end_date, days, reason, status, attachment_file, requested_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?)''',
+                         (cid, employee['id'], leave_type, start_date, end_date, days, reason, attachment_file, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            conn.commit()
+            log_action('Staff Portal', 'Submitted Leave Request', f"{employee['name']} requested {days:g} day(s) of {leave_type}.")
+            return jsonify({'status': 'success', 'message': 'Leave request submitted for approval.'})
+        rows = conn.execute('''SELECT * FROM staff_leave_requests
+                               WHERE company_id=? AND employee_id=?
+                               ORDER BY requested_at DESC, id DESC LIMIT 100''',
+                            (cid, employee['id'])).fetchall()
+        return jsonify({'status': 'success', 'leave_requests': [_staff_leave_request_dict(r, employee['name']) for r in rows]})
+    except Exception as exc:
+        return _staff_json_error(f'Leave requests could not be processed: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/admin/employees')
+def api_staff_admin_employees():
+    if not _staff_is_admin():
+        return _staff_json_error('Staff Portal administration access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('''SELECT e.id, e.name, e.emp_number, e.job_title, e.status, e.email,
+                                      u.id AS staff_user_id, u.username AS staff_username, u.is_staff AS staff_enabled
+                               FROM employees e
+                               LEFT JOIN users u ON u.employee_id=e.id AND u.company_id=e.company_id AND COALESCE(u.is_staff,0)=1
+                               WHERE e.company_id=?
+                               ORDER BY e.name ASC''', (cid,)).fetchall()
+        return jsonify({'status': 'success', 'employees': [dict(r) for r in rows]})
+    except Exception as exc:
+        return _staff_json_error(f'Staff employee list could not be loaded: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/admin/accounts/save', methods=['POST'])
+def api_staff_admin_account_save():
+    if not _staff_is_admin():
+        return _staff_json_error('Staff Portal administration access is required.', 403)
+    data = request.get_json(silent=True) or {}
+    cid = session.get('company_id')
+    try:
+        employee_id = int(data.get('employee_id') or 0)
+    except Exception:
+        return _staff_json_error('Invalid employee selected.', 400)
+    username = (data.get('username') or '').strip()
+    password = (data.get('password') or '').strip()
+    enabled = bool(data.get('enabled', True))
+    if enabled and not username:
+        return _staff_json_error('Please enter a username for this staff account.', 400)
+    conn = get_db_connection()
+    try:
+        employee = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (employee_id, cid)).fetchone()
+        if not employee:
+            return _staff_json_error('Employee not found for this company.', 404)
+        existing = conn.execute('SELECT * FROM users WHERE company_id=? AND employee_id=? AND COALESCE(is_staff,0)=1', (cid, employee_id)).fetchone()
+        try:
+            if existing:
+                employee_email = (dict(employee).get('email') or '').strip()
+                if password:
+                    conn.execute('''UPDATE users SET username=?, email=?, password_hash=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_invoicing=0, can_accounting=0, is_company_admin=0
+                                    WHERE id=? AND company_id=?''',
+                                 (username or existing['username'], employee_email, generate_password_hash(password), employee_id, 1 if enabled else 0, existing['id'], cid))
+                else:
+                    conn.execute('''UPDATE users SET username=?, email=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_invoicing=0, can_accounting=0, is_company_admin=0
+                                    WHERE id=? AND company_id=?''',
+                                 (username or existing['username'], employee_email, employee_id, 1 if enabled else 0, existing['id'], cid))
+            elif enabled:
+                employee_email = (dict(employee).get('email') or '').strip()
+                conn.execute('''INSERT INTO users (username, email, company_id, password_hash, employee_id, is_staff, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, is_superadmin, is_company_admin)
+                                VALUES (?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 0)''',
+                             (username, employee_email, cid, generate_password_hash(password or 'Password123'), employee_id))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return _staff_json_error('That username already exists. Please choose another username.', 400)
+        log_action('Staff Portal', 'Updated Staff Account', f"Updated portal access for {employee['name']}.")
+        return jsonify({'status': 'success', 'message': 'Staff portal account saved.'})
+    except Exception as exc:
+        return _staff_json_error(f'Staff account could not be saved: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/admin/leave_requests')
+def api_staff_admin_leave_requests():
+    if not _staff_is_admin():
+        return _staff_json_error('Staff Portal administration access is required.', 403)
+    cid = session.get('company_id')
+    status = (request.args.get('status') or 'Pending').strip()
+    if status not in STAFF_LEAVE_STATUSES and status != 'All':
+        status = 'Pending'
+    conn = get_db_connection()
+    try:
+        params = [cid]
+        where = 'r.company_id=?'
+        if status != 'All':
+            where += " AND COALESCE(r.status, 'Pending')=?"
+            params.append(status)
+        rows = conn.execute(f'''SELECT r.*, e.name AS employee_name, e.emp_number AS emp_number, e.job_title AS job_title
+                                FROM staff_leave_requests r
+                                JOIN employees e ON e.id=r.employee_id AND e.company_id=r.company_id
+                                WHERE {where}
+                                ORDER BY r.requested_at DESC, r.id DESC
+                                LIMIT 300''', params).fetchall()
+        return jsonify({'status': 'success', 'leave_requests': [_staff_leave_request_dict(r) for r in rows]})
+    except Exception as exc:
+        return _staff_json_error(f'Leave requests could not be loaded: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/admin/leave_requests/<int:request_id>/review', methods=['POST'])
+def api_staff_admin_review_leave(request_id):
+    if not _staff_is_admin():
+        return _staff_json_error('Staff Portal administration access is required.', 403)
+    data = request.get_json(silent=True) or {}
+    decision = (data.get('decision') or '').strip().title()
+    if decision not in ('Approve', 'Decline'):
+        return _staff_json_error('Please choose Approve or Decline.', 400)
+    admin_note = (data.get('admin_note') or '').strip()
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        req = conn.execute('''SELECT r.*, e.name AS employee_name
+                              FROM staff_leave_requests r
+                              JOIN employees e ON e.id=r.employee_id AND e.company_id=r.company_id
+                              WHERE r.id=? AND r.company_id=?''', (request_id, cid)).fetchone()
+        if not req:
+            return _staff_json_error('Leave request not found.', 404)
+        if (req['status'] or 'Pending') != 'Pending':
+            return _staff_json_error('Only pending leave requests can be reviewed.', 400)
+        reviewed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        new_status = 'Approved' if decision == 'Approve' else 'Declined'
+        leave_record_id = req['leave_record_id'] or None
+        if new_status == 'Approved' and not leave_record_id:
+            cur = conn.execute('''INSERT INTO leave_records (company_id, employee_id, date_taken, days, leave_type, document_file)
+                                  VALUES (?, ?, ?, ?, ?, ?)''',
+                               (cid, req['employee_id'], req['start_date'], req['days'], req['leave_type'], req['attachment_file']))
+            leave_record_id = getattr(cur, 'lastrowid', None)
+        conn.execute('''UPDATE staff_leave_requests
+                        SET status=?, reviewed_by=?, reviewed_at=?, admin_note=?, leave_record_id=?
+                        WHERE id=? AND company_id=?''',
+                     (new_status, session.get('username', ''), reviewed_at, admin_note, leave_record_id, request_id, cid))
+        conn.commit()
+        log_action('Staff Portal', f'{new_status} Leave Request', f"{new_status} leave request for {req['employee_name']}.")
+        return jsonify({'status': 'success', 'message': f'Leave request {new_status.lower()}.'})
+    except Exception as exc:
+        return _staff_json_error(f'Leave request could not be reviewed: {exc}', 500)
+    finally:
+        conn.close()
 
 # ==========================================================
 # EASY ADMIN MOBILE PWA ROUTES
@@ -2474,6 +3325,8 @@ def _mobile_booking_to_dict(row, include_notes=True):
         'mobile_status': r.get('mobile_status') or 'Scheduled',
         'mobile_status_updated_at': r.get('mobile_status_updated_at') or '',
         'mobile_status_updated_by': r.get('mobile_status_updated_by') or '',
+        'mobile_started_at': r.get('mobile_started_at') or '',
+        'mobile_completed_at': r.get('mobile_completed_at') or '',
         'invoiced': bool(r.get('is_invoiced')),
         'attachment_count': r.get('attachment_count') or 0,
         'overtime_hours': overtime_hours,
@@ -2912,7 +3765,9 @@ def api_mobile_booking_status(booking_id):
         for sql in [
             'ALTER TABLE bookings ADD COLUMN mobile_status TEXT DEFAULT "Scheduled"',
             'ALTER TABLE bookings ADD COLUMN mobile_status_updated_at TEXT',
-            'ALTER TABLE bookings ADD COLUMN mobile_status_updated_by TEXT'
+            'ALTER TABLE bookings ADD COLUMN mobile_status_updated_by TEXT',
+            'ALTER TABLE bookings ADD COLUMN mobile_started_at TEXT',
+            'ALTER TABLE bookings ADD COLUMN mobile_completed_at TEXT'
         ]:
             try:
                 conn.execute(sql)
@@ -2927,6 +3782,12 @@ def api_mobile_booking_status(booking_id):
         if 'mobile_status_updated_by' in booking_cols:
             update_cols.append('mobile_status_updated_by=?')
             update_params.append(session.get('username', ''))
+        if new_status == 'In Progress' and 'mobile_started_at' in booking_cols:
+            update_cols.append('mobile_started_at=COALESCE(NULLIF(mobile_started_at, ?), ?)')
+            update_params.extend(['', updated_at])
+        if new_status == 'Completed' and 'mobile_completed_at' in booking_cols:
+            update_cols.append('mobile_completed_at=?')
+            update_params.append(updated_at)
         update_params.extend(params)
         conn.execute(f"UPDATE bookings SET {', '.join(update_cols)} WHERE {' AND '.join(where_parts)}", update_params)
         conn.commit()
@@ -3991,6 +4852,7 @@ def admin_import_full_database():
 def save_user():
     if not session.get('is_superadmin') and not session.get('is_company_admin'): return "Forbidden", 403
     data = request.get_json()
+    user_email = (data.get('email') or '').strip()
     conn = get_db_connection()
     if not session.get('is_superadmin'):
         cid = session['company_id']
@@ -4014,11 +4876,11 @@ def save_user():
     action_msg = None
     try:
         if data.get('id'):
-            if data.get('password'): conn.execute('UPDATE users SET username=?, company_id=?, password_hash=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], cid, generate_password_hash(data['password']), can_b, can_f, can_p, can_i, can_a, is_comp_admin, data['id']))
-            else: conn.execute('UPDATE users SET username=?, company_id=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], cid, can_b, can_f, can_p, can_i, can_a, is_comp_admin, data['id']))
+            if data.get('password'): conn.execute('UPDATE users SET username=?, email=?, company_id=?, password_hash=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], user_email, cid, generate_password_hash(data['password']), can_b, can_f, can_p, can_i, can_a, is_comp_admin, data['id']))
+            else: conn.execute('UPDATE users SET username=?, email=?, company_id=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], user_email, cid, can_b, can_f, can_p, can_i, can_a, is_comp_admin, data['id']))
             action_msg = ('System Admin', 'Updated User', f"Updated settings for user: {data['username']}")
         else:
-            conn.execute('INSERT INTO users (username, company_id, password_hash, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, is_superadmin, is_company_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)', (data['username'], cid, generate_password_hash(data['password'] or 'Password123'), can_b, can_f, can_p, can_i, can_a, is_comp_admin))
+            conn.execute('INSERT INTO users (username, email, company_id, password_hash, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, is_superadmin, is_company_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)', (data['username'], user_email, cid, generate_password_hash(data['password'] or 'Password123'), can_b, can_f, can_p, can_i, can_a, is_comp_admin))
             action_msg = ('System Admin', 'Created User', f"Created new user account: {data['username']}")
         conn.commit()
     except sqlite3.IntegrityError: return jsonify({"status": "error", "message": "Username already exists."})
@@ -4032,11 +4894,11 @@ def get_users():
     if not session.get('is_superadmin') and not session.get('is_company_admin'): return "Forbidden", 403
     conn = get_db_connection()
     if session.get('is_superadmin'):
-        users = conn.execute('''SELECT u.id, u.username, u.can_booking, u.can_finance, u.can_payroll, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 ORDER BY u.is_superadmin DESC, u.username ASC''').fetchall()
     else:
-        users = conn.execute('''SELECT u.id, u.username, u.can_booking, u.can_finance, u.can_payroll, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 WHERE u.company_id = ? ORDER BY u.is_company_admin DESC, u.username ASC''', (session['company_id'],)).fetchall()
     conn.close()
@@ -4106,7 +4968,11 @@ def bookings():
         like = f'%{search_q}%'
         where += ' AND (COALESCE(b.title, "") LIKE ? OR COALESCE(c.name, "") LIKE ? OR COALESCE(c.surname, "") LIKE ? OR COALESCE(c.company_name, "") LIKE ? OR COALESCE(b.employee, "") LIKE ? OR COALESCE(b.booking_type, "") LIKE ? OR COALESCE(p.project_name, "") LIKE ?)'
         params.extend([like, like, like, like, like, like, like])
-    bookings = conn.execute(f'''SELECT b.*, p.project_name, p.project_code, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
+    bookings = conn.execute(f'''SELECT b.*, p.project_name, p.project_code,
+                                      c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name,
+                                      c.address AS client_address, c.building_number AS client_building_number, c.street_name AS client_street_name,
+                                      c.suburb AS client_suburb, c.postal_code AS client_postal_code, c.phone AS client_phone, c.email AS client_email,
+                                      (SELECT COUNT(*) FROM attachments a WHERE a.company_id=b.company_id AND a.linked_type='booking' AND a.linked_id=b.id) AS attachment_count
                               FROM bookings b
                               LEFT JOIN projects p ON p.id=b.project_id AND p.company_id=b.company_id
                               LEFT JOIN clients c ON c.id=b.client_id AND c.company_id=b.company_id
@@ -4135,6 +5001,16 @@ def bookings():
         project_suffix = f" | {r['project_name']}" if r['project_name'] else ''
         title = f"{client_name} - {emp_display} ({r['booking_type'] or 'Clean'}){project_suffix}"
         custom_values = get_custom_field_values_for_record(conn, cid, 'booking', r['id'])
+        r_dict = dict(r)
+        client_address = compose_client_address(
+            r_dict.get('client_building_number'),
+            r_dict.get('client_street_name'),
+            r_dict.get('client_suburb'),
+            r_dict.get('client_postal_code'),
+            r_dict.get('client_address')
+        )
+        is_invoiced_raw = r_dict.get('is_invoiced')
+        is_invoiced = str(is_invoiced_raw).strip().lower() in ('1', 'true', 'yes', 'y')
         
         events.append({
             "id": r["id"], 
@@ -4145,6 +5021,11 @@ def bookings():
                 "event_type": "booking",
                 "client": client_name, 
                 "client_id": r['client_id'] or '',
+                "client_address": client_address or '',
+                "client_phone": r_dict.get('client_phone') or '',
+                "client_email": r_dict.get('client_email') or '',
+                "booking_title": r_dict.get('title') or client_name,
+                "is_invoiced": is_invoiced,
                 "employee": r['employee'] or 'Unassigned', 
                 "booking_type": r['booking_type'], 
                 "transport": r['transport'] or '', 
@@ -4153,6 +5034,12 @@ def bookings():
                 "project_id": r['project_id'] or '',
                 "project_name": r['project_name'] or '',
                 "project_code": r['project_code'] or '',
+                "mobile_status": r_dict.get('mobile_status') or 'Scheduled',
+                "mobile_status_updated_at": r_dict.get('mobile_status_updated_at') or '',
+                "mobile_status_updated_by": r_dict.get('mobile_status_updated_by') or '',
+                "mobile_started_at": r_dict.get('mobile_started_at') or '',
+                "mobile_completed_at": r_dict.get('mobile_completed_at') or '',
+                "attachment_count": r_dict.get('attachment_count') or 0,
                 "custom_fields": custom_values
             }
         })
@@ -5446,6 +6333,42 @@ def payroll_index():
         payroll_q=payroll_q,
         session=session
     )
+
+@app.route('/system_email_settings', methods=['GET', 'POST'])
+def system_email_settings():
+    if not session.get('is_superadmin'):
+        return 'Access Denied: Only Super Admins can manage System Email Settings.', 403
+    success_msg = None
+    if request.method == 'POST':
+        save_system_email_settings(request.form)
+        success_msg = 'System Email Settings saved successfully!'
+        log_action('System', 'Updated System Email Settings', 'Updated global SMTP settings for system generated emails.')
+    settings_data = get_system_email_settings()
+    return render_template('system_email_settings.html', settings=settings_data, session=session, success_msg=success_msg)
+
+@app.route('/api/test_system_email_connection', methods=['POST'])
+def test_system_email_connection():
+    if not session.get('is_superadmin'):
+        return jsonify({'status': 'error', 'message': 'Forbidden: Only Super Admins can test System Email Settings.'}), 403
+    data = request.get_json(silent=True) or {}
+    server_host = (data.get('smtp_server') or '').strip()
+    port_raw = (data.get('smtp_port') or '').strip()
+    user = (data.get('smtp_user') or '').strip()
+    password = data.get('smtp_pass') or ''
+    if not server_host or not port_raw or not user or not password:
+        return jsonify({'status': 'error', 'message': 'Failed: Please fill in Server, Port, Username, and Password.'})
+    try:
+        port = int(port_raw)
+        if port == 587:
+            with smtplib.SMTP(server_host, port, timeout=10) as smtp:
+                smtp.starttls()
+                smtp.login(user, password)
+        else:
+            with smtplib.SMTP_SSL(server_host, port, timeout=10) as smtp:
+                smtp.login(user, password)
+        return jsonify({'status': 'success', 'message': 'Successful: system email SMTP connection established and authenticated.'})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': f'Failed: {exc}'})
 
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
