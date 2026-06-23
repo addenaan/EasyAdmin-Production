@@ -1,0 +1,2146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ session.get('company_name') }} | Invoicing & Quotes</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <style>
+        body { background-color: #f8f9fa; padding-top: 30px; font-family: sans-serif; }
+        .nav-tabs .nav-link { color: #6c757d; background-color: #e9ecef; border: 1px solid #dee2e6; margin-right: 5px; }
+        .nav-tabs .nav-link.active { font-weight: bold; border-bottom-color: transparent; }
+        .tab-content { background: white; padding: 20px; border: 1px solid #dee2e6; border-top: none; border-radius: 0 0 5px 5px; box-shadow: 0 .125rem .25rem rgba(0,0,0,.075);}
+        
+        /* Removed border and box-shadow to prevent the grey shadow on the PDF */
+        .doc-container { padding: 50px; background: white; width: 100%; max-width: 850px; margin: auto; }
+        
+        .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 40px; border-bottom: 2px solid #0dcaf0; padding-bottom: 20px; }
+        .doc-logo { max-width: 210px; max-height: 112px; object-fit: contain; display: block; margin-bottom: 10px; }
+        .company-details { font-size: 0.85rem; color: #555; margin-top: 8px;}
+        .doc-title { font-size: 2.5rem; font-weight: bold; letter-spacing: 2px; color: #0dcaf0; text-align: right; margin-bottom: 5px; }
+        .meta-table { font-size: 0.9rem; text-align: right; }
+        .meta-table td { padding: 2px 0 2px 15px; }
+        
+        .client-box { background: #f8f9fa; padding: 15px; border-left: 4px solid #0dcaf0; margin-bottom: 30px; font-size: 9pt; }
+        .items-table { font-size: 9pt; }
+        .items-table th { background-color: #0dcaf0 !important; color: white !important; font-weight: bold; }
+        .amount-col { text-align: right; width: 120px;}
+        .line-total-display { background-color: #f8f9fa !important; font-weight: bold; color: #212529; }
+        .unit-price-col { text-align: right; width: 110px;}
+        .qty-col { text-align: right; width: 70px;}
+        .date-col { width: 130px; }
+        
+        .totals-box { width: 300px; float: right; margin-top: 20px; font-size: 9pt; }
+        .totals-box table { width: 100%; }
+        .totals-box td { padding: 5px 0; }
+        .grand-total { font-weight: bold; border-top: 2px solid #dee2e6; color: #0dcaf0; font-size: 9pt; }
+        
+        .checklist-row { transition: background-color 0.2s; }
+        .checklist-row:hover { background-color: #e9ecef; }
+        
+        /* Input styling inside table */
+        .table-input { border: 1px solid transparent; background: transparent; padding: 2px 5px; width: 100%; }
+        .table-input:focus { border: 1px solid #0dcaf0; background: white; outline: none; border-radius: 4px;}
+
+
+        /* Compact invoice list layout */
+        .invoice-list-table { font-size: 0.92rem; table-layout: fixed; }
+        .invoice-list-table th, .invoice-list-table td { padding: 0.65rem 0.5rem; vertical-align: middle; }
+        .invoice-list-table .col-inv-no { width: 80px; }
+        .invoice-list-table .col-client { width: 190px; }
+        .invoice-list-table .col-date { width: 95px; }
+        .invoice-list-table .col-amount { width: 125px; text-align: right; white-space: nowrap; }
+        .invoice-list-table .col-status { width: 115px; text-align: center; }
+        .invoice-list-table .col-actions { width: 105px; text-align: center; }
+        .invoice-list-table .invoice-number { word-break: normal; overflow-wrap: anywhere; }
+        .invoice-list-table .date-wrap { display: inline-block; min-width: 76px; }
+        .invoice-list-table .dropdown-menu { font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div class="container mb-5">
+        <div class="d-flex justify-content-between align-items-center mb-4 pb-3 border-bottom">
+            <div class="d-flex align-items-center">
+                {% if session.company_logo %}
+                    <img src="/uploads/logos/{{ session.company_logo }}" alt="Logo" class="shadow-sm me-3" style="width: 60px; height: 60px; object-fit: contain; border-radius: 8px; background-color: white;">
+                {% else %}
+                    <div class="bg-info text-white d-flex align-items-center justify-content-center rounded me-3 shadow-sm" style="width: 60px; height: 60px; font-size: 28px; font-weight: bold;">
+                        {{ session.company_name[0] }}
+                    </div>
+                {% endif %}
+                <div><h2 class="mb-0 text-info fw-bold">Invoicing & Quotes</h2><span class="text-muted">{{ session.company_name }}</span></div>
+            </div>
+            <div>
+                <a href="/hub" class="btn btn-secondary me-2">🔙 Hub</a>
+                <a href="/logout" class="btn btn-outline-danger">Logout</a>
+            </div>
+        </div>
+
+        <ul class="nav nav-tabs nav-fill" id="invTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active text-info-emphasis" id="invoices-tab" data-bs-toggle="tab" data-bs-target="#tab-invoices" type="button">🧾 Tax Invoices</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link text-primary" id="quotes-tab" data-bs-toggle="tab" data-bs-target="#tab-quotes" type="button">📋 Official Quotes</button>
+            </li>
+        </ul>
+
+        <div class="tab-content" id="invTabsContent">
+            
+            <div class="tab-pane fade show active" id="tab-invoices" role="tabpanel">
+                <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
+                    <h5 class="mb-0 text-secondary">Billing History</h5>
+                    <div>
+                        <button class="btn btn-sm btn-outline-success fw-bold shadow-sm me-2" onclick="openClientProfile(null)">👤 New Client</button>
+                        <button class="btn btn-sm btn-outline-dark fw-bold shadow-sm me-2" onclick="openClientDirectory()">🗂️ Client Directory</button>
+                        <button class="btn btn-sm btn-outline-primary fw-bold shadow-sm me-2" onclick="openServiceMarginsModal()">⚙️ Service Margins</button>
+                        <button class="btn btn-sm btn-outline-dark fw-bold shadow-sm me-2" onclick="openStatementConfigModal()">📄 Client Statement</button>
+                        
+                        <button class="btn btn-sm btn-outline-secondary fw-bold shadow-sm me-2" onclick="openInvSettingsModal()">⚙️ Settings</button>
+                        <button class="btn btn-sm btn-info text-white fw-bold shadow-sm" onclick="openCreateInvoiceModal()">+ Draft New Invoice</button>
+                    </div>
+                </div>
+
+                <form method="GET" action="/invoicing" class="row g-2 align-items-end mb-3 bg-light border rounded p-2">
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-muted mb-1">Server Search</label>
+                        <input type="text" name="invoice_q" class="form-control form-control-sm" value="{{ invoice_q or '' }}" placeholder="Search client, date, due date, or status...">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small fw-bold text-muted mb-1">Rows</label>
+                        <select name="invoice_per_page" class="form-select form-select-sm">
+                            {% for n in [25, 50, 100] %}<option value="{{ n }}" {% if invoice_pagination and invoice_pagination.per_page == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-sm btn-info text-white fw-bold" type="submit">Search</button>
+                        <a href="/invoicing" class="btn btn-sm btn-outline-secondary">Reset</a>
+                        <span class="small text-muted ms-2">Showing {{ invoice_pagination.start }}-{{ invoice_pagination.end }} of {{ invoice_pagination.total }}</span>
+                    </div>
+                </form>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle invoice-list-table">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="col-inv-no">Inv #</th>
+                                <th class="col-client">Client Name</th>
+                                <th class="col-date">Issue Date</th>
+                                <th class="col-date">Due Date</th>
+                                <th class="col-amount">Total Amount</th>
+                                <th class="col-amount">Outstanding Amount</th>
+                                <th class="col-status">Status</th>
+                                <th class="col-actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="invoiceHistoryBody">
+                            {% for inv in invoices %}
+                            <tr>
+                                <td><strong class="text-info invoice-number">{{ inv.formatted_num }}</strong></td>
+                                <td><strong>{{ inv.client_name }}</strong>{% if inv.invoice_type == 'project' and inv.project_name %}<br><span class="badge bg-dark mt-1">Project: {{ inv.project_name }}</span>{% endif %}</td>
+                                <td><span class="date-wrap">{{ inv.date|fmt_date }}</span></td>
+                                <td><span class="date-wrap">{{ inv.due_date|fmt_date }}</span></td>
+                                <td class="fw-bold col-amount">{{ inv.total|fmt_money }}</td>
+                                <td class="fw-bold col-amount {% if inv.outstanding_amount|float > 0 %}text-danger{% else %}text-success{% endif %}">{{ (inv.outstanding_amount|default(inv.total))|fmt_money }}</td>
+                                <td class="col-status">
+                                    {% if inv.status == 'Paid' %}<span class="badge bg-success">Paid</span>
+                                    {% elif inv.status == 'Partially Paid' %}<span class="badge bg-warning text-dark">Partially Paid</span>
+                                    {% elif inv.status == 'Credited' %}<span class="badge bg-secondary">Credited</span>
+                                    {% elif inv.status == 'Partially Credited' %}<span class="badge bg-primary">Partially Credited</span>
+                                    {% elif inv.status == 'Partially Paid/Credited' %}<span class="badge bg-primary">Partially Paid/Credited</span>
+                                    {% elif inv.status == 'Settled with Credit' %}<span class="badge bg-success">Settled with Credit</span>
+                                    {% else %}<span class="badge bg-danger">Unpaid</span>{% endif %}
+                                    <br>
+                                    {% if inv.accounting_journal_id|default(None) %}
+                                        <span class="badge bg-dark mt-1">Accounting Posted</span>
+                                    {% else %}
+                                        <span class="badge bg-light text-dark border mt-1">Accounting Not Posted</span>
+                                    {% endif %}
+                                </td>
+                                <td class="col-actions">
+                                    <div class="dropdown">
+                                        <button class="btn btn-sm btn-outline-dark dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Actions</button>
+                                        <ul class="dropdown-menu dropdown-menu-end">
+                                            <li><button class="dropdown-item" type="button" onclick="viewInvoice({{ inv.id }}, false)">👁️ View Invoice</button></li>
+                                            {% if inv.accounting_journal_id|default(None) %}
+                                                <li><button class="dropdown-item text-success" type="button" disabled>📘 Posted to Accounting #{{ inv.accounting_journal_id }}</button></li>
+                                            {% else %}
+                                                <li><button class="dropdown-item text-primary" type="button" onclick="postInvoiceAccounting({{ inv.id }}, '{{ inv.formatted_num }}')">📘 Post Invoice to Accounting</button></li>
+                                            {% endif %}
+                                            {% if inv.payment_count|default(0) > 0 %}
+                                                {% if inv.payment_count == 1 %}
+                                                    {% set receipt = inv.payments[0] %}
+                                                    <li><button class="dropdown-item text-success" type="button" onclick="viewReceipt({{ receipt.id }})">🧾 Download Receipt</button></li>
+                                                {% else %}
+                                                    <li><hr class="dropdown-divider"></li>
+                                                    <li><h6 class="dropdown-header">Receipts</h6></li>
+                                                    {% for receipt in inv.payments %}
+                                                    <li>
+                                                        <button class="dropdown-item text-success small" type="button" onclick="viewReceipt({{ receipt.id }})">
+                                                            🧾 Receipt #{{ receipt.id }} - {{ (receipt.amount|float)|fmt_money }} - {{ receipt.payment_date|fmt_date }}
+                                                        </button>
+                                                    </li>
+                                                    {% endfor %}
+                                                    <li><hr class="dropdown-divider"></li>
+                                                {% endif %}
+                                            {% endif %}
+                                            {% if inv.credit_count|default(0) > 0 %}
+                                                <li><hr class="dropdown-divider"></li>
+                                                <li><h6 class="dropdown-header">Credit Notes</h6></li>
+                                                {% for credit in inv.credit_notes %}
+                                                <li>
+                                                    <button class="dropdown-item text-secondary small" type="button" onclick="viewCreditNote({{ credit.id }})">
+                                                        ↩️ Credit #{{ credit.id }} - {{ (credit.amount|float)|fmt_money }} - {{ credit.credit_date|fmt_date }}{% if credit.accounting_journal_id|default(None) %} · Posted{% endif %}
+                                                    </button>
+                                                    {% if not credit.accounting_journal_id|default(None) %}
+                                                    <button class="dropdown-item text-primary small" type="button" onclick="postCreditNoteAccounting({{ credit.id }}, 'CN-{{ '%04d'|format(credit.id|int) }}')">
+                                                        📘 Post Credit Note to Accounting
+                                                    </button>
+                                                    {% endif %}
+                                                </li>
+                                                {% endfor %}
+                                            {% endif %}
+                                            {% if inv.outstanding_amount|float > 0 %}
+                                                <li><hr class="dropdown-divider"></li>
+                                                <li><button class="dropdown-item" type="button" onclick="openPaymentModal({{ inv.id }}, '{{ inv.formatted_num }}', {{ '%.2f'|format(inv.outstanding_amount) }})">💵 Record Payment</button></li>
+                                                <li><button class="dropdown-item text-danger" type="button" onclick="issueCreditNote({{ inv.id }}, '{{ inv.formatted_num }}', {{ '%.2f'|format(inv.outstanding_amount) }})">↩️ Credit Note</button></li>
+                                            {% endif %}
+                                        </ul>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mt-2 mb-3">
+                    <div class="small text-muted">Invoice page {{ invoice_pagination.page }} of {{ invoice_pagination.pages }}</div>
+                    <div>
+                        {% if invoice_pagination.has_prev %}<a class="btn btn-sm btn-outline-dark" href="/invoicing?invoice_q={{ invoice_q|urlencode }}&invoice_per_page={{ invoice_pagination.per_page }}&invoice_page={{ invoice_pagination.prev_page }}">Previous</a>{% endif %}
+                        {% if invoice_pagination.has_next %}<a class="btn btn-sm btn-outline-dark ms-1" href="/invoicing?invoice_q={{ invoice_q|urlencode }}&invoice_per_page={{ invoice_pagination.per_page }}&invoice_page={{ invoice_pagination.next_page }}">Next</a>{% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="tab-quotes" role="tabpanel">
+                <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
+                    <h5 class="mb-0 text-secondary">Quote History</h5>
+                    <div>
+                        <button class="btn btn-sm btn-outline-success fw-bold shadow-sm me-2" onclick="openClientProfile(null)">👤 New Client</button>
+                        <button class="btn btn-sm btn-outline-dark fw-bold shadow-sm me-2" onclick="openClientDirectory()">🗂️ Client Directory</button>
+                        <button class="btn btn-sm btn-outline-primary fw-bold shadow-sm me-2" onclick="openServiceMarginsModal()">⚙️ Service Margins</button>
+                        <button class="btn btn-sm btn-outline-secondary fw-bold shadow-sm me-2" onclick="openInvSettingsModal()">⚙️ Settings</button>
+                        <button class="btn btn-sm btn-primary fw-bold shadow-sm" onclick="openCreateQuoteModal()">+ Draft New Quote</button>
+                    </div>
+                </div>
+
+                <form method="GET" action="/invoicing" class="row g-2 align-items-end mb-3 bg-light border rounded p-2">
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-muted mb-1">Server Search</label>
+                        <input type="text" name="quote_q" class="form-control form-control-sm" value="{{ quote_q or '' }}" placeholder="Search client, date, valid until, or status...">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small fw-bold text-muted mb-1">Rows</label>
+                        <select name="quote_per_page" class="form-select form-select-sm">
+                            {% for n in [25, 50, 100] %}<option value="{{ n }}" {% if quote_pagination and quote_pagination.per_page == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-sm btn-primary fw-bold" type="submit">Search</button>
+                        <a href="/invoicing" class="btn btn-sm btn-outline-secondary">Reset</a>
+                        <span class="small text-muted ms-2">Showing {{ quote_pagination.start }}-{{ quote_pagination.end }} of {{ quote_pagination.total }}</span>
+                    </div>
+                </form>
+                <table class="table table-hover align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Quote #</th><th>Client Name</th><th>Issue Date</th><th>Valid Until</th><th>Total Amount</th><th>Status</th><th class="text-center">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="quoteHistoryBody">
+                        {% for q in quotes %}
+                        <tr>
+                            <td><strong class="text-primary">{{ q.formatted_num }}</strong></td>
+                            <td><strong>{{ q.client_name }}</strong></td>
+                            <td>{{ q.date|fmt_date }}</td>
+                            <td>{{ q.valid_until }}</td>
+                            <td class="fw-bold">{{ q.total|fmt_money }}</td>
+                            <td>
+                                {% if q.status == 'Accepted' %}<span class="badge bg-success">Accepted</span>
+                                {% elif q.status == 'Rejected' %}<span class="badge bg-danger">Rejected</span>
+                                {% elif q.status == 'Expired' %}<span class="badge bg-warning text-dark">Expired</span>
+                                {% elif q.status == 'Converted' %}<span class="badge bg-primary">Converted to Invoice</span>
+                                {% else %}<span class="badge bg-secondary">Pending</span>{% endif %}
+                            </td>
+                            <td class="text-center">
+                                <button class="btn btn-sm btn-outline-dark" onclick="viewQuote({{ q.id }})">👁️ View PDF</button>
+                                {% if q.status == 'Pending' %}
+                                <button class="btn btn-sm btn-outline-success ms-1" onclick="markQuoteStatus({{ q.id }}, 'Accepted')">✔ Accept</button>
+                                <button class="btn btn-sm btn-outline-danger ms-1" onclick="markQuoteStatus({{ q.id }}, 'Rejected')">X Reject</button>
+                                {% elif q.status == 'Accepted' %}
+                                <button class="btn btn-sm btn-success ms-1" onclick="convertQuoteToInvoice({{ q.id }})">➡ Convert to Invoice</button>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <div class="d-flex justify-content-between align-items-center mt-2 mb-3">
+                    <div class="small text-muted">Quote page {{ quote_pagination.page }} of {{ quote_pagination.pages }}</div>
+                    <div>
+                        {% if quote_pagination.has_prev %}<a class="btn btn-sm btn-outline-dark" href="/invoicing?quote_q={{ quote_q|urlencode }}&quote_per_page={{ quote_pagination.per_page }}&quote_page={{ quote_pagination.prev_page }}">Previous</a>{% endif %}
+                        {% if quote_pagination.has_next %}<a class="btn btn-sm btn-outline-dark ms-1" href="/invoicing?quote_q={{ quote_q|urlencode }}&quote_per_page={{ quote_pagination.per_page }}&quote_page={{ quote_pagination.next_page }}">Next</a>{% endif %}
+                    </div>
+                </div>
+
+            </div>
+
+        </div>
+    </div>
+    
+    <div class="modal fade" id="statementConfigModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Generate Client Statement</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="mb-3">
+                        <label class="form-label small fw-bold">Select Client</label>
+                        <select id="statementClient" class="form-select border-dark">
+                            <option value="">-- Choose Client --</option>
+                            {% for c in clients %}
+                            <option value="{{ c.id }}" data-client-name="{{ c.display_name|e }}">{{ c.option_label or c.display_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <label class="form-label small fw-bold">Start Date</label>
+                            <input type="date" id="statementStart" class="form-control border-dark">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label class="form-label small fw-bold">End Date</label>
+                            <input type="date" id="statementEnd" class="form-control border-dark">
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-dark fw-bold" onclick="generateStatement()">View Statement</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="invSettingsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-secondary text-white">
+                    <h5 class="modal-title">Invoice & Quote Settings</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="row border-bottom pb-3 mb-3">
+                        <div class="col-6 mb-2">
+                            <label class="form-label fw-bold small">Invoice Prefix</label>
+                            <input type="text" id="invPrefixInput" class="form-control" placeholder="INV-">
+                        </div>
+                        <div class="col-6 mb-2">
+                            <label class="form-label fw-bold small">Invoice Start Number</label>
+                            <input type="number" id="invStartInput" class="form-control" placeholder="1">
+                        </div>
+                        <div class="col-6 mb-2">
+                            <label class="form-label fw-bold small">Quote Prefix</label>
+                            <input type="text" id="quotePrefixInput" class="form-control" placeholder="QT-">
+                        </div>
+                        <div class="col-6 mb-2">
+                            <label class="form-label fw-bold small">Quote Start Number</label>
+                            <input type="number" id="quoteStartInput" class="form-control" placeholder="1">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-12">
+                            <label class="form-label fw-bold small">Additional Information (Displayed on PDFs)</label>
+                            <textarea id="invAdditionalInfoInput" class="form-control border-secondary" rows="5" placeholder="e.g. Bank Banking Details, Payment Terms, Thank You note..."></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-secondary fw-bold" onclick="saveInvSettings()">Save Settings</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="clientDirModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Client Directory & Management</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="d-flex justify-content-between mb-3">
+                        <input type="text" id="dirClientSearch" class="form-control border-dark me-3" placeholder="Search Name, Phone, Email, or Address..." onkeyup="filterDirectory()">
+                        <button class="btn btn-primary" onclick="openClientProfile(null)" style="white-space: nowrap;">+ Add New Client</button>
+                    </div>
+                    <table class="table table-hover bg-white border" id="dirTable">
+                        <thead class="table-light">
+                            <tr><th>Name</th><th>Type</th><th>Phone</th><th>Email</th><th>Address</th><th>Discount</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for client in clients %}
+                            <tr>
+                                <td><strong>{{ client.name }} {{ client.surname or '' }}</strong></td>
+                                <td><span class="badge {{ 'bg-success' if client.client_type == 'Monthly Contract' else 'bg-secondary' }}">{{ client.client_type or 'Ad hoc' }}</span></td>
+                                <td>{{ client.phone or 'N/A' }}</td>
+                                <td>{{ client.email or 'N/A' }}</td>
+                                <td>{{ client.address or 'N/A' }}</td>
+                                <td>{{ client.discount_percent or 0 }}%</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-secondary" onclick='openClientProfile({{ client | tojson | safe }})'>👤 Edit</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="clientProfileModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title" id="clientProfileTitle">Client Profile</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="cId">
+                    <div class="row">
+                        <div class="col-6 mb-3"><label class="form-label small fw-bold">First Name</label><input type="text" id="cName" class="form-control" required></div>
+                        <div class="col-6 mb-3"><label class="form-label small fw-bold">Surname</label><input type="text" id="cSurname" class="form-control"></div>
+                    </div>
+                    <div class="mb-3"><label class="form-label small fw-bold text-primary">Client Type</label><select id="cType" class="form-select border-primary"><option value="Ad hoc">Ad hoc (Once-off)</option><option value="Monthly Contract">Monthly Contract</option></select></div>
+                    <div class="mb-3"><label class="form-label small fw-bold text-primary">Discount Percent</label><div class="input-group"><input type="number" id="cDiscountPercent" class="form-control" min="0" max="100" step="0.01" placeholder="0"><span class="input-group-text">%</span></div><div class="form-text small">Applied automatically when creating invoices for this client.</div></div>
+                    <div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Telephone Number</label><input type="text" id="cPhone" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Email Address</label><input type="email" id="cEmail" class="form-control" placeholder="For emailing invoices"></div></div>
+                    <div class="mb-3"><label class="form-label small fw-bold text-primary">Physical Address</label><div class="row"><div class="col-4 mb-2"><label class="form-label small fw-bold text-muted">Building Number</label><input type="text" id="cBuildingNumber" class="form-control"></div><div class="col-8 mb-2"><label class="form-label small fw-bold text-muted">Street Name</label><input type="text" id="cStreetName" class="form-control"></div></div><div class="row"><div class="col-7 mb-2"><label class="form-label small fw-bold text-muted">Suburb</label><input type="text" id="cSuburb" class="form-control"></div><div class="col-5 mb-2"><label class="form-label small fw-bold text-muted">Postal Code</label><input type="text" id="cPostalCode" class="form-control"></div></div><textarea id="cAddress" class="form-control d-none" rows="2"></textarea></div>
+                    <div class="mb-3"><label class="form-label small fw-bold">Company Name</label><input type="text" id="cCompany" class="form-control" placeholder="For Tax Invoices"></div>
+                    <div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Company Reg No.</label><input type="text" id="cRegNo" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">VAT No.</label><input type="text" id="cVatNo" class="form-control"></div></div>
+                </div>
+                <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveClient()">Save Client</button></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="serviceMarginsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">Service Margins</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="card p-3 mb-4 shadow-sm border-0">
+                        <h6 class="text-primary mb-3">Add / Edit Service</h6>
+                        <input type="hidden" id="svcId">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <label class="small fw-bold">Service Name</label>
+                                <input type="text" id="svcName" class="form-control" placeholder="e.g. Standard Home Clean">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="small fw-bold">Client Price (R)</label>
+                                <input type="number" id="svcPrice" class="form-control" step="0.01" min="0" placeholder="600.00">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="small fw-bold">Cost to Company (R)</label>
+                                <input type="number" id="svcCost" class="form-control" step="0.01" min="0" placeholder="250.00">
+                            </div>
+                        </div>
+                        <button class="btn btn-sm btn-primary mt-3 w-100" onclick="saveServiceMargin()">Save Service Margin</button>
+                    </div>
+
+                    <table class="table table-hover bg-white border align-middle">
+                        <thead class="table-light">
+                            <tr><th>Service</th><th>Client Price</th><th>Company Cost</th><th>Gross Margin</th><th>Action</th></tr>
+                        </thead>
+                        <tbody id="serviceMarginsTableBody">
+                            {% for s in services %}
+                            <tr>
+                                <td><strong>{{ s.name }}</strong></td>
+                                <td class="text-success">{{ (s.client_price or 0)|fmt_money }}</td>
+                                <td class="text-danger">{{ (s.company_cost or 0)|fmt_money }}</td>
+                                <td><strong>{{ ((s.client_price or 0) - (s.company_cost or 0))|fmt_money }}</strong></td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-secondary me-1" onclick='editServiceMargin({{ s | tojson | safe }})'>Edit</button>
+                                    <button class="btn btn-sm btn-outline-danger" onclick='deleteServiceMargin({{ s.id }}, {{ s.name | tojson | safe }})'>Delete</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            {% if not services %}
+                            <tr><td colspan="5" class="text-center text-muted py-3">No services configured yet.</td></tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="createInvoiceModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-info text-white">
+                    <h5 class="modal-title fw-bold">Draft Tax Invoice</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="row mb-4 bg-white p-3 border rounded">
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-muted">Invoice Type</label>
+                            <select id="invInvoiceType" class="form-select border-info" onchange="toggleInvoiceType()">
+                                <option value="standard">Normal Services / Bookings</option>
+                                <option value="project">Project Invoice</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-muted">Select Client</label>
+                            <select id="invClientSelect" class="form-select border-info" onchange="handleInvoiceClientChange()">
+                                <option value="" data-discount="0">-- Choose Client --</option>
+                                {% for c in clients %}
+                                <option value="{{ c.id }}" data-client-name="{{ c.display_name|e }}" data-discount="{{ c.discount_percent or 0 }}">{{ c.option_label or c.display_name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4" id="projectInvoiceSelectWrap" style="display:none;">
+                            <label class="small fw-bold text-muted">Select Project</label>
+                            <select id="invProjectSelect" class="form-select border-dark" onchange="populateProjectInvoiceLine()">
+                                <option value="">-- Choose Project --</option>
+                            </select>
+                            <small class="text-muted">The project fixed price will populate the invoice line.</small>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-muted">Issue Date</label>
+                            <input type="date" id="invDate" class="form-control">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-muted">Due Date</label>
+                            <input type="date" id="invDueDate" class="form-control">
+                        </div>
+                        <div class="col-md-4 mt-3">
+                            <label class="small fw-bold text-muted">Invoice Discount %</label>
+                            <input type="number" id="invDiscountPercent" class="form-control" min="0" max="100" step="0.01" value="0" oninput="calculateInvTotals()">
+                            <small class="text-muted">Defaults from client profile. Change for this invoice only.</small>
+                        </div>
+                        <div class="col-md-4 mt-3">
+                            <label class="small fw-bold text-muted">Amount Due Now (R)</label>
+                            <input type="number" id="invAmountDueNow" class="form-control" min="0" step="0.01" placeholder="Leave blank for full invoice" oninput="calculateInvTotals()">
+                            <small class="text-muted">Use this for deposits or partial amount due now.</small>
+                        </div>
+                    </div>
+
+                    <div id="standardInvoiceBookingsWrap">
+                        <h6 class="fw-bold text-info-emphasis border-bottom pb-2">1. Billable Bookings Checklist</h6>
+                        <p class="small text-muted">Tick the boxes to include a shift. You can edit the Date, Description, Qty, Unit Price and Line Total before generating.</p>
+                    
+                    <div class="bg-white border rounded mb-4" style="max-height: 250px; overflow-y: auto;">
+                        <table class="table table-sm table-hover mb-0 align-middle">
+                            <thead class="table-light">
+                                <tr>
+                                    <th style="width: 40px;"></th>
+                                    <th style="width: 130px;">Date</th>
+                                    <th>Description</th>
+                                    <th class="text-end" style="width: 85px;">Qty</th>
+                                    <th class="text-end" style="width: 120px;">Unit Price (R)</th>
+                                    <th class="text-end" style="width: 120px;">Line Total (R)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="uninvoicedBody">
+                                <tr><td colspan="6" class="text-center text-muted py-3">Select a client above to view un-invoiced bookings.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    </div>
+
+                    <div id="projectInvoiceNotice" class="alert alert-dark small" style="display:none;">
+                        Select a project above. The invoice will use the project fixed price as the line item. Use Amount Due Now for deposits or staged upfront payments.
+                    </div>
+
+                    <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-2">
+                        <h6 class="fw-bold text-dark mb-0" id="invCustomLinesHeading">2. Custom Line Items (Optional)</h6>
+                        <button class="btn btn-sm btn-outline-secondary" id="addInvRowBtn" onclick="addCustomInvRow()">+ Add Row</button>
+                    </div>
+                    <div id="invCustomRows" class="mb-4"></div>
+
+                    <div class="row">
+                        <div class="col-md-6 pt-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="invApplyVat" onchange="calculateInvTotals()">
+                                <label class="form-check-label fw-bold text-dark">Apply 15% VAT</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <table class="table table-sm table-borderless fw-bold fs-5">
+                                <tr><td class="text-muted text-end">Subtotal:</td><td class="text-end" id="invSubtotalDisp">0,00</td></tr>
+                                <tr id="invDiscountRow" style="display: none;"><td class="text-muted text-end">Discount <span id="invDiscountPctLabel"></span>:</td><td class="text-end text-success" id="invDiscountDisp">-0,00</td></tr>
+                                <tr><td class="text-muted text-end">VAT:</td><td class="text-end text-danger" id="invVatDisp">0,00</td></tr>
+                                <tr class="border-top border-dark"><td class="text-end text-info">TOTAL INVOICE:</td><td class="text-end text-info" id="invTotalDisp">0,00</td></tr>
+                                <tr><td class="text-muted text-end">Amount Due Now:</td><td class="text-end text-success" id="invDueNowDisp">0,00</td></tr>
+                                <tr><td class="text-muted text-end">Balance Remaining:</td><td class="text-end" id="invBalanceDisp">0,00</td></tr>
+                            </table>
+                        </div>
+                    </div>
+
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-info text-white fw-bold" onclick="saveInvoice()">Generate Invoice</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="createQuoteModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title fw-bold">Draft Official Quote</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="row mb-4 bg-white p-3 border rounded">
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-muted">Client Name</label>
+                            <select id="quoteClient" class="form-select border-primary">
+                                <option value="" data-client-name="">-- Choose Client --</option>
+                                {% for c in clients %}<option value="{{ c.id }}" data-client-name="{{ c.display_name|e }}">{{ c.option_label or c.display_name }}</option>{% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-muted">Issue Date</label>
+                            <input type="date" id="quoteDate" class="form-control">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-muted">Valid Until</label>
+                            <input type="date" id="quoteValidDate" class="form-control">
+                        </div>
+                    </div>
+
+                    <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-2">
+                        <h6 class="fw-bold text-dark mb-0">Quote Line Items</h6>
+                        <button class="btn btn-sm btn-outline-primary" onclick="addQuoteRow()">+ Add Row</button>
+                    </div>
+                    <datalist id="quoteServiceList">
+                        {% for s in services %}<option value="{{ s.name }}">{{ s.name }} - {{ (s.client_price or 0)|fmt_money }}</option>{% endfor %}
+                    </datalist>
+                    <div id="quoteRows" class="mb-4"></div>
+
+                    <div class="row">
+                        <div class="col-md-6 pt-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="quoteApplyVat" onchange="calculateQuoteTotals()">
+                                <label class="form-check-label fw-bold text-dark">Apply 15% VAT</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <table class="table table-sm table-borderless fw-bold fs-5">
+                                <tr><td class="text-muted text-end">Subtotal:</td><td class="text-end" id="quoteSubtotalDisp">0,00</td></tr>
+                                <tr><td class="text-muted text-end">VAT:</td><td class="text-end text-danger" id="quoteVatDisp">0,00</td></tr>
+                                <tr class="border-top border-dark"><td class="text-end text-primary">TOTAL:</td><td class="text-end text-primary" id="quoteTotalDisp">0,00</td></tr>
+                            </table>
+                        </div>
+                    </div>
+
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary fw-bold" onclick="saveQuote()">Generate Quote</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="modal fade" id="docModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Document Preview</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-secondary p-4">
+                    
+                    <div id="pdfCanvas" class="doc-container">
+                        
+                        <div class="doc-header">
+                            <div>
+                                {% if company.get('logo_file') %}
+                                    <img src="/uploads/logos/{{ company.logo_file }}" class="doc-logo">
+                                {% endif %}
+                                <h3 class="fw-bold mb-1">{{ company.get('name', 'Company Name') }}</h3>
+                                
+                                <div class="company-details">
+                                    {% if company.get('registration_number') %}
+                                        <strong>Reg No:</strong> {{ company.get('registration_number') }}<br>
+                                    {% endif %}
+                                    {% if company.get('address') %}
+                                        {{ company.get('address') | replace('\n', '<br>') | safe }}<br>
+                                    {% endif %}
+                                    {% if company.get('vat_number') %}
+                                        <strong>VAT No:</strong> {{ company.get('vat_number') }}<br>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div>
+                                <div class="doc-title" id="docTypeTitle">INVOICE</div>
+                                <table class="meta-table">
+                                    <tr><td class="text-muted">No:</td><td><strong id="docNumber"></strong></td></tr>
+                                    <tr><td class="text-muted">Date:</td><td id="docDate"></td></tr>
+                                    <tr><td class="text-muted" id="docMetaLabel">Due:</td><td id="docMetaDate"></td></tr>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="client-box">
+                            <h6 class="text-muted small mb-1 fw-bold" id="docClientLabel">BILLED TO:</h6>
+                            <strong id="docClientName"></strong>
+                            <div class="mt-1" id="docClientAddress"></div>
+                        </div>
+
+                        <table class="table table-bordered table-sm items-table mb-4">
+                            <thead>
+                                <tr>
+                                    <th class="date-col ps-2">Date of Service</th>
+                                    <th>Description</th>
+                                    <th class="qty-col">Qty</th>
+                                    <th class="unit-price-col">Unit Price</th>
+                                    <th class="amount-col pe-2">Line Total</th>
+                                </tr>
+                            </thead>
+                            <tbody id="docItemsBody"></tbody>
+                        </table>
+
+                        <div>
+                            <div class="totals-box" style="float: right; width: 45%; margin-top: 0;">
+                                <table>
+                                    <tr class="text-muted"><td>Subtotal</td><td class="amount-col" id="docSubtotal"></td></tr>
+                                    <tr class="text-muted" id="docDiscountRow" style="display: none;"><td>Discount <span id="docDiscountPctLabel"></span></td><td class="amount-col text-success" id="docDiscount"></td></tr>
+                                    <tr class="text-muted"><td>VAT</td><td class="amount-col" id="docVat"></td></tr>
+                                    <tr class="grand-total"><td>TOTAL INVOICE</td><td class="amount-col" id="docTotal"></td></tr>
+                                    <tr class="text-muted" id="docDueNowRow"><td>Amount Due Now</td><td class="amount-col text-success" id="docDueNow"></td></tr>
+                                    <tr class="text-muted" id="docBalanceRow"><td>Balance Remaining</td><td class="amount-col" id="docBalanceRemaining"></td></tr>
+                                    <tr class="text-muted" id="docPaidRow" style="display:none;"><td>Total Paid</td><td class="amount-col text-success" id="docTotalPaid"></td></tr>
+                                    <tr class="text-muted" id="docOutstandingRow" style="display:none;"><td>Outstanding Balance</td><td class="amount-col" id="docOutstanding"></td></tr>
+                                </table>
+                            </div>
+                            <div style="clear: both;"></div>
+                        </div>
+
+                        <div id="docAdditionalInfo" style="margin-top: 30px; font-size: 9pt; color: #555; white-space: pre-wrap; padding: 10px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; display: none;"></div>
+
+                        <div class="mt-5 pt-3 border-top text-center text-muted small">
+                            <p class="mb-0">Thank you for your business!</p>
+                            <p class="mb-0">{{ company.get('name', '') }}</p>
+                        </div>
+                    </div>
+
+                </div>
+                <div class="modal-footer justify-content-center bg-dark">
+                    <button type="button" class="btn btn-danger btn-lg fw-bold px-4" onclick="downloadDocPDF()">⬇️ Download PDF</button>
+                    <button type="button" class="btn btn-info btn-lg fw-bold px-4 text-white ms-3" id="btnEmailDoc" onclick="emailDocPDF()">📧 Email Document</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="modal fade" id="statementDocModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Client Statement Preview</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-secondary p-4">
+                    
+                    <div id="stmtCanvas" class="doc-container">
+                        
+                        <div class="doc-header">
+                            <div>
+                                {% if company.get('logo_file') %}
+                                    <img src="/uploads/logos/{{ company.logo_file }}" class="doc-logo">
+                                {% endif %}
+                                <h3 class="fw-bold mb-1">{{ company.get('name', 'Company Name') }}</h3>
+                                
+                                <div class="company-details">
+                                    {% if company.get('registration_number') %}
+                                        <strong>Reg No:</strong> {{ company.get('registration_number') }}<br>
+                                    {% endif %}
+                                    {% if company.get('address') %}
+                                        {{ company.get('address') | replace('\n', '<br>') | safe }}<br>
+                                    {% endif %}
+                                    {% if company.get('vat_number') %}
+                                        <strong>VAT No:</strong> {{ company.get('vat_number') }}<br>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div>
+                                <div class="doc-title text-dark">STATEMENT</div>
+                                <table class="meta-table">
+                                    <tr><td class="text-muted">Period:</td><td><strong id="stmtDateRange"></strong></td></tr>
+                                    <tr><td class="text-muted">Generated:</td><td id="stmtDateGenerated"></td></tr>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="client-box border-dark">
+                            <h6 class="text-muted small mb-1 fw-bold">PREPARED FOR:</h6>
+                            <strong id="stmtClientName"></strong>
+                            <div class="mt-1" id="stmtClientAddress"></div>
+                        </div>
+
+                        <table class="table table-bordered table-sm items-table mb-4">
+                            <thead>
+                                <tr>
+                                    <th class="date-col ps-2 bg-dark">Date</th>
+                                    <th class="bg-dark">Description</th>
+                                    <th class="bg-dark text-center" style="width: 100px;">Status</th>
+                                    <th class="amount-col pe-2 bg-dark">Amount (ZAR)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="stmtItemsBody"></tbody>
+                        </table>
+
+                        <div>
+                            <div class="totals-box" style="float: right; width: 45%; margin-top: 0;">
+                                <table>
+                                    <tr class="text-muted"><td>Total Invoiced</td><td class="amount-col" id="stmtTotalInvoiced"></td></tr>
+                                    <tr class="text-muted"><td>Total Paid</td><td class="amount-col text-success" id="stmtTotalPaid"></td></tr>
+                                    <tr class="grand-total border-dark text-dark"><td>BALANCE DUE</td><td class="amount-col" id="stmtTotalDue"></td></tr>
+                                </table>
+                            </div>
+                            <div style="clear: both;"></div>
+                        </div>
+
+                        <div id="stmtAdditionalInfo" style="margin-top: 30px; font-size: 9pt; color: #555; white-space: pre-wrap; padding: 10px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; display: none;"></div>
+
+                        <div class="mt-5 pt-3 border-top text-center text-muted small">
+                            <p class="mb-0">Thank you for your business!</p>
+                            <p class="mb-0">{{ company.get('name', '') }}</p>
+                        </div>
+                    </div>
+
+                </div>
+                <div class="modal-footer justify-content-center bg-dark">
+                    <button type="button" class="btn btn-danger btn-lg fw-bold px-4" onclick="downloadStmtPDF()">⬇️ Download PDF</button>
+                    <button type="button" class="btn btn-info btn-lg fw-bold px-4 text-white ms-3" id="btnEmailStmt" onclick="emailStmtPDF()">📧 Email Statement</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+
+    <div class="modal fade" id="paymentModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">Record Payment & Issue Receipt</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <input type="hidden" id="paymentInvoiceId">
+                    <div class="alert alert-info small" id="paymentInvoiceInfo"></div>
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">Payment Date</label>
+                            <input type="date" id="paymentDate" class="form-control border-success">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">Amount Received (R)</label>
+                            <input type="number" id="paymentAmount" class="form-control border-success" min="0.01" step="0.01">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">Payment Method</label>
+                            <input type="text" id="paymentMethod" class="form-control" placeholder="EFT, Cash, Card...">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">Reference</label>
+                            <input type="text" id="paymentReference" class="form-control" placeholder="Bank ref / receipt note">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small fw-bold">Notes</label>
+                            <textarea id="paymentNotes" class="form-control" rows="2"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-success fw-bold" onclick="saveInvoicePayment()">Save Payment & View Receipt</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const createInvModal = new bootstrap.Modal(document.getElementById('createInvoiceModal'));
+        const createQuoteModal = new bootstrap.Modal(document.getElementById('createQuoteModal'));
+        const invSettingsModal = new bootstrap.Modal(document.getElementById('invSettingsModal'));
+        const docModal = new bootstrap.Modal(document.getElementById('docModal'));
+        const statementConfigModal = new bootstrap.Modal(document.getElementById('statementConfigModal'));
+        const statementDocModal = new bootstrap.Modal(document.getElementById('statementDocModal'));
+        const clientDirModal = new bootstrap.Modal(document.getElementById('clientDirModal'));
+        const clientProfileModal = new bootstrap.Modal(document.getElementById('clientProfileModal'));
+        const serviceMarginsModal = new bootstrap.Modal(document.getElementById('serviceMarginsModal'));
+        const paymentModal = new bootstrap.Modal(document.getElementById('paymentModal'));
+
+        const invoiceAdditionalInfo = {{ inv_info | tojson | safe }};
+        const invoicePrefix = "{{ inv_prefix }}";
+        const invoiceStart = "{{ inv_start }}";
+        const quotePrefix = "{{ quote_prefix }}";
+        const quoteStart = "{{ quote_start }}";
+        let quoteServices = {{ services | tojson | safe }};
+        const invoiceProjects = {{ projects | tojson | safe }};
+        const invoiceProjectMap = {};
+        (invoiceProjects || []).forEach(p => { if(p && p.id !== undefined) invoiceProjectMap[String(p.id)] = p; });
+        let quoteServicePriceMap = {};
+        function rebuildQuoteServicePriceMap() {
+            quoteServicePriceMap = {};
+            (quoteServices || []).forEach(s => {
+                if (s && s.name) quoteServicePriceMap[String(s.name).trim().toLowerCase()] = parseFloat(s.client_price || 0);
+            });
+        }
+        rebuildQuoteServicePriceMap();
+
+        let currentClientEmail = "";
+        let currentClientName = "";
+        let currentDocType = "";
+        let currentDocId = null;
+        
+        let currentStmtEmail = "";
+        let currentStmtClient = "";
+        let currentStmtName = "";
+
+        document.getElementById('invDate').value = new Date().toISOString().split('T')[0];
+        document.getElementById('quoteDate').value = new Date().toISOString().split('T')[0];
+
+        // --- HIGH QUALITY PDF SETTINGS ---
+        function getPdfOptions(docName) {
+            return {
+                margin: 0.2, 
+                filename: docName + '.pdf', 
+                image: { type: 'jpeg', quality: 1.0 },
+                html2canvas: { scale: 4, useCORS: true }, 
+                jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' } 
+            };
+        }
+
+        // --- STATEMENT LOGIC ---
+        function openStatementConfigModal() {
+            document.getElementById('statementClient').value = '';
+            
+            const date = new Date();
+            const firstDay = new Date(date.getFullYear(), date.getMonth(), 1);
+            document.getElementById('statementStart').value = firstDay.toISOString().split('T')[0];
+            document.getElementById('statementEnd').value = date.toISOString().split('T')[0];
+            
+            statementConfigModal.show();
+        }
+
+        function generateStatement() {
+            const select = document.getElementById('statementClient');
+            const client = select.value;
+            const option = select.options[select.selectedIndex];
+            const clientName = option ? (option.dataset.clientName || option.textContent.trim()) : '';
+            const start = document.getElementById('statementStart').value;
+            const end = document.getElementById('statementEnd').value;
+            
+            if(!client || !start || !end) return alert("All fields are required.");
+            
+            fetch('/api/client_statement', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({client_id: client, client_name: clientName, start_date: start, end_date: end})
+            }).then(r => r.json()).then(data => {
+                statementConfigModal.hide();
+                
+                document.getElementById('stmtDateRange').innerText = `${data.start_date} to ${data.end_date}`;
+                document.getElementById('stmtDateGenerated').innerText = new Date().toISOString().split('T')[0];
+                
+                currentStmtEmail = data.client_email;
+                currentStmtClient = data.client_full_name;
+                currentStmtName = `Statement_${data.client_full_name.replace(/\s+/g, '_')}_${data.end_date}`;
+                
+                document.getElementById('stmtClientName').innerText = data.client_full_name;
+                
+                let clientInfo = '';
+                if(data.client_company) clientInfo += `Company: ${data.client_company}<br>`;
+                if(data.client_reg) clientInfo += `Company Reg No: ${data.client_reg}<br>`;
+                if(data.client_vat) clientInfo += `VAT No: ${data.client_vat}<br>`;
+                if(data.client_address) clientInfo += `${data.client_address.replace(/\n/g, '<br>')}<br>`;
+                document.getElementById('stmtClientAddress').innerHTML = clientInfo;
+
+                const tbody = document.getElementById('stmtItemsBody');
+                tbody.innerHTML = '';
+                if(data.items.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No activity in this period.</td></tr>';
+                } else {
+                    data.items.forEach(item => {
+                        let amountStr = money(item.amount);
+                        let badge = '';
+                        if(item.status === 'Paid') badge = '<span style="color: #198754; font-weight: bold;">Paid</span>';
+                        else if(item.status === 'Unpaid') badge = '<span style="color: #dc3545; font-weight: bold;">Unpaid</span>';
+                        else badge = `<span style="color: #6c757d; font-weight: bold;">${item.status}</span>`;
+                        
+                        tbody.innerHTML += `<tr>
+                            <td class="ps-2">${fmtDate(item.date)}</td>
+                            <td>${item.description}</td>
+                            <td class="text-center">${badge}</td>
+                            <td class="amount-col pe-2">${amountStr}</td>
+                        </tr>`;
+                    });
+                }
+
+                document.getElementById('stmtTotalInvoiced').innerText = money(data.total_invoiced);
+                document.getElementById('stmtTotalPaid').innerText = money(data.total_paid);
+                document.getElementById('stmtTotalDue').innerText = money(data.total_due);
+
+                const infoBox = document.getElementById('stmtAdditionalInfo');
+                if (invoiceAdditionalInfo && invoiceAdditionalInfo.trim() !== '') {
+                    infoBox.innerText = invoiceAdditionalInfo;
+                    infoBox.style.display = 'block';
+                } else {
+                    infoBox.style.display = 'none';
+                }
+
+                statementDocModal.show();
+            });
+        }
+        
+        function downloadStmtPDF() { 
+            html2pdf().set(getPdfOptions(currentStmtName)).from(document.getElementById('stmtCanvas')).save(); 
+        }
+
+        function emailStmtPDF() {
+            const email = prompt("Enter the client's email address to send this statement:", currentStmtEmail);
+            if(!email) return;
+            
+            const btn = document.getElementById('btnEmailStmt');
+            btn.innerText = "Sending...";
+            btn.disabled = true;
+            
+            const element = document.getElementById('stmtCanvas');
+            
+            html2pdf().set(getPdfOptions(currentStmtName)).from(element).output('blob').then(function(pdfBlob) {
+                const fd = new FormData();
+                fd.append('pdf', pdfBlob, currentStmtName + '.pdf');
+                fd.append('email', email);
+                fd.append('doc_name', "Account Statement");
+                fd.append('client_name', currentStmtClient);
+                
+                fetch('/api/email_document', {
+                    method: 'POST',
+                    body: fd
+                }).then(res => res.json()).then(data => {
+                    alert(data.message);
+                    btn.innerText = "📧 Email Statement";
+                    btn.disabled = false;
+                }).catch(err => {
+                    alert("A server error occurred while sending the email.");
+                    btn.innerText = "📧 Email Statement";
+                    btn.disabled = false;
+                });
+            });
+        }
+
+
+        // --- CLIENT DIRECTORY LOGIC ---
+        function openClientDirectory() {
+            clientDirModal.show();
+        }
+
+        function filterDirectory() {
+            const term = document.getElementById('dirClientSearch').value.toLowerCase();
+            document.querySelectorAll('#dirTable tbody tr').forEach(row => {
+                row.style.display = row.innerText.toLowerCase().includes(term) ? '' : 'none';
+            });
+        }
+
+        function openClientProfile(client) {
+            try { clientDirModal.hide(); } catch(e) {}
+            document.getElementById('clientProfileTitle').innerText = client ? 'Edit Client Profile' : 'Add New Client';
+            document.getElementById('cId').value = client ? client.id : '';
+            document.getElementById('cName').value = client ? (client.name || '') : '';
+            document.getElementById('cSurname').value = client ? (client.surname || '') : '';
+            document.getElementById('cType').value = client ? (client.client_type || 'Ad hoc') : 'Ad hoc';
+            document.getElementById('cDiscountPercent').value = client ? (client.discount_percent || '') : '';
+            document.getElementById('cPhone').value = client ? (client.phone || '') : '';
+            document.getElementById('cEmail').value = client ? (client.email || '') : '';
+            document.getElementById('cBuildingNumber').value = client ? (client.building_number || '') : '';
+            document.getElementById('cStreetName').value = client ? (client.street_name || '') : '';
+            document.getElementById('cSuburb').value = client ? (client.suburb || '') : '';
+            document.getElementById('cPostalCode').value = client ? (client.postal_code || '') : '';
+            document.getElementById('cAddress').value = client ? (client.address || '') : '';
+            document.getElementById('cCompany').value = client ? (client.company_name || '') : '';
+            document.getElementById('cRegNo').value = client ? (client.registration_number || '') : '';
+            document.getElementById('cVatNo').value = client ? (client.vat_number || '') : '';
+            clientProfileModal.show();
+        }
+
+        async function refreshInvoicingLists() {
+            try {
+                const res = await fetch(window.location.pathname + window.location.search, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                if(!res.ok) throw new Error('Could not refresh invoicing data.');
+                const html = await res.text();
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                const sections = [
+                    ['invoiceHistoryBody', '#invoiceHistoryBody'],
+                    ['quoteHistoryBody', '#quoteHistoryBody']
+                ];
+                sections.forEach(([id, selector]) => {
+                    const current = document.getElementById(id);
+                    const updated = doc.querySelector(selector);
+                    if(current && updated) current.innerHTML = updated.innerHTML;
+                });
+            } catch(err) {
+                console.warn('Live refresh failed:', err);
+            }
+        }
+
+        function money(value) {
+            if(window.EasyAdminFormat) return window.EasyAdminFormat.money(value);
+            return Number(value || 0).toLocaleString('en-ZA', {minimumFractionDigits:2, maximumFractionDigits:2});
+        }
+        function fmtDate(value) {
+            if(window.EasyAdminFormat) return window.EasyAdminFormat.date(value);
+            return String(value || '').slice(0, 10);
+        }
+
+        function escapeJsHtml(value) {
+            return String(value || '').replace(/[&<>"']/g, function(ch) {
+                return ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'})[ch];
+            });
+        }
+
+        function renderServiceMarginsTable(services) {
+            const tbody = document.getElementById('serviceMarginsTableBody');
+            if(!tbody) return;
+            if(!services || !services.length) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No services configured yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = services.map(s => {
+                const clientPrice = parseFloat(s.client_price || 0);
+                const companyCost = parseFloat(s.company_cost || 0);
+                const safeName = escapeJsHtml(s.name || '');
+                const json = JSON.stringify(s).replace(/'/g, '\\u0027');
+                const nameJson = JSON.stringify(s.name || '').replace(/'/g, '\\u0027');
+                return `
+                    <tr>
+                        <td><strong>${safeName}</strong></td>
+                        <td class="text-success">${money(clientPrice)}</td>
+                        <td class="text-danger">${money(companyCost)}</td>
+                        <td><strong>${money(clientPrice - companyCost)}</strong></td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-secondary me-1" onclick='editServiceMargin(${json})'>Edit</button>
+                            <button class="btn btn-sm btn-outline-danger" onclick='deleteServiceMargin(${s.id}, ${nameJson})'>Delete</button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function refreshServiceMarginsData() {
+            const res = await fetch('/api/services');
+            const data = await res.json();
+            if(!res.ok || data.status === 'error') throw new Error(data.message || 'Could not refresh service margins.');
+            quoteServices = data.services || [];
+            rebuildQuoteServicePriceMap();
+            renderServiceMarginsTable(quoteServices);
+            const serviceList = document.getElementById('quoteServiceList');
+            if(serviceList) {
+                serviceList.innerHTML = quoteServices.map(s => `<option value="${escapeJsHtml(s.name || '')}">${escapeJsHtml(s.name || '')} - ${money(s.client_price)}</option>`).join('');
+            }
+        }
+
+        async function refreshInvoicingStaticData() {
+            await refreshInvoicingLists();
+            try { await refreshServiceMarginsData(); } catch(err) { console.warn('Service margin refresh failed:', err); }
+        }
+
+        function saveClient() {
+            const addressParts = [
+                [document.getElementById('cBuildingNumber').value, document.getElementById('cStreetName').value].filter(Boolean).join(' ').trim(),
+                document.getElementById('cSuburb').value,
+                document.getElementById('cPostalCode').value
+            ].filter(Boolean).join(', ');
+            document.getElementById('cAddress').value = addressParts;
+            const data = {
+                id: document.getElementById('cId').value,
+                name: document.getElementById('cName').value.trim(),
+                surname: document.getElementById('cSurname').value.trim(),
+                client_type: document.getElementById('cType').value,
+                discount_percent: document.getElementById('cDiscountPercent').value,
+                phone: document.getElementById('cPhone').value,
+                email: document.getElementById('cEmail').value,
+                address: addressParts,
+                building_number: document.getElementById('cBuildingNumber').value,
+                street_name: document.getElementById('cStreetName').value,
+                suburb: document.getElementById('cSuburb').value,
+                postal_code: document.getElementById('cPostalCode').value,
+                company_name: document.getElementById('cCompany').value,
+                registration_number: document.getElementById('cRegNo').value,
+                vat_number: document.getElementById('cVatNo').value,
+                _source_app: 'Invoicing & Quotes'
+            };
+            if(!data.name) return alert('First Name is required.');
+            fetch('/update_client', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            }).then(r => r.json()).then(res => {
+                if(res.status === 'error') return alert(res.message || 'Could not save client.');
+                clientProfileModal.hide();
+                refreshInvoicingStaticData();
+            }).catch(() => alert('Could not save client. Please try again.'));
+        }
+
+
+        // --- SETTINGS LOGIC ---
+        function openServiceMarginsModal() {
+            clearServiceMarginForm();
+            serviceMarginsModal.show();
+        }
+
+        function clearServiceMarginForm() {
+            document.getElementById('svcId').value = '';
+            document.getElementById('svcName').value = '';
+            document.getElementById('svcPrice').value = '';
+            document.getElementById('svcCost').value = '';
+        }
+
+        function editServiceMargin(service) {
+            document.getElementById('svcId').value = service.id || '';
+            document.getElementById('svcName').value = service.name || '';
+            document.getElementById('svcPrice').value = service.client_price || 0;
+            document.getElementById('svcCost').value = service.company_cost || 0;
+            serviceMarginsModal.show();
+        }
+
+        function saveServiceMargin() {
+            const data = {
+                id: document.getElementById('svcId').value,
+                name: document.getElementById('svcName').value.trim(),
+                price: document.getElementById('svcPrice').value,
+                cost: document.getElementById('svcCost').value
+            };
+            if(!data.name || data.price === '' || data.cost === '') return alert('Fill all service margin fields.');
+            fetch('/update_service', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-App-Source': 'Invoicing' },
+                body: JSON.stringify(data)
+            }).then(async r => {
+                if(!r.ok) throw new Error(await r.text() || 'Could not save service margin.');
+                return r.json();
+            }).then(res => {
+                if(res.status === 'error') alert(res.message || 'Could not save service margin.');
+                else {
+                    clearServiceMarginForm();
+                    refreshInvoicingStaticData().then(() => {
+                        serviceMarginsModal.show();
+                    });
+                }
+            }).catch(err => alert(err.message));
+        }
+
+
+        function deleteServiceMargin(serviceId, serviceName) {
+            if(!serviceId) return alert('Service ID is missing.');
+            if(!confirm(`Delete service "${serviceName}"? Existing invoices and quotes already created will not be changed.`)) return;
+            fetch('/delete_service', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-App-Source': 'Invoicing' },
+                body: JSON.stringify({ id: serviceId })
+            }).then(async r => {
+                const data = await r.json().catch(() => ({}));
+                if(!r.ok || data.status === 'error') throw new Error(data.message || 'Could not delete service.');
+                return refreshInvoicingStaticData();
+            }).catch(err => alert(err.message));
+        }
+
+        function openInvSettingsModal() {
+            document.getElementById('invAdditionalInfoInput').value = invoiceAdditionalInfo;
+            document.getElementById('invPrefixInput').value = invoicePrefix;
+            document.getElementById('invStartInput').value = invoiceStart;
+            document.getElementById('quotePrefixInput').value = quotePrefix;
+            document.getElementById('quoteStartInput').value = quoteStart;
+            invSettingsModal.show();
+        }
+
+        function saveInvSettings() {
+            const info = document.getElementById('invAdditionalInfoInput').value;
+            const ip = document.getElementById('invPrefixInput').value || 'INV-';
+            const is = document.getElementById('invStartInput').value || '1';
+            const qp = document.getElementById('quotePrefixInput').value || 'QT-';
+            const qs = document.getElementById('quoteStartInput').value || '1';
+
+            fetch('/api/save_invoice_settings', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    invoice_additional_info: info,
+                    invoice_prefix: ip,
+                    invoice_start: is,
+                    quote_prefix: qp,
+                    quote_start: qs
+                })
+            }).then(() => location.reload());
+        }
+
+        // --- INVOICE LOGIC ---
+        function openCreateInvoiceModal() {
+            document.getElementById('invInvoiceType').value = 'standard';
+            document.getElementById('invClientSelect').value = '';
+            document.getElementById('invProjectSelect').innerHTML = '<option value="">-- Choose Project --</option>';
+            document.getElementById('uninvoicedBody').innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">Select a client above to view un-invoiced bookings.</td></tr>';
+            document.getElementById('invCustomRows').innerHTML = '';
+            document.getElementById('invApplyVat').checked = false;
+            document.getElementById('invDiscountPercent').value = '0';
+            document.getElementById('invAmountDueNow').value = '';
+            toggleInvoiceType();
+            calculateInvTotals();
+            createInvModal.show();
+        }
+
+        function handleInvoiceClientChange() {
+            setInvoiceDiscountFromClient();
+            if(document.getElementById('invInvoiceType').value === 'project') {
+                populateProjectOptionsForClient();
+                populateProjectInvoiceLine();
+            } else {
+                fetchUninvoicedBookings();
+            }
+        }
+
+        function toggleInvoiceType() {
+            const isProject = document.getElementById('invInvoiceType').value === 'project';
+            document.getElementById('standardInvoiceBookingsWrap').style.display = isProject ? 'none' : '';
+            document.getElementById('projectInvoiceSelectWrap').style.display = isProject ? '' : 'none';
+            document.getElementById('projectInvoiceNotice').style.display = isProject ? '' : 'none';
+            document.getElementById('invCustomLinesHeading').innerText = isProject ? '2. Project Invoice Line' : '2. Custom Line Items (Optional)';
+            document.getElementById('addInvRowBtn').style.display = isProject ? 'none' : '';
+            document.getElementById('invCustomRows').innerHTML = '';
+            if(isProject) {
+                document.getElementById('uninvoicedBody').innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">Project invoice selected.</td></tr>';
+                populateProjectOptionsForClient();
+                populateProjectInvoiceLine();
+            } else {
+                document.getElementById('invProjectSelect').value = '';
+                fetchUninvoicedBookings();
+            }
+            calculateInvTotals();
+        }
+
+        function populateProjectOptionsForClient() {
+            const client = document.getElementById('invClientSelect').value;
+            const select = document.getElementById('invProjectSelect');
+            const currentValue = select.value;
+            select.innerHTML = '<option value="">-- Choose Project --</option>';
+            (invoiceProjects || []).filter(p => !client || String(p.client_id || p.linked_client_id || '') === String(client)).forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.id;
+                const code = p.project_code ? ` (${p.project_code})` : '';
+                opt.textContent = `${p.project_name}${code} - ${money(p.fixed_price || 0)}`;
+                opt.dataset.clientId = String(p.client_id || p.linked_client_id || '');
+                select.appendChild(opt);
+            });
+            if(currentValue && Array.from(select.options).some(o => o.value === currentValue)) select.value = currentValue;
+        }
+
+        function populateProjectInvoiceLine() {
+            if(document.getElementById('invInvoiceType').value !== 'project') return;
+            const projectId = document.getElementById('invProjectSelect').value;
+            document.getElementById('invCustomRows').innerHTML = '';
+            const project = invoiceProjectMap[String(projectId)];
+            if(!project) { calculateInvTotals(); return; }
+            if(project.client_id || project.linked_client_id) document.getElementById('invClientSelect').value = String(project.client_id || project.linked_client_id || '');
+            setInvoiceDiscountFromClient();
+            const div = document.createElement('div');
+            div.className = 'd-flex mb-2 gap-2 custom-inv-row project-inv-row';
+            const today = document.getElementById('invDate').value || new Date().toISOString().split('T')[0];
+            const code = project.project_code ? ` (${project.project_code})` : '';
+            div.innerHTML = `
+                <input type="date" class="form-control form-control-sm date-input" style="width: 140px;" value="${project.start_date || today}">
+                <input type="text" class="form-control form-control-sm desc-input" value="Project: ${escapeAttr((project.project_name || 'Project') + code)}" readonly>
+                <input type="number" class="form-control form-control-sm qty-input text-end" style="width: 80px;" min="0.01" step="0.01" value="1" readonly oninput="clearManualLineTotal(this); calculateInvTotals()">
+                <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" value="${(parseFloat(project.fixed_price || 0)).toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()">
+                <input type="number" class="form-control form-control-sm line-total-display text-end" style="width: 120px;" min="0" step="0.01" value="${(parseFloat(project.fixed_price || 0)).toFixed(2)}" oninput="setManualInvoiceLineTotal(this)" title="Line Total">
+                <span class="badge bg-dark d-flex align-items-center">Fixed Project Price</span>
+            `;
+            document.getElementById('invCustomRows').appendChild(div);
+            calculateInvTotals();
+        }
+
+        function escapeAttr(value) {
+            return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function fetchUninvoicedBookings() {
+            const select = document.getElementById('invClientSelect');
+            const client = select.value;
+            const option = select.options[select.selectedIndex];
+            const clientName = option ? (option.dataset.clientName || option.textContent.trim()) : '';
+            setInvoiceDiscountFromClient();
+            if(document.getElementById('invInvoiceType').value === 'project') return;
+            if(!client) return;
+            
+            fetch('/api/uninvoiced', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({client_id: client, client_name: clientName})
+            }).then(r => r.json()).then(data => {
+                const tbody = document.getElementById('uninvoicedBody');
+                tbody.innerHTML = '';
+                if(data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-success py-3 fw-bold">All past bookings for this client have been billed!</td></tr>';
+                } else {
+                    data.forEach(b => {
+                        tbody.innerHTML += `
+                            <tr class="checklist-row">
+                                <td class="align-middle text-center"><input type="checkbox" class="form-check-input inv-cb border-info" value="${b.id}" onclick="calculateInvTotals()"></td>
+                                <td><input type="date" class="table-input item-date" value="${b.date}"></td>
+                                <td><input type="text" class="table-input item-desc" value="${b.description || b.type}"></td>
+                                <td><input type="number" class="table-input item-qty text-end" min="0.01" step="0.01" value="1" oninput="clearManualLineTotal(this); calculateInvTotals()"></td>
+                                <td><input type="number" class="table-input item-price text-end" value="${b.price.toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()"></td>
+                                <td><input type="number" class="table-input item-line-total line-total-display text-end" min="0" step="0.01" value="${b.price.toFixed(2)}" oninput="setManualInvoiceLineTotal(this)"></td>
+                            </tr>
+                        `;
+                    });
+                }
+                calculateInvTotals();
+            });
+        }
+
+        function addCustomInvRow() {
+            const div = document.createElement('div');
+            div.className = 'd-flex mb-2 gap-2 custom-inv-row';
+            div.innerHTML = `
+                <input type="date" class="form-control form-control-sm date-input" style="width: 140px;">
+                <input type="text" class="form-control form-control-sm desc-input" placeholder="Item description...">
+                <input type="number" class="form-control form-control-sm qty-input text-end" style="width: 80px;" min="0.01" step="0.01" value="1" oninput="clearManualLineTotal(this); calculateInvTotals()">
+                <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" placeholder="Unit Price (R)" oninput="clearManualLineTotal(this); calculateInvTotals()">
+                <input type="number" class="form-control form-control-sm line-total-display text-end" style="width: 120px;" min="0" step="0.01" value="0.00" oninput="setManualInvoiceLineTotal(this)" title="Line Total">
+                <button class="btn btn-sm btn-outline-danger" onclick="this.parentElement.remove(); calculateInvTotals()">X</button>
+            `;
+            document.getElementById('invCustomRows').appendChild(div);
+        }
+
+        function sanitizeInvoiceDiscountPercent(value) {
+            const pct = parseFloat(value || '0') || 0;
+            return Math.max(0, Math.min(100, pct));
+        }
+
+        function getSelectedClientDiscountPercent() {
+            const select = document.getElementById('invClientSelect');
+            const option = select.options[select.selectedIndex];
+            return sanitizeInvoiceDiscountPercent(option ? option.dataset.discount || '0' : '0');
+        }
+
+        function setInvoiceDiscountFromClient() {
+            document.getElementById('invDiscountPercent').value = getSelectedClientDiscountPercent();
+            calculateInvTotals();
+        }
+
+        function getInvoiceDiscountPercent() {
+            const input = document.getElementById('invDiscountPercent');
+            const pct = sanitizeInvoiceDiscountPercent(input.value);
+            input.value = pct;
+            return pct;
+        }
+
+        function getBillingRowFromInput(input) {
+            return input ? (input.closest('tr') || input.closest('.custom-inv-row') || input.closest('.custom-quote-row')) : null;
+        }
+
+        function clearManualLineTotal(input) {
+            const row = getBillingRowFromInput(input);
+            const lineTotalEl = row ? row.querySelector('.line-total-display') : null;
+            if(lineTotalEl) lineTotalEl.dataset.manualTotal = '0';
+        }
+
+        function setManualInvoiceLineTotal(input) {
+            input.dataset.manualTotal = '1';
+            const row = getBillingRowFromInput(input);
+            if(row) syncInvoiceUnitPriceFromLineTotal(row);
+            calculateInvTotals();
+        }
+
+        function syncInvoiceUnitPriceFromLineTotal(row) {
+            const qtyEl = row.querySelector('.item-qty, .qty-input');
+            const priceEl = row.querySelector('.item-price, .price-input');
+            const lineTotalEl = row.querySelector('.line-total-display');
+            const qty = Math.max(parseFloat(qtyEl ? qtyEl.value : '1') || 1, 0.0001);
+            const lineTotal = Math.max(parseFloat(lineTotalEl ? lineTotalEl.value : '0') || 0, 0);
+            if(priceEl) priceEl.value = (lineTotal / qty).toFixed(2);
+        }
+
+        function lineTotalFromRow(row, qtySelector, priceSelector) {
+            const qtyEl = row.querySelector(qtySelector);
+            const priceEl = row.querySelector(priceSelector);
+            const qty = Math.max(parseFloat(qtyEl ? qtyEl.value : '1') || 1, 0);
+            let unitPrice = Math.max(parseFloat(priceEl ? priceEl.value : '0') || 0, 0);
+            const lineTotalEl = row.querySelector('.line-total-display');
+            let lineTotal = qty * unitPrice;
+            if(lineTotalEl && lineTotalEl.dataset.manualTotal === '1') {
+                lineTotal = Math.max(parseFloat(lineTotalEl.value) || 0, 0);
+                if(priceEl && qty > 0) priceEl.value = (lineTotal / qty).toFixed(2);
+            } else if(lineTotalEl) {
+                lineTotalEl.value = lineTotal.toFixed(2);
+            }
+            return lineTotal;
+        }
+
+        function getInvoiceLineValues(row, qtySelector, priceSelector) {
+            const qtyEl = row.querySelector(qtySelector);
+            const priceEl = row.querySelector(priceSelector);
+            const lineTotalEl = row.querySelector('.line-total-display');
+            const quantity = Math.max(parseFloat(qtyEl ? qtyEl.value : '1') || 1, 0);
+            let unitPrice = Math.max(parseFloat(priceEl ? priceEl.value : '0') || 0, 0);
+            let amount = quantity * unitPrice;
+            if(lineTotalEl) {
+                const explicitAmount = Math.max(parseFloat(lineTotalEl.value) || 0, 0);
+                amount = explicitAmount;
+                if(quantity > 0) unitPrice = amount / quantity;
+            }
+            return { quantity, unitPrice, amount };
+        }
+
+        function calculateInvTotals() {
+            let subtotal = 0;
+            document.querySelectorAll('.checklist-row').forEach(row => {
+                const cb = row.querySelector('.inv-cb');
+                if(cb && cb.checked) {
+                    subtotal += lineTotalFromRow(row, '.item-qty', '.item-price');
+                }
+            });
+            document.querySelectorAll('.custom-inv-row').forEach(row => {
+                subtotal += lineTotalFromRow(row, '.qty-input', '.price-input');
+            });
+
+            const discountPercent = getInvoiceDiscountPercent();
+            const discountAmount = subtotal * (discountPercent / 100);
+            const discountedSubtotal = subtotal - discountAmount;
+
+            let vat = 0;
+            if(document.getElementById('invApplyVat').checked) vat = discountedSubtotal * 0.15;
+            let total = discountedSubtotal + vat;
+            const dueInput = document.getElementById('invAmountDueNow');
+            let amountDueNow = dueInput && dueInput.value !== '' ? (parseFloat(dueInput.value) || 0) : total;
+            amountDueNow = Math.max(0, Math.min(amountDueNow, total));
+            const balanceRemaining = total - amountDueNow;
+
+            document.getElementById('invSubtotalDisp').innerText = money(subtotal);
+            document.getElementById('invVatDisp').innerText = money(vat);
+            document.getElementById('invTotalDisp').innerText = money(total);
+            document.getElementById('invDueNowDisp').innerText = money(amountDueNow);
+            document.getElementById('invBalanceDisp').innerText = money(balanceRemaining);
+
+            const discountRow = document.getElementById('invDiscountRow');
+            if(discountPercent > 0 && discountAmount > 0) {
+                discountRow.style.display = '';
+                document.getElementById('invDiscountPctLabel').innerText = `(${discountPercent.toFixed(2).replace(/\.00$/, '')}%)`;
+                document.getElementById('invDiscountDisp').innerText = "-" + money(discountAmount);
+            } else {
+                discountRow.style.display = 'none';
+                document.getElementById('invDiscountPctLabel').innerText = '';
+                document.getElementById('invDiscountDisp').innerText = "-" + money(0);
+            }
+
+            return {subtotal, discountPercent, discountAmount, discountedSubtotal, vat, total, amountDueNow, balanceRemaining};
+        }
+
+        function saveInvoice() {
+            const clientSelect = document.getElementById('invClientSelect');
+            const client = clientSelect.value;
+            const clientOption = clientSelect.options[clientSelect.selectedIndex];
+            const clientName = clientOption ? (clientOption.dataset.clientName || clientOption.textContent.trim()) : '';
+            if(!client) return alert("Select a client.");
+            
+            const totals = calculateInvTotals();
+            if(totals.total === 0) return alert("Invoice total cannot be zero.");
+            const invoiceType = document.getElementById('invInvoiceType').value;
+            const projectId = document.getElementById('invProjectSelect').value;
+            if(invoiceType === 'project' && !projectId) return alert('Select a project to invoice.');
+
+            const items = [];
+            document.querySelectorAll('.checklist-row').forEach(row => {
+                const cb = row.querySelector('.inv-cb');
+                if(cb && cb.checked) {
+                    const lineValues = getInvoiceLineValues(row, '.item-qty', '.item-price');
+                    items.push({ 
+                        booking_id: cb.value, 
+                        service_date: row.querySelector('.item-date').value,
+                        description: row.querySelector('.item-desc').value,
+                        quantity: lineValues.quantity,
+                        unit_price: lineValues.unitPrice,
+                        amount: lineValues.amount
+                    });
+                }
+            });
+            
+            document.querySelectorAll('.custom-inv-row').forEach(row => {
+                const dateVal = row.querySelector('.date-input').value;
+                const desc = row.querySelector('.desc-input').value;
+                const lineValues = getInvoiceLineValues(row, '.qty-input', '.price-input');
+                const amt = lineValues.amount;
+                if(desc && amt > 0) items.push({ service_date: dateVal, description: desc, quantity: lineValues.quantity, unit_price: lineValues.unitPrice, amount: amt });
+            });
+
+            const data = {
+                client_id: client,
+                client_name: clientName,
+                date: document.getElementById('invDate').value,
+                due_date: document.getElementById('invDueDate').value,
+                subtotal: totals.subtotal,
+                discount_percent: totals.discountPercent,
+                discount_amount: totals.discountAmount,
+                vat_amount: totals.vat,
+                total: totals.total,
+                amount_due_now: totals.amountDueNow,
+                balance_remaining: totals.balanceRemaining,
+                apply_vat: document.getElementById('invApplyVat').checked,
+                invoice_type: invoiceType,
+                project_id: invoiceType === 'project' ? projectId : null,
+                items: items
+            };
+
+            fetch('/api/save_invoice', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            }).then(() => { createInvModal.hide(); refreshInvoicingLists(); });
+        }
+
+        function renderDocumentItemRow(item) {
+            const dateStr = item.service_date ? fmtDate(item.service_date) : '';
+            const qty = Math.max(parseFloat(item.quantity || 1) || 1, 0);
+            const amount = parseFloat(item.amount || 0) || 0;
+            const unitPrice = item.unit_price !== undefined && item.unit_price !== null && item.unit_price !== '' ? (parseFloat(item.unit_price) || 0) : (qty ? amount / qty : amount);
+            const qtyText = Number.isInteger(qty) ? qty.toFixed(0) : qty.toFixed(2);
+            return `<tr><td class="ps-2">${dateStr}</td><td>${item.description}</td><td class="qty-col">${qtyText}</td><td class="unit-price-col">${money(unitPrice)}</td><td class="amount-col pe-2">${money(amount)}</td></tr>`;
+        }
+
+        function viewInvoice(id, isCreditNote = false) {
+            fetch('/api/invoice/' + id)
+            .then(r => r.json().catch(() => ({status:'error', message:'Server returned an invalid response.'})))
+            .then(data => {
+                if(data.status === 'error') return alert(data.message || 'Could not load invoice.');
+                const i = data.invoice;
+                currentDocType = isCreditNote ? 'credit_note' : 'invoice';
+                currentDocId = id;
+                
+                if(isCreditNote) {
+                    document.getElementById('docTypeTitle').innerText = "CREDIT NOTE";
+                    document.getElementById('docTypeTitle').style.color = "#6c757d";
+                } else {
+                    document.getElementById('docTypeTitle').innerText = "TAX INVOICE";
+                    document.getElementById('docTypeTitle').style.color = "#0dcaf0";
+                }
+                
+                document.getElementById('docClientLabel').innerText = isCreditNote ? 'CREDITED TO:' : 'BILLED TO:';
+                document.getElementById('docNumber').innerText = i.formatted_num;
+                document.getElementById('docDate').innerText = fmtDate(i.date);
+                document.getElementById('docMetaLabel').innerText = "Due Date:";
+                document.getElementById('docMetaDate').innerText = i.due_date ? fmtDate(i.due_date) : 'On Receipt';
+                
+                // Track for email
+                currentClientEmail = data.client_email || "";
+                currentClientName = data.client_full_name || i.client_name;
+                
+                document.getElementById('docClientName').innerText = currentClientName;
+                
+                let clientInfo = '';
+                if(data.client_company) clientInfo += `${data.client_company}<br>`;
+                if(data.client_reg) clientInfo += `Reg No: ${data.client_reg}<br>`;
+                if(data.client_address) clientInfo += `${data.client_address.replace(/\n/g, '<br>')}<br>`;
+                document.getElementById('docClientAddress').innerHTML = clientInfo;
+
+                const tbody = document.getElementById('docItemsBody');
+                tbody.innerHTML = '';
+                data.items.forEach(item => {
+                    tbody.innerHTML += renderDocumentItemRow(item);
+                });
+
+                document.getElementById('docSubtotal').innerText = money(i.subtotal);
+                const docDiscountRow = document.getElementById('docDiscountRow');
+                const invDiscountAmount = parseFloat(i.discount_amount || 0);
+                const invDiscountPct = parseFloat(i.discount_percent || 0);
+                if(invDiscountAmount > 0) {
+                    docDiscountRow.style.display = '';
+                    document.getElementById('docDiscountPctLabel').innerText = invDiscountPct > 0 ? `(${invDiscountPct.toFixed(2).replace(/\.00$/, '')}%)` : '';
+                    document.getElementById('docDiscount').innerText = '-' + money(invDiscountAmount);
+                } else {
+                    docDiscountRow.style.display = 'none';
+                    document.getElementById('docDiscountPctLabel').innerText = '';
+                    document.getElementById('docDiscount').innerText = '';
+                }
+                document.getElementById('docVat').innerText = money(i.vat_amount);
+                document.getElementById('docTotal').innerText = money(i.total);
+                document.getElementById('docDueNowRow').style.display = '';
+                document.getElementById('docBalanceRow').style.display = '';
+                document.getElementById('docDueNow').innerText = money(i.amount_due_now || i.total || 0);
+                document.getElementById('docBalanceRemaining').innerText = money(i.balance_remaining || 0);
+                if(parseFloat(i.total_paid || 0) > 0 || parseFloat(i.total_credited || 0) > 0) {
+                    document.getElementById('docPaidRow').style.display = '';
+                    document.getElementById('docOutstandingRow').style.display = '';
+                    document.getElementById('docTotalPaid').innerText = money(i.total_paid || 0);
+                    document.getElementById('docOutstanding').innerText = money(i.outstanding_balance || 0);
+                } else {
+                    document.getElementById('docPaidRow').style.display = 'none';
+                    document.getElementById('docOutstandingRow').style.display = 'none';
+                }
+                
+                const infoBox = document.getElementById('docAdditionalInfo');
+                const projectNote = i.invoice_type === 'project' && i.project_name ? `Project Invoice: ${i.project_name}${i.project_code ? ' (' + i.project_code + ')' : ''}` : '';
+                if (projectNote || (invoiceAdditionalInfo && invoiceAdditionalInfo.trim() !== '')) {
+                    infoBox.innerText = [projectNote, invoiceAdditionalInfo].filter(Boolean).join('\n\n');
+                    infoBox.style.display = 'block';
+                } else {
+                    infoBox.style.display = 'none';
+                }
+
+                docModal.show();
+            }).catch(err => alert('Could not load invoice: ' + err.message));
+        }
+
+        function openPaymentModal(invoiceId, invoiceNumber, invoiceTotal) {
+            document.getElementById('paymentInvoiceId').value = invoiceId;
+            document.getElementById('paymentDate').value = new Date().toISOString().split('T')[0];
+            document.getElementById('paymentAmount').value = '';
+            document.getElementById('paymentMethod').value = 'EFT';
+            document.getElementById('paymentReference').value = '';
+            document.getElementById('paymentNotes').value = '';
+            document.getElementById('paymentInvoiceInfo').innerText = `Invoice ${invoiceNumber} total: ${money(invoiceTotal || 0)}. Enter the amount received to issue a receipt.`;
+            paymentModal.show();
+        }
+
+        function saveInvoicePayment() {
+            const invoiceId = document.getElementById('paymentInvoiceId').value;
+            const payload = {
+                payment_date: document.getElementById('paymentDate').value,
+                amount: parseFloat(document.getElementById('paymentAmount').value) || 0,
+                payment_method: document.getElementById('paymentMethod').value,
+                reference: document.getElementById('paymentReference').value,
+                notes: document.getElementById('paymentNotes').value
+            };
+            if(payload.amount <= 0) return alert('Enter a payment amount greater than zero.');
+            fetch(`/api/invoice/${invoiceId}/payment`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(r => r.json()).then(res => {
+                if(res.status === 'error') return alert(res.message || 'Could not save payment.');
+                paymentModal.hide();
+                viewReceipt(res.payment_id);
+                refreshInvoicingLists();
+            });
+        }
+
+        function viewReceipt(paymentId) {
+            fetch('/api/receipt/' + paymentId).then(r => r.json()).then(data => {
+                if(data.status === 'error') return alert(data.message || 'Receipt not found.');
+                const r = data.receipt;
+                const i = data.invoice;
+                currentDocType = 'receipt';
+                currentDocId = paymentId;
+                document.getElementById('docTypeTitle').innerText = 'RECEIPT';
+                document.getElementById('docTypeTitle').style.color = '#198754';
+                document.getElementById('docClientLabel').innerText = 'RECEIVED FROM:';
+                document.getElementById('docNumber').innerText = data.receipt_no;
+                document.getElementById('docDate').innerText = r.payment_date;
+                document.getElementById('docMetaLabel').innerText = 'Invoice:';
+                document.getElementById('docMetaDate').innerText = i.formatted_num;
+                currentClientEmail = data.client_email || '';
+                currentClientName = data.client_full_name || i.client_name;
+                document.getElementById('docClientName').innerText = currentClientName;
+                let clientInfo = '';
+                if(data.client_company) clientInfo += `${data.client_company}<br>`;
+                if(data.client_reg) clientInfo += `Reg No: ${data.client_reg}<br>`;
+                if(data.client_address) clientInfo += `${data.client_address.replace(/\n/g, '<br>')}<br>`;
+                document.getElementById('docClientAddress').innerHTML = clientInfo;
+                document.getElementById('docItemsBody').innerHTML = `<tr><td class="ps-2">${fmtDate(r.payment_date)}</td><td>Payment received for Invoice ${i.formatted_num}${r.reference ? ' - Ref: ' + r.reference : ''}</td><td class="qty-col">1</td><td class="unit-price-col">${money(r.amount || 0)}</td><td class="amount-col pe-2">${money(r.amount || 0)}</td></tr>`;
+                document.getElementById('docSubtotal').innerText = money(r.amount || 0);
+                document.getElementById('docDiscountRow').style.display = 'none';
+                document.getElementById('docVat').innerText = money(0);
+                document.getElementById('docTotal').innerText = money(r.amount || 0);
+                document.getElementById('docDueNowRow').style.display = 'none';
+                document.getElementById('docBalanceRow').style.display = 'none';
+                document.getElementById('docPaidRow').style.display = '';
+                document.getElementById('docOutstandingRow').style.display = '';
+                document.getElementById('docTotalPaid').innerText = money(data.total_paid || 0);
+                document.getElementById('docOutstanding').innerText = money(data.outstanding_balance || 0);
+                const infoBox = document.getElementById('docAdditionalInfo');
+                infoBox.innerText = r.notes || '';
+                infoBox.style.display = r.notes ? 'block' : 'none';
+                docModal.show();
+            });
+        }
+
+        function postInvoiceAccounting(invoiceId, invoiceNumber) {
+            if(!confirm(`Post ${invoiceNumber || 'this invoice'} to Accounting? This will create a posted General Ledger entry and cannot be posted twice.`)) return;
+            fetch(`/api/invoice/${invoiceId}/post_accounting`, { method: 'POST' })
+                .then(r => r.json())
+                .then(res => {
+                    if(res.status === 'error') return alert(res.message || 'Could not post invoice to Accounting.');
+                    alert(res.message || 'Invoice posted to Accounting.');
+                    refreshInvoicingLists();
+                })
+                .catch(err => alert('Could not post invoice to Accounting: ' + err.message));
+        }
+
+        function postCreditNoteAccounting(creditId, creditNumber) {
+            if(!confirm(`Post ${creditNumber || 'this credit note'} to Accounting? This will create a posted General Ledger entry and cannot be posted twice.`)) return;
+            fetch(`/api/credit_note/${creditId}/post_accounting`, { method: 'POST' })
+                .then(r => r.json())
+                .then(res => {
+                    if(res.status === 'error') return alert(res.message || 'Could not post credit note to Accounting.');
+                    alert(res.message || 'Credit note posted to Accounting.');
+                    refreshInvoicingLists();
+                })
+                .catch(err => alert('Could not post credit note to Accounting: ' + err.message));
+        }
+
+        function markInvoiceStatus(id, status) {
+            if(confirm(`Mark invoice as ${status}?`)) {
+                fetch('/api/invoice/' + id + '/status', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({status: status})
+                }).then(() => refreshInvoicingLists());
+            }
+        }
+        
+        function issueCreditNote(id, invoiceNumber, outstandingAmount) {
+            const maxAmount = parseFloat(outstandingAmount || 0);
+            if(maxAmount <= 0) return alert('This invoice has no outstanding amount to credit.');
+            const amountInput = prompt(`Enter credit note amount for ${invoiceNumber}. Outstanding amount is ${money(maxAmount)}.`, maxAmount.toFixed(2));
+            if(amountInput === null) return;
+            const amount = parseFloat(amountInput);
+            if(!amount || amount <= 0) return alert('Credit note amount must be greater than zero.');
+            if(amount > maxAmount) return alert('Credit note amount cannot exceed the outstanding amount.');
+            const reason = prompt('Enter credit note reason / notes (optional):', '') || '';
+            if(confirm(`Issue credit note for ${money(amount)} on ${invoiceNumber}?`)) {
+                fetch('/api/invoice/' + id + '/credit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ amount: amount, reason: reason })
+                }).then(r => r.json()).then(res => {
+                    if(res.status === 'error') return alert(res.message || 'Could not issue credit note.');
+                    viewCreditNote(res.credit_id);
+                    refreshInvoicingLists();
+                }).catch(err => alert('Could not issue credit note: ' + err.message));
+            }
+        }
+
+        function viewCreditNote(creditId) {
+            fetch('/api/credit_note/' + creditId).then(r => r.json()).then(data => {
+                if(data.status === 'error') return alert(data.message || 'Credit note not found.');
+                const cn = data.credit_note;
+                const i = data.invoice;
+                currentDocType = 'credit_note';
+                currentDocId = creditId;
+                document.getElementById('docTypeTitle').innerText = 'CREDIT NOTE';
+                document.getElementById('docTypeTitle').style.color = '#6c757d';
+                document.getElementById('docClientLabel').innerText = 'CREDITED TO:';
+                document.getElementById('docNumber').innerText = data.credit_no;
+                document.getElementById('docDate').innerText = cn.credit_date;
+                document.getElementById('docMetaLabel').innerText = 'Invoice:';
+                document.getElementById('docMetaDate').innerText = i.formatted_num;
+                currentClientEmail = data.client_email || '';
+                currentClientName = data.client_full_name || i.client_name;
+                document.getElementById('docClientName').innerText = currentClientName;
+                let clientInfo = '';
+                if(data.client_company) clientInfo += `${data.client_company}<br>`;
+                if(data.client_reg) clientInfo += `Reg No: ${data.client_reg}<br>`;
+                if(data.client_address) clientInfo += `${data.client_address.replace(/\n/g, '<br>')}<br>`;
+                document.getElementById('docClientAddress').innerHTML = clientInfo;
+                document.getElementById('docItemsBody').innerHTML = `<tr><td class="ps-2">${fmtDate(cn.credit_date)}</td><td>Credit note against Invoice ${i.formatted_num}${cn.reason ? ' - ' + cn.reason : ''}</td><td class="qty-col">1</td><td class="unit-price-col">-${money(cn.amount || 0)}</td><td class="amount-col pe-2">-${money(cn.amount || 0)}</td></tr>`;
+                document.getElementById('docSubtotal').innerText = '-' + money(cn.amount || 0);
+                document.getElementById('docDiscountRow').style.display = 'none';
+                document.getElementById('docVat').innerText = money(0);
+                document.getElementById('docTotal').innerText = '-' + money(cn.amount || 0);
+                document.getElementById('docDueNowRow').style.display = 'none';
+                document.getElementById('docBalanceRow').style.display = 'none';
+                document.getElementById('docPaidRow').style.display = '';
+                document.getElementById('docOutstandingRow').style.display = '';
+                document.getElementById('docTotalPaid').innerText = money(data.total_paid || 0);
+                document.getElementById('docOutstanding').innerText = money(data.outstanding_balance || 0);
+                const infoBox = document.getElementById('docAdditionalInfo');
+                infoBox.innerText = cn.reason || '';
+                infoBox.style.display = cn.reason ? 'block' : 'none';
+                docModal.show();
+            }).catch(err => alert('Could not load credit note: ' + err.message));
+        }
+
+        // --- QUOTE LOGIC ---
+        function openCreateQuoteModal() {
+            document.getElementById('quoteClient').value = '';
+            document.getElementById('quoteRows').innerHTML = '';
+            addQuoteRow();
+            document.getElementById('quoteApplyVat').checked = false;
+            calculateQuoteTotals();
+            createQuoteModal.show();
+        }
+
+        function applyQuoteServiceSelection(descInput) {
+            const row = descInput.closest('.custom-quote-row');
+            const amountInput = row.querySelector('.price-input');
+            const key = String(descInput.value || '').trim().toLowerCase();
+            if (Object.prototype.hasOwnProperty.call(quoteServicePriceMap, key)) {
+                amountInput.value = quoteServicePriceMap[key].toFixed(2);
+                calculateQuoteTotals();
+            }
+        }
+
+        function addQuoteRow() {
+            const div = document.createElement('div');
+            div.className = 'd-flex mb-2 gap-2 custom-quote-row';
+            div.innerHTML = `
+                <input type="date" class="form-control form-control-sm date-input" style="width: 140px;">
+                <input type="text" class="form-control form-control-sm desc-input" list="quoteServiceList" placeholder="Select service or type custom description..." oninput="applyQuoteServiceSelection(this)" onchange="applyQuoteServiceSelection(this)">
+                <input type="number" class="form-control form-control-sm qty-input text-end" style="width: 80px;" min="0.01" step="0.01" value="1" oninput="calculateQuoteTotals()">
+                <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" placeholder="Unit Price (R)" oninput="calculateQuoteTotals()">
+                <input type="text" class="form-control form-control-sm line-total-display text-end" style="width: 120px;" value="0.00" readonly tabindex="-1" title="Line Total">
+                <button class="btn btn-sm btn-outline-danger" onclick="this.parentElement.remove(); calculateQuoteTotals()">X</button>
+            `;
+            document.getElementById('quoteRows').appendChild(div);
+        }
+
+        function calculateQuoteTotals() {
+            let subtotal = 0;
+            document.querySelectorAll('.custom-quote-row').forEach(row => {
+                subtotal += lineTotalFromRow(row, '.qty-input', '.price-input');
+            });
+
+            let vat = 0;
+            if(document.getElementById('quoteApplyVat').checked) vat = subtotal * 0.15;
+            let total = subtotal + vat;
+
+            document.getElementById('quoteSubtotalDisp').innerText = money(subtotal);
+            document.getElementById('quoteVatDisp').innerText = money(vat);
+            document.getElementById('quoteTotalDisp').innerText = money(total);
+
+            return {subtotal, vat, total};
+        }
+
+        function saveQuote() {
+            const quoteSelect = document.getElementById('quoteClient');
+            const client = quoteSelect.value;
+            const clientOption = quoteSelect.options[quoteSelect.selectedIndex];
+            const clientName = clientOption ? (clientOption.dataset.clientName || clientOption.textContent.trim()) : '';
+            if(!client) return alert("Client Name is required.");
+            
+            const items = [];
+            let invalidLine = null;
+            document.querySelectorAll('.custom-quote-row').forEach(row => {
+                const dateVal = row.querySelector('.date-input').value;
+                const desc = (row.querySelector('.desc-input').value || '').trim();
+                if(!desc) return;
+                const qtyInput = row.querySelector('.qty-input');
+                const priceInput = row.querySelector('.price-input');
+                const quantity = Math.max(parseFloat(qtyInput.value) || 1, 0);
+                const unitPrice = Math.max(parseFloat(priceInput.value) || 0, 0);
+                const amt = quantity * unitPrice;
+                if(quantity <= 0 || unitPrice <= 0 || amt <= 0) {
+                    invalidLine = { row: row, desc: desc };
+                    return;
+                }
+                items.push({ service_date: dateVal, description: desc, quantity: quantity, unit_price: unitPrice, amount: amt });
+            });
+            if(invalidLine) {
+                const priceInput = invalidLine.row.querySelector('.price-input');
+                if(priceInput) priceInput.focus();
+                return alert('Enter a quantity and unit price greater than zero for every quote line that has a description.');
+            }
+            if(items.length === 0) return alert('Add at least one quote line item with a description.');
+
+            const totals = calculateQuoteTotals();
+            if(totals.total === 0) return alert("Quote total cannot be zero.");
+
+            const data = {
+                client_id: client,
+                client_name: clientName,
+                date: document.getElementById('quoteDate').value,
+                valid_until: document.getElementById('quoteValidDate').value,
+                subtotal: totals.subtotal,
+                discount_percent: totals.discountPercent,
+                discount_amount: totals.discountAmount,
+                vat_amount: totals.vat,
+                total: totals.total,
+                apply_vat: document.getElementById('quoteApplyVat').checked,
+                items: items
+            };
+
+            fetch('/api/save_quote', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            }).then(() => { createQuoteModal.hide(); refreshInvoicingLists(); });
+        }
+
+        function viewQuote(id) {
+            fetch('/api/quote/' + id)
+            .then(r => r.json().catch(() => ({status:'error', message:'Server returned an invalid response.'})))
+            .then(data => {
+                if(data.status === 'error') return alert(data.message || 'Could not load quote.');
+                const q = data.quote;
+                currentDocType = 'quote';
+                currentDocId = id;
+                document.getElementById('docTypeTitle').innerText = "OFFICIAL QUOTE";
+                document.getElementById('docTypeTitle').style.color = "#0d6efd";
+                
+                document.getElementById('docClientLabel').innerText = 'QUOTED TO:';
+                document.getElementById('docNumber').innerText = q.formatted_num;
+                document.getElementById('docDate').innerText = q.date;
+                document.getElementById('docMetaLabel').innerText = "Valid Until:";
+                document.getElementById('docMetaDate').innerText = q.valid_until || 'N/A';
+                
+                // Track for email
+                currentClientEmail = data.client_email || "";
+                currentClientName = data.client_full_name || q.client_name;
+                
+                document.getElementById('docClientName').innerText = currentClientName;
+                
+                let clientInfo = '';
+                if(data.client_company) clientInfo += `${data.client_company}<br>`;
+                if(data.client_reg) clientInfo += `Reg No: ${data.client_reg}<br>`;
+                if(data.client_address) clientInfo += `${data.client_address.replace(/\n/g, '<br>')}<br>`;
+                document.getElementById('docClientAddress').innerHTML = clientInfo;
+
+                const tbody = document.getElementById('docItemsBody');
+                tbody.innerHTML = '';
+                data.items.forEach(item => {
+                    tbody.innerHTML += renderDocumentItemRow(item);
+                });
+
+                document.getElementById('docSubtotal').innerText = money(q.subtotal);
+                document.getElementById('docDiscountRow').style.display = 'none';
+                document.getElementById('docDiscountPctLabel').innerText = '';
+                document.getElementById('docDiscount').innerText = '';
+                document.getElementById('docVat').innerText = money(q.vat_amount);
+                document.getElementById('docTotal').innerText = money(q.total);
+                document.getElementById('docDueNowRow').style.display = 'none';
+                document.getElementById('docBalanceRow').style.display = 'none';
+                document.getElementById('docPaidRow').style.display = 'none';
+                document.getElementById('docOutstandingRow').style.display = 'none';
+
+                const infoBox = document.getElementById('docAdditionalInfo');
+                if (invoiceAdditionalInfo && invoiceAdditionalInfo.trim() !== '') {
+                    infoBox.innerText = invoiceAdditionalInfo;
+                    infoBox.style.display = 'block';
+                } else {
+                    infoBox.style.display = 'none';
+                }
+
+                docModal.show();
+            }).catch(err => alert('Could not load quote: ' + err.message));
+        }
+
+        function markQuoteStatus(id, status) {
+            if(confirm(`Mark quote as ${status}?`)) {
+                fetch('/api/quote/' + id + '/status', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({status: status})
+                })
+                .then(r => r.json().then(data => ({ok: r.ok, data})).catch(() => ({ok: false, data: {status:'error', message:'Server returned an invalid response.'}})))
+                .then(({ok, data}) => {
+                    if(!ok || data.status === 'error') return alert(data.message || 'Could not update quote status.');
+                    refreshInvoicingLists();
+                })
+                .catch(err => alert('Could not update quote status: ' + err.message));
+            }
+        }
+
+        function convertQuoteToInvoice(id) {
+            if(!confirm('Convert this accepted quote to a tax invoice? This will create a new invoice and mark the quote as Converted.')) return;
+            fetch('/api/quote/' + id + '/convert_to_invoice', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            })
+            .then(r => r.json().then(data => ({ok: r.ok, data})).catch(() => ({ok: false, data: {status:'error', message:'Server returned an invalid response.'}})))
+            .then(({ok, data}) => {
+                if(!ok || data.status === 'error') return alert(data.message || 'Could not convert quote.');
+                alert('Quote converted to invoice #' + data.invoice_id + '.');
+                refreshInvoicingLists();
+            })
+            .catch(err => alert('Could not convert quote: ' + err.message));
+        }
+
+        // --- PDF GENERATOR & EMAIL LOGIC ---
+        function downloadDocPDF() {
+            if(currentDocType === 'invoice' && currentDocId) {
+                window.location.href = `/download/invoice/${currentDocId}.pdf`;
+                return;
+            }
+            if(currentDocType === 'quote' && currentDocId) {
+                window.location.href = `/download/quote/${currentDocId}.pdf`;
+                return;
+            }
+            const docName = document.getElementById('docTypeTitle').innerText + "_" + document.getElementById('docNumber').innerText;
+            html2pdf().set(getPdfOptions(docName)).from(document.getElementById('pdfCanvas')).save();
+        }
+
+        function emailDocPDF() {
+            const email = prompt("Enter the client's email address to send this document:", currentClientEmail);
+            if(!email) return;
+            
+            const btn = document.getElementById('btnEmailDoc');
+            btn.innerText = "Sending...";
+            btn.disabled = true;
+
+            if((currentDocType === 'invoice' || currentDocType === 'quote') && currentDocId) {
+                const endpoint = currentDocType === 'invoice' ? `/api/email_invoice_pdf/${currentDocId}` : `/api/email_quote_pdf/${currentDocId}`;
+                fetch(endpoint, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({email: email})
+                }).then(res => res.json()).then(data => {
+                    alert(data.message);
+                    btn.innerText = "📧 Email Document";
+                    btn.disabled = false;
+                }).catch(err => {
+                    alert("A server error occurred while sending the email.");
+                    btn.innerText = "📧 Email Document";
+                    btn.disabled = false;
+                });
+                return;
+            }
+            
+            const docName = document.getElementById('docTypeTitle').innerText + "_" + document.getElementById('docNumber').innerText;
+            const element = document.getElementById('pdfCanvas');
+            
+            html2pdf().set(getPdfOptions(docName)).from(element).output('blob').then(function(pdfBlob) {
+                const fd = new FormData();
+                fd.append('pdf', pdfBlob, docName + '.pdf');
+                fd.append('email', email);
+                fd.append('doc_name', docName);
+                fd.append('client_name', currentClientName);
+                
+                fetch('/api/email_document', {
+                    method: 'POST',
+                    body: fd
+                }).then(res => res.json()).then(data => {
+                    alert(data.message);
+                    btn.innerText = "📧 Email Document";
+                    btn.disabled = false;
+                }).catch(err => {
+                    alert("A server error occurred while sending the email.");
+                    btn.innerText = "📧 Email Document";
+                    btn.disabled = false;
+                });
+            });
+        }
+
+    </script>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

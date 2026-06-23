@@ -1,0 +1,1815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Enterprise Hub | {{ session.get('company_name', 'Loading...') }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f4f6f9; font-family: Arial, sans-serif; }
+        .hub-header { background: linear-gradient(135deg, #0d6efd, #0b5ed7); color: white; padding: 40px 0; border-bottom: 5px solid #0043a8; }
+        .app-card { border: none; border-radius: 12px; transition: transform 0.2s, box-shadow 0.2s; cursor: pointer; height: 100%; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .app-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.1); }
+        .app-icon { font-size: 3rem; margin-bottom: 15px; }
+        .admin-panel { background: white; border-radius: 12px; padding: 25px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-top: 30px; border-top: 4px solid #212529; }
+    </style>
+</head>
+<body>
+
+    <div class="hub-header shadow-sm">
+        <div class="container d-flex justify-content-between align-items-center">
+            <div class="d-flex align-items-center">
+                {% if session.get('company_logo') %}
+                    <img src="/uploads/logos/{{ session.company_logo }}" alt="Logo" class="shadow rounded bg-white me-3" style="width: 70px; height: 70px; object-fit: contain; padding: 5px;">
+                {% else %}
+                    <div class="bg-white text-primary d-flex align-items-center justify-content-center rounded shadow me-3" style="width: 70px; height: 70px; font-size: 32px; font-weight: bold;">
+                        {{ session.get('company_name', 'C')[0] }}
+                    </div>
+                {% endif %}
+                <div>
+                    <h1 class="mb-0 fw-bold">{{ session.get('company_name', 'Workspace') }}</h1>
+                    <p class="mb-0 opacity-75">Enterprise Operations Hub</p>
+                </div>
+            </div>
+            <div class="text-end">
+                <span class="me-3 fw-bold">👋 Welcome, {{ session.get('username', 'User') }}</span>
+                {% if session.get('is_superadmin') %}
+                    <span class="badge bg-warning text-dark me-3 py-2 px-3 shadow-sm border border-dark">⭐ Super Admin</span>
+                {% elif session.get('is_company_admin') %}
+                    <span class="badge bg-danger text-white me-3 py-2 px-3 shadow-sm border border-dark">🛡️ Company Admin</span>
+                {% endif %}
+                <a href="/logout" class="btn btn-light fw-bold text-danger">Logout</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="container mt-5">
+        <div class="row g-4 justify-content-center">
+            <div class="col-md-3">
+                <div class="card app-card text-center border border-primary shadow-sm" onclick="window.location.href='/mobile'">
+                    <div class="card-body p-4">
+                        <div class="app-icon text-primary">📱</div>
+                        <h5 class="fw-bold text-dark">Mobile App</h5>
+                        <p class="text-muted small">Open the phone-friendly PWA for bookings, projects, notes and uploads.</p>
+                        <span class="btn btn-primary mt-2 w-100 fw-bold">Open Mobile</span>
+                    </div>
+                </div>
+            </div>
+            
+            {% if session.get('can_booking') or session.get('is_superadmin') %}
+            <div class="col-md-3">
+                <div class="card app-card text-center" onclick="window.location.href='/booking'">
+                    <div class="card-body p-4">
+                        <div class="app-icon text-primary">📅</div>
+                        <h5 class="fw-bold text-dark">Booking & Ops</h5>
+                        <p class="text-muted small">Manage clients, schedule assignments, and dispatch staff.</p>
+                        <span class="btn btn-outline-primary mt-2 w-100 fw-bold">Launch App</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if session.get('can_invoicing') or session.get('is_superadmin') %}
+            <div class="col-md-3">
+                <div class="card app-card text-center border border-info shadow-sm" onclick="window.location.href='/invoicing'">
+                    <div class="card-body p-4">
+                        <div class="app-icon text-info">🧾</div>
+                        <h5 class="fw-bold text-dark">Invoicing & Quotes</h5>
+                        <p class="text-muted small">Bill clients for completed bookings and issue official tax documents.</p>
+                        <span class="btn btn-outline-info text-dark mt-2 w-100 fw-bold">Launch App</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if session.get('can_finance') or session.get('is_superadmin') %}
+            <div class="col-md-3">
+                <div class="card app-card text-center" onclick="window.location.href='/finance'">
+                    <div class="card-body p-4">
+                        <div class="app-icon text-warning">💰</div>
+                        <h5 class="fw-bold text-dark">Finance</h5>
+                        <p class="text-muted small">Track revenue, manage expenses, update service pricing.</p>
+                        <span class="btn btn-outline-warning mt-2 w-100 fw-bold text-dark">Launch App</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if session.get('can_accounting') or session.get('is_superadmin') %}
+            <div class="col-md-3">
+                <div class="card app-card text-center border border-dark shadow-sm" onclick="window.location.href='/accounting'">
+                    <div class="card-body p-4">
+                        <div class="app-icon text-dark">📘</div>
+                        <h5 class="fw-bold text-dark">Accounting</h5>
+                        <p class="text-muted small">IFRS for SMEs ledger, journals and financial statements.</p>
+                        <span class="btn btn-outline-dark mt-2 w-100 fw-bold">Launch App</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if session.get('can_payroll') or session.get('is_superadmin') %}
+            <div class="col-md-3">
+                <div class="card app-card text-center" onclick="window.location.href='/payroll'">
+                    <div class="card-body p-4">
+                        <div class="app-icon text-success">👥</div>
+                        <h5 class="fw-bold text-dark">HR & Payroll</h5>
+                        <p class="text-muted small">Manage employees, payslips, EMP201s, and bulk IRP5s.</p>
+                        <span class="btn btn-outline-success mt-2 w-100 fw-bold">Launch App</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if not session.get('can_booking') and not session.get('can_finance') and not session.get('can_payroll') and not session.get('can_invoicing') and not session.get('can_accounting') and not session.get('is_superadmin') %}
+            <div class="col-12">
+                <div class="alert alert-warning text-center shadow-sm">
+                    You do not currently have access to any applications. Please contact your Company Admin.
+                </div>
+            </div>
+            {% endif %}
+
+        </div>
+
+        {% if session.get('is_superadmin') %}
+        <div class="admin-panel mb-5">
+            <h4 class="fw-bold mb-4">⚙️ Super Admin Controls</h4>
+            <div class="row align-items-end g-2">
+                <div class="col-md-3">
+                    <label class="form-label fw-bold text-muted small">Switch Active Company</label>
+                    <div class="d-flex">
+                        <select id="switchCompanySelect" class="form-select border-dark me-2"></select>
+                        <button class="btn btn-dark" onclick="switchCompany()">Switch</button>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-outline-primary w-100 mb-2 fw-bold" onclick="openCompaniesModal()">🏢 Tenants</button>
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-outline-secondary w-100 mb-2 fw-bold" onclick="openUsersModal()">🔐 Accounts</button>
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-outline-dark w-100 mb-2 fw-bold" onclick="openAuditModal()">📜 Audit Trail</button>
+                </div>
+                <div class="col-md-3">
+                    <div class="d-flex">
+                        <button class="btn btn-success w-100 mb-2 fw-bold me-2" onclick="openTaxModal()">💰 Tax Tables</button>
+                        <button class="btn btn-info w-100 mb-2 fw-bold text-white" onclick="openHolidayModal()">🏖️ Holidays</button>
+                    </div>
+                </div>
+            </div>
+            <div class="row align-items-end g-2 mt-2">
+                <div class="col-md-3">
+                    <button class="btn btn-outline-dark w-100 fw-bold" onclick="openCustomFieldSettingsModal()">🧩 Custom Field Settings</button>
+                </div>
+                <div class="col-md-3">
+                    <button class="btn btn-outline-success w-100 fw-bold" onclick="exportFullDatabaseBackup()">🗄️ Export Full DB Backup</button>
+                </div>
+                <div class="col-md-3">
+                    <button class="btn btn-outline-danger w-100 fw-bold" onclick="openFullDatabaseRestoreModal()">♻️ Restore Full DB Backup</button>
+                </div>
+                <div class="col-md-3">
+                    <button class="btn btn-outline-primary w-100 fw-bold" onclick="openTemplateUploadModal()">📤 Upload Template</button>
+                </div>
+            </div>
+        </div>
+        
+        {% endif %}
+
+        {% if session.get('is_company_admin') or session.get('is_superadmin') %}
+        <div class="admin-panel mb-5 border-top border-danger" style="border-top-width: 4px !important;">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <div>
+                    <h4 class="fw-bold mb-0">🛡️ Company Admin Controls</h4>
+                    <p class="text-muted small mb-0">Manage staff access and view system activity for {{ session.get('company_name') }}.</p>
+                </div>
+                <div>
+                    <button class="btn btn-outline-primary fw-bold shadow-sm me-2" onclick="window.location.href='/settings'">⚙️ Email & Calendar Settings</button>
+                    <button class="btn btn-outline-success fw-bold shadow-sm me-2" onclick="exportCompanyData()">⬇️ Export Company Data</button>
+                    <button class="btn btn-outline-success fw-bold shadow-sm me-2" onclick="openCompanyImportModal()">⬆️ Import Company Data</button>
+                    <button class="btn btn-outline-dark fw-bold shadow-sm me-2" onclick="openCustomFieldSettingsModal()">🧩 Custom Field Settings</button>
+                    <button class="btn btn-dark fw-bold shadow-sm me-2" onclick="openAuditModal()">📜 View Audit Trail</button>
+                    <button class="btn btn-danger fw-bold shadow-sm" onclick="openUsersModal()">👥 Manage Staff Accounts</button>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    {% if session.get('is_superadmin') %}
+    <div class="modal fade" id="taxModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">SARS Tax Configuration Engine</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div class="d-flex align-items-center">
+                            <label class="fw-bold me-2">Tax Year:</label>
+                            <input type="number" id="taxYearSelectInput" class="form-control form-control-sm w-auto d-inline-block border-success" value="2026">
+                            <button class="btn btn-sm btn-success ms-2 fw-bold" onclick="loadTaxConfig()">Load Year</button>
+                            <button class="btn btn-sm btn-outline-primary ms-2 fw-bold" onclick="copyPreviousYearTax()">📑 Copy from Prev Year</button>
+                        </div>
+                        <div class="d-flex align-items-center flex-wrap justify-content-end gap-2">
+                            <label class="fw-bold me-1">Rebates/Thresholds:</label>
+                            <input type="number" id="primaryRebateInput" class="form-control form-control-sm w-auto d-inline-block" placeholder="Primary" title="Primary Rebate">
+                            <input type="number" id="secondaryRebateInput" class="form-control form-control-sm w-auto d-inline-block" placeholder="65+ Rebate" title="Secondary Rebate">
+                            <input type="number" id="tertiaryRebateInput" class="form-control form-control-sm w-auto d-inline-block" placeholder="75+ Rebate" title="Tertiary Rebate">
+                            <input type="number" id="thresholdUnder65Input" class="form-control form-control-sm w-auto d-inline-block" placeholder="Under 65 Threshold" title="Under 65 Threshold">
+                            <input type="number" id="threshold65Input" class="form-control form-control-sm w-auto d-inline-block" placeholder="65-74 Threshold" title="65 to 74 Threshold">
+                            <input type="number" id="threshold75Input" class="form-control form-control-sm w-auto d-inline-block" placeholder="75+ Threshold" title="75+ Threshold">
+                            <button class="btn btn-sm btn-outline-success ms-2" onclick="saveTaxRebate()">Save Rebate</button>
+                        </div>
+                    </div>
+                    
+                    <table class="table table-bordered table-sm bg-white shadow-sm align-middle text-center">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Min Income (R)</th>
+                                <th>Max Income (R)</th>
+                                <th>Base Tax (R)</th>
+                                <th>Rate (%)</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="taxBracketsBody"></tbody>
+                        <tfoot class="table-secondary">
+                            <tr>
+                                <td><input type="number" id="newTaxMin" class="form-control form-control-sm" placeholder="e.g. 0"></td>
+                                <td><input type="number" id="newTaxMax" class="form-control form-control-sm" placeholder="e.g. 237100"></td>
+                                <td><input type="number" id="newTaxBase" class="form-control form-control-sm" placeholder="e.g. 0"></td>
+                                <td><input type="number" id="newTaxRate" class="form-control form-control-sm" placeholder="e.g. 0.18"></td>
+                                <td>
+                                    <div class="d-flex gap-1 justify-content-center">
+                                        <button id="btnSaveBracket" class="btn btn-sm btn-success fw-bold w-100" onclick="saveTaxBracket()">+ Add Bracket</button>
+                                        <button id="btnCancelEditBracket" class="btn btn-sm btn-secondary fw-bold" style="display:none;" onclick="cancelEditTaxBracket()">X</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                    <p class="small text-muted mb-0"><em>Note: Ensure the Max Income of the highest bracket is set to a massive number (e.g., 999999999) to catch all remaining income. Rates should be decimals (e.g. 0.18 for 18%).</em></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="holidayModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-info text-white">
+                    <h5 class="modal-title">Manage Public Holidays</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div class="d-flex align-items-center">
+                            <label class="fw-bold me-2">Year:</label>
+                            <input type="number" id="holidayYearSelect" class="form-control form-control-sm w-auto d-inline-block border-info" value="2026">
+                            <button class="btn btn-sm btn-info text-white ms-2" onclick="loadHolidays()">Load</button>
+                        </div>
+                        <button class="btn btn-sm btn-outline-dark fw-bold" onclick="generateStandardHolidays()">⚡ Populate Standard SA Holidays</button>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-7">
+                            <table class="table table-hover table-sm bg-white border shadow-sm align-middle">
+                                <thead class="table-light"><tr><th>Date (YYYY-MM-DD)</th><th>Holiday Name</th><th></th></tr></thead>
+                                <tbody id="holidaysBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="col-md-5">
+                            <div class="card border-info shadow-sm">
+                                <div class="card-header bg-info text-white fw-bold">Add Custom Holiday</div>
+                                <div class="card-body">
+                                    <p class="small text-muted mb-2">Use this to add moving holidays like Good Friday or Election Days.</p>
+                                    <label class="small fw-bold">Date</label>
+                                    <input type="date" id="newHolDate" class="form-control form-control-sm mb-2">
+                                    <label class="small fw-bold">Name</label>
+                                    <input type="text" id="newHolName" class="form-control form-control-sm mb-3">
+                                    <button class="btn btn-sm btn-info text-white w-100 fw-bold" onclick="saveHoliday()">+ Add to Calendar</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="tenantSetupModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Tenant Setup Wizard</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <input type="hidden" id="setupCompanyId">
+                    <div class="alert alert-info small mb-3">
+                        Select an industry template, review suggested terminology, booking fields and finance categories, then save. These values can be changed later without changing the core app code.
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <div class="list-group small fw-bold" id="setupStepList">
+                                <button class="list-group-item list-group-item-action active" type="button" onclick="showSetupStep(1)">1. Industry</button>
+                                <button class="list-group-item list-group-item-action" type="button" onclick="showSetupStep(2)">2. Terminology</button>
+                                <button class="list-group-item list-group-item-action" type="button" onclick="showSetupStep(3)">3. Booking Fields</button>
+                                <button class="list-group-item list-group-item-action" type="button" onclick="showSetupStep(4)">4. Finance Categories</button>
+                                <button class="list-group-item list-group-item-action" type="button" onclick="showSetupStep(5)">5. Evaluation Scorecard</button>
+                                <button class="list-group-item list-group-item-action" type="button" onclick="showSetupStep(6)">6. Review</button>
+                            </div>
+                        </div>
+                        <div class="col-md-9">
+                            <div class="card border-0 shadow-sm">
+                                <div class="card-body">
+                                    <div class="setup-step" id="setupStep1">
+                                        <h5 class="fw-bold">Select Industry Template</h5>
+                                        <p class="text-muted small">This creates starting labels, booking fields and finance categories. You can customise everything before saving.</p>
+                                        <select id="setupIndustryTemplate" class="form-select border-dark" onchange="loadSetupTemplateDefaults()">
+                                            <option value="Cleaning">Cleaning</option>
+                                            <option value="Transportation">Transportation</option>
+                                            <option value="Construction">Construction</option>
+                                            <option value="Finance Auditing">Finance Auditing</option>
+                                            <option value="Custom">Custom</option>
+                                        </select>
+                                        <div class="form-check mt-3">
+                                            <input class="form-check-input" type="checkbox" id="setupApplyDefaults">
+                                            <label class="form-check-label fw-bold" for="setupApplyDefaults">Reset this tenant to the selected template defaults</label>
+                                            <div class="form-text">Use this only when you want to replace existing custom labels, fields and categories with the selected industry defaults.</div>
+                                        </div>
+                                    </div>
+                                    <div class="setup-step d-none" id="setupStep2">
+                                        <h5 class="fw-bold">Terminology</h5>
+                                        <div class="row g-2" id="setupLabelsBody"></div>
+                                    </div>
+                                    <div class="setup-step d-none" id="setupStep3">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <div>
+                                                <h5 class="fw-bold mb-0">Booking Custom Fields</h5>
+                                                <p class="text-muted small mb-0">Configure extra fields to show for this tenant’s booking workflow.</p>
+                                            </div>
+                                            <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="addSetupBookingField()">+ Add Field</button>
+                                        </div>
+                                        <div class="table-responsive">
+                                            <table class="table table-sm table-bordered bg-white align-middle">
+                                                <thead class="table-light"><tr><th>Field Label</th><th>Type</th><th>Required</th><th>Visible</th><th></th></tr></thead>
+                                                <tbody id="setupBookingFieldsBody"></tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                    <div class="setup-step d-none" id="setupStep4">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <div>
+                                                <h5 class="fw-bold mb-0">Finance Categories</h5>
+                                                <p class="text-muted small mb-0">These are the default categories used for this tenant’s finance app.</p>
+                                            </div>
+                                            <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="addSetupFinanceCategory()">+ Add Category</button>
+                                        </div>
+                                        <div id="setupFinanceCategoriesBody"></div>
+                                    </div>
+                                    <div class="setup-step d-none" id="setupStep5">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <div>
+                                                <h5 class="fw-bold mb-0">Evaluation Scorecard</h5>
+                                                <p class="text-muted small mb-0">Configure interview scorecard blocks, questions and maximum score per question. Candidate notes remain below the scorecard in the interview form.</p>
+                                            </div>
+                                            <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="addSetupScorecardBlock()">+ Add Block</button>
+                                        </div>
+                                        <div id="setupScorecardBlocksBody"></div>
+                                    </div>
+                                    <div class="setup-step d-none" id="setupStep6">
+                                        <h5 class="fw-bold">Review Setup</h5>
+                                        <div id="setupReviewBody" class="small"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="d-flex justify-content-between mt-3">
+                                <button type="button" class="btn btn-outline-secondary" onclick="moveSetupStep(-1)">Back</button>
+                                <div>
+                                    <button type="button" class="btn btn-outline-primary me-2" onclick="moveSetupStep(1)">Next</button>
+                                    <button type="button" class="btn btn-success fw-bold" onclick="saveTenantSetup()">Save Setup</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+
+
+    {% if session.get('is_superadmin') %}
+    <div class="modal fade" id="templateUploadModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">Upload Industry Template</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="alert alert-info small">
+                        Upload a JSON template to make it available when creating a new company and in the Tenant Setup Wizard. Built-in templates cannot be overwritten.
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold small">Template Name</label>
+                        <input type="text" id="uploadTemplateName" class="form-control" placeholder="e.g. Property Management">
+                        <div class="form-text">If the JSON file contains <code>template_name</code>, this can be left blank.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold small">Template JSON File</label>
+                        <input type="file" id="uploadTemplateFile" class="form-control" accept="application/json,.json">
+                    </div>
+                    <div class="small text-muted">
+                        JSON should include: <code>template_name</code>, <code>labels</code>, <code>booking_fields</code>, <code>finance_categories</code>, and <code>evaluation_scorecard</code>.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-primary fw-bold" onclick="uploadIndustryTemplate()">Upload Template</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if session.get('is_superadmin') or session.get('is_company_admin') %}
+    <div class="modal fade" id="auditModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">System Audit Trail (Last 90 Days)</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light" style="max-height: 60vh; overflow-y: auto;">
+                    <table class="table table-hover table-sm bg-white border shadow-sm align-middle" style="font-size: 0.9rem;">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>User</th>
+                                <th>App</th>
+                                <th>Action</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="auditTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if session.get('is_superadmin') %}
+    <div class="modal fade" id="companiesModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Manage Companies</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <button class="btn btn-primary mb-3 fw-bold" onclick="openCompanyForm(null)">+ Add New Company</button>
+                    <table class="table table-hover bg-white border shadow-sm">
+                        <thead class="table-light">
+                            <tr><th>ID</th><th>Company Name</th><th>Industry</th><th>App Licensing</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody id="companiesTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="companyFormModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title" id="companyFormTitle">Company Details</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="companyId">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-bold small">Company Name</label>
+                            <input type="text" id="companyName" class="form-control" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-bold small">Upload Logo (Optional)</label>
+                            <input type="file" id="companyLogo" class="form-control" accept="image/*">
+                            <div id="companyLogoPreviewWrap" class="mt-2 d-none">
+                                <div class="small text-muted mb-1">Current logo</div>
+                                <img id="companyLogoPreview" src="" alt="Company logo" class="border rounded bg-white" style="max-width: 140px; max-height: 90px; object-fit: contain; padding: 6px;">
+                            </div>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-bold small">Company Registration No.</label>
+                            <input type="text" id="companyRegNo" class="form-control" placeholder="e.g. 2023/123456/07">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-bold small">VAT Registration No.</label>
+                            <input type="text" id="companyVatNo" class="form-control" placeholder="e.g. 4123456789">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-bold small">Industry Template</label>
+                            <select id="companyIndustryTemplate" class="form-select" onchange="showIndustryTemplateHint(this.value)">
+                                <option value="Cleaning">Cleaning</option>
+                                <option value="Transportation">Transportation</option>
+                                <option value="Construction">Construction</option>
+                                <option value="Finance Auditing">Finance Auditing</option>
+                                <option value="Custom">Custom</option>
+                            </select>
+                            <div id="industryTemplateHint" class="form-text small">Choose the starting labels, booking fields and finance categories for this tenant.</div>
+                        </div>
+                        <div class="col-md-12 mb-3">
+                            <label class="form-label fw-bold small">Physical Address</label>
+                            <textarea id="companyAddress" class="form-control" rows="2" placeholder="Full company address..."></textarea>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-bold small">Transport Allowance Policy</label>
+                            <select id="companyTransport" class="form-select" onchange="toggleTransportAmountField()">
+                                <option value="yes">Yes</option>
+                                <option value="none">No Transport Allowance</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6 mb-3" id="transportAmountWrap">
+                            <label class="form-label fw-bold small">Transport Allowance per Lift (R)</label>
+                            <input type="number" id="companyTransportAmountPerLift" class="form-control" min="0" step="0.01" value="25">
+                            <div class="form-text small">No Transport Required pays double this amount.</div>
+                        </div>
+                    </div>
+
+                                        <h6 class="fw-bold text-success border-bottom pb-2">Assign Application Licenses</h6>
+                    <p class="small text-muted mb-2">Check the applications this company is paying for. Company Admins can only assign these apps to their staff.</p>
+                    <div class="row g-2">
+                        <div class="col-md-2 col-6">
+                            <div class="form-check form-switch"><input class="form-check-input border-primary" type="checkbox" id="compAppBooking"><label class="form-check-label small fw-bold">Booking & Ops</label></div>
+                        </div>
+                        <div class="col-md-2 col-6">
+                            <div class="form-check form-switch"><input class="form-check-input border-info" type="checkbox" id="compAppInvoicing"><label class="form-check-label small fw-bold">Invoicing</label></div>
+                        </div>
+                        <div class="col-md-2 col-6">
+                            <div class="form-check form-switch"><input class="form-check-input border-warning" type="checkbox" id="compAppFinance"><label class="form-check-label small fw-bold">Finance</label></div>
+                        </div>
+                        <div class="col-md-2 col-6">
+                            <div class="form-check form-switch"><input class="form-check-input border-dark" type="checkbox" id="compAppAccounting"><label class="form-check-label small fw-bold">Accounting</label></div>
+                        </div>
+                        <div class="col-md-2 col-6">
+                            <div class="form-check form-switch"><input class="form-check-input border-success" type="checkbox" id="compAppPayroll"><label class="form-check-label small fw-bold">HR & Payroll</label></div>
+                        </div>
+                    </div>
+                    
+                    <h6 class="fw-bold text-dark border-bottom pb-2 mt-4">Integrations</h6>
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input border-dark" type="checkbox" id="compGoogleSync">
+                        <label class="form-check-label fw-bold text-dark" for="compGoogleSync">Enable Google Calendar Sync</label>
+                        <p class="small text-muted mb-0">Automatically push scheduled shifts to the configured Google Calendar.</p>
+                    </div>
+
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-primary fw-bold" onclick="saveCompany(true)">Save & Configure Template</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary fw-bold" onclick="saveCompany(false)">Save Company</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+
+    {% if session.get('is_superadmin') or session.get('is_company_admin') %}
+    <div class="modal fade" id="usersModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-secondary text-white">
+                    <h5 class="modal-title">Manage User Accounts</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <button class="btn btn-primary mb-3 fw-bold" onclick="openUserForm(null)">+ Add New User</button>
+                    <table class="table table-hover bg-white border shadow-sm align-middle">
+                        <thead class="table-light">
+                            <tr><th>Username</th><th>Assigned Company</th><th>Role</th><th>App Permissions</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody id="usersTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="userFormModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title" id="userFormTitle">User Details</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="userId">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold small">Username</label>
+                        <input type="text" id="userName" class="form-control" required autocomplete="off">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold small">Password</label>
+                        <input type="password" id="userPassword" class="form-control" placeholder="Leave blank to keep existing password" autocomplete="new-password">
+                    </div>
+
+                    <div class="mb-4" id="userCompanyWrapper" {% if not session.get('is_superadmin') %}style="display:none;"{% endif %}>
+                        <label class="form-label fw-bold small">Assign to Company</label>
+                        <select id="userCompanyId" class="form-select border-primary"></select>
+                    </div>
+
+                    <label class="form-label fw-bold small text-primary border-bottom w-100 pb-1">App Permissions</label>
+                    <p class="small text-muted mb-2" id="appPermText">Select apps to grant access to this user.</p>
+
+                    <div class="form-check" id="wrapperCanBooking">
+                        <input class="form-check-input border-primary" type="checkbox" id="userCanBooking">
+                        <label class="form-check-label" for="userCanBooking">Booking & Ops Access</label>
+                    </div>
+                    <div class="form-check" id="wrapperCanInvoicing">
+                        <input class="form-check-input border-info" type="checkbox" id="userCanInvoicing">
+                        <label class="form-check-label" for="userCanInvoicing">Invoicing & Quotes Access</label>
+                    </div>
+                    <div class="form-check" id="wrapperCanFinance">
+                        <input class="form-check-input border-warning" type="checkbox" id="userCanFinance">
+                        <label class="form-check-label" for="userCanFinance">Finance Access</label>
+                    </div>
+                    <div class="form-check" id="wrapperCanAccounting">
+                        <input class="form-check-input border-dark" type="checkbox" id="userCanAccounting">
+                        <label class="form-check-label" for="userCanAccounting">Accounting Access</label>
+                    </div>
+                    <div class="form-check mb-3" id="wrapperCanPayroll">
+                        <input class="form-check-input border-success" type="checkbox" id="userCanPayroll">
+                        <label class="form-check-label" for="userCanPayroll">HR & Payroll Access</label>
+                    </div>
+
+                    {% if session.get('is_superadmin') %}
+                    <div class="form-check mt-3 pt-3 border-top bg-light p-2 rounded">
+                        <input class="form-check-input ms-1 border-danger" type="checkbox" id="userIsCompanyAdmin">
+                        <label class="form-check-label ms-2 fw-bold text-danger" for="userIsCompanyAdmin">Make User a Company Admin</label>
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary fw-bold" onclick="saveUser()">Save User</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if session.get('is_superadmin') or session.get('is_company_admin') %}
+    <div class="modal fade" id="customFieldSettingsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Custom Field Settings</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="alert alert-info small mb-3">
+                        Booking custom fields are listed here. Dropdown fields can have option values managed below. Company admins can only change fields for their own company.
+                    </div>
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6" id="customFieldCompanyWrap">
+                            <label class="form-label small fw-bold">Company</label>
+                            <select id="customFieldCompanySelect" class="form-select border-dark" onchange="loadCustomFieldSettingsFields()"></select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">Dropdown Field</label>
+                            <select id="customFieldSelect" class="form-select border-primary" onchange="loadCustomFieldOptions()"></select>
+                        </div>
+                    </div>
+                    <div class="card border-0 shadow-sm">
+                        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                            <strong>Dropdown Options</strong>
+                            <button class="btn btn-sm btn-outline-primary fw-bold" onclick="addCustomFieldOptionRow()">+ Add Option</button>
+                        </div>
+                        <div class="card-body">
+                            <div id="customFieldOptionsHelp" class="text-muted small mb-2">Select a dropdown field to manage its options.</div>
+                            <div class="table-responsive">
+                                <table class="table table-sm align-middle mb-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th style="width: 60px;">Order</th>
+                                            <th>Option Label</th>
+                                            <th style="width: 120px;">Active</th>
+                                            <th style="width: 80px;"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="customFieldOptionsBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button class="btn btn-dark fw-bold" onclick="saveCustomFieldOptions()">Save Options</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+
+    {% if session.get('is_superadmin') or session.get('is_company_admin') %}
+    <div class="modal fade" id="companyImportModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">Import Company Data</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="alert alert-warning small">
+                        Imports are company-scoped. Company admins can only import into their own company. Super admins can import into the currently selected/active company.
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">Import Type</label>
+                            <select id="companyImportType" class="form-select border-success">
+                                <option value="clients">Clients</option>
+                                <option value="employees">Employees</option>
+                                <option value="services">Services</option>
+                                <option value="bookings">Bookings</option>
+                                <option value="expenses">Expenses</option>
+                                <option value="leave_records">Leave Records</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">CSV File</label>
+                            <input type="file" id="companyImportFile" class="form-control border-success" accept=".csv,text/csv">
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 mt-3">
+                        <button class="btn btn-sm btn-outline-dark fw-bold" onclick="downloadImportTemplate()">Download Template</button>
+                        <button class="btn btn-sm btn-outline-primary fw-bold" onclick="runCompanyImport(true)">Validate Only</button>
+                    </div>
+                    <div id="companyImportResult" class="mt-3 small"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button class="btn btn-success fw-bold" onclick="runCompanyImport(false)">Import Data</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if session.get('is_superadmin') %}
+    <div class="modal fade" id="fullDatabaseRestoreModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title">Restore Full Database Backup</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="alert alert-danger small fw-bold">
+                        Super Admin only. This restores the raw database and can replace data for all tenants. A safety backup of the current database will be created first.
+                    </div>
+                    <label class="form-label small fw-bold">Upload database backup ZIP or .db file</label>
+                    <input type="file" id="fullDatabaseRestoreFile" class="form-control border-danger" accept=".zip,.db,application/zip">
+                    <div id="fullDatabaseRestoreResult" class="mt-3 small"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-danger fw-bold" onclick="restoreFullDatabaseBackup()">Restore Full Database</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const isSuperAdmin = {{ 'true' if session.get('is_superadmin') else 'false' }};
+        const isCompanyAdmin = {{ 'true' if session.get('is_company_admin') else 'false' }};
+        const currentCompanyId = "{{ session.get('company_id') }}";
+        
+        const companyHasBooking = {{ 'true' if session.get('comp_can_booking') else 'false' }};
+        const companyHasFinance = {{ 'true' if session.get('comp_can_finance') else 'false' }};
+        const companyHasPayroll = {{ 'true' if session.get('comp_can_payroll') else 'false' }};
+        const companyHasInvoicing = {{ 'true' if session.get('comp_can_invoicing') else 'false' }};
+        const companyHasAccounting = {{ 'true' if session.get('comp_can_accounting') else 'false' }};
+
+        let companiesList = [];
+        let templateUploadModal = null;
+
+        document.addEventListener('DOMContentLoaded', function() {
+            loadIndustryTemplateOptions();
+            if(isSuperAdmin) fetchCompanies();
+            
+            if(isCompanyAdmin && !isSuperAdmin) {
+                if(!companyHasBooking) document.getElementById('wrapperCanBooking').style.display = 'none';
+                if(!companyHasFinance) document.getElementById('wrapperCanFinance').style.display = 'none';
+                if(!companyHasPayroll) document.getElementById('wrapperCanPayroll').style.display = 'none';
+                if(!companyHasInvoicing) document.getElementById('wrapperCanInvoicing').style.display = 'none';
+                if(!companyHasAccounting) document.getElementById('wrapperCanAccounting').style.display = 'none';
+                if(!companyHasBooking && !companyHasFinance && !companyHasPayroll && !companyHasInvoicing && !companyHasAccounting) {
+                    document.getElementById('appPermText').innerText = "Your company currently has no app licenses. Please contact support.";
+                    document.getElementById('appPermText').className = "text-danger small fw-bold";
+                }
+            }
+        });
+
+
+        // --- INDUSTRY TEMPLATE OPTIONS / UPLOAD ---
+        function loadIndustryTemplateOptions(selectedValue=null) {
+            return fetch('/admin/industry_templates')
+                .then(r => r.json())
+                .then(templates => {
+                    tenantSetupTemplates = templates || tenantSetupTemplates || {};
+                    const names = Object.keys(templates || {});
+                    ['companyIndustryTemplate', 'setupIndustryTemplate'].forEach(id => {
+                        const select = document.getElementById(id);
+                        if(!select) return;
+                        const current = selectedValue || select.value || 'Cleaning';
+                        select.innerHTML = '';
+                        names.forEach(name => {
+                            const opt = document.createElement('option');
+                            opt.value = name;
+                            opt.textContent = name;
+                            if(name === current) opt.selected = true;
+                            select.appendChild(opt);
+                        });
+                        if(!names.includes(current) && names.includes('Cleaning')) select.value = 'Cleaning';
+                    });
+                })
+                .catch(() => {});
+        }
+
+        function openTemplateUploadModal() {
+            templateUploadModal = templateUploadModal || new bootstrap.Modal(document.getElementById('templateUploadModal'));
+            document.getElementById('uploadTemplateName').value = '';
+            document.getElementById('uploadTemplateFile').value = '';
+            templateUploadModal.show();
+        }
+
+        function uploadIndustryTemplate() {
+            const fileInput = document.getElementById('uploadTemplateFile');
+            if(!fileInput.files || !fileInput.files.length) return alert('Please select a JSON template file.');
+            const fd = new FormData();
+            fd.append('template_file', fileInput.files[0]);
+            fd.append('template_name', document.getElementById('uploadTemplateName').value.trim());
+            fetch('/admin/industry_templates/upload', { method: 'POST', body: fd })
+                .then(r => r.json().then(data => ({ok: r.ok, data})))
+                .then(({ok, data}) => {
+                    if(!ok || data.status === 'error') return alert(data.message || 'Could not upload template.');
+                    alert('Template uploaded successfully.');
+                    if(templateUploadModal) templateUploadModal.hide();
+                    loadIndustryTemplateOptions(data.template_name);
+                })
+                .catch(err => alert(err.message || 'Could not upload template.'));
+        }
+
+
+        // --- CUSTOM FIELD SETTINGS ---
+        let customFieldSettingsModal = null;
+        let currentCustomFieldOptions = [];
+
+        function openCustomFieldSettingsModal() {
+            customFieldSettingsModal = customFieldSettingsModal || new bootstrap.Modal(document.getElementById('customFieldSettingsModal'));
+            loadCustomFieldSettingsData(isSuperAdmin ? currentCompanyId : null).then(() => customFieldSettingsModal.show());
+        }
+
+        function loadCustomFieldSettingsData(companyId=null) {
+            const url = companyId ? `/admin/custom_field_settings/data?company_id=${companyId}` : '/admin/custom_field_settings/data';
+            return fetch(url).then(r => { if(!r.ok) throw new Error('Could not load custom field settings.'); return r.json(); }).then(data => {
+                if(data.status === 'error') throw new Error(data.message || 'Could not load custom field settings.');
+                const companyWrap = document.getElementById('customFieldCompanyWrap');
+                const companySelect = document.getElementById('customFieldCompanySelect');
+                companySelect.innerHTML = '';
+                (data.companies || []).forEach(c => {
+                    const opt = document.createElement('option');
+                    opt.value = c.id;
+                    opt.textContent = c.name;
+                    if(String(c.id) === String(data.company_id)) opt.selected = true;
+                    companySelect.appendChild(opt);
+                });
+                if(!isSuperAdmin && companyWrap) companyWrap.style.display = 'none';
+                renderCustomFieldSettingsFields(data.fields || []);
+            }).catch(err => alert(err.message));
+        }
+
+        function loadCustomFieldSettingsFields() {
+            const companyId = document.getElementById('customFieldCompanySelect').value;
+            loadCustomFieldSettingsData(companyId);
+        }
+
+        function renderCustomFieldSettingsFields(fields) {
+            const select = document.getElementById('customFieldSelect');
+            select.innerHTML = '';
+            if(!fields.length) {
+                select.innerHTML = '<option value="">No booking custom fields configured</option>';
+                document.getElementById('customFieldOptionsBody').innerHTML = '';
+                document.getElementById('customFieldOptionsHelp').innerText = 'No booking custom fields exist for this tenant. Add fields in the Tenant Setup Wizard first.';
+                return;
+            }
+            fields.forEach(f => {
+                const opt = document.createElement('option');
+                opt.value = f.id;
+                opt.dataset.fieldType = f.field_type || 'text';
+                opt.textContent = `${f.field_label} (${f.field_type || 'text'})`;
+                select.appendChild(opt);
+            });
+            loadCustomFieldOptions();
+        }
+
+        function loadCustomFieldOptions() {
+            const select = document.getElementById('customFieldSelect');
+            const fieldId = select.value;
+            const selectedOpt = select.options[select.selectedIndex];
+            const fieldType = selectedOpt ? (selectedOpt.dataset.fieldType || 'text') : 'text';
+            const tbody = document.getElementById('customFieldOptionsBody');
+            if(!fieldId) { tbody.innerHTML = ''; return; }
+            if(fieldType !== 'dropdown') {
+                currentCustomFieldOptions = [];
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">This booking custom field is not a dropdown, so it does not need option values.</td></tr>';
+                document.getElementById('customFieldOptionsHelp').innerText = 'Only dropdown booking custom fields have editable option values.';
+                return;
+            }
+            fetch(`/admin/custom_field_options/${fieldId}`).then(r => { if(!r.ok) throw new Error('Could not load dropdown options.'); return r.json(); }).then(data => {
+                currentCustomFieldOptions = data.options || [];
+                document.getElementById('customFieldOptionsHelp').innerText = `Options for: ${data.field.field_label}`;
+                renderCustomFieldOptionRows();
+            }).catch(err => alert(err.message));
+        }
+
+        function renderCustomFieldOptionRows() {
+            const tbody = document.getElementById('customFieldOptionsBody');
+            tbody.innerHTML = '';
+            if(!currentCustomFieldOptions.length) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No options configured yet. Click + Add Option.</td></tr>';
+                return;
+            }
+            currentCustomFieldOptions.forEach((opt, index) => {
+                tbody.innerHTML += `
+                    <tr data-index="${index}">
+                        <td><input type="number" class="form-control form-control-sm option-order" value="${index + 1}" min="1"></td>
+                        <td><input type="text" class="form-control form-control-sm option-label" value="${escapeHtml(opt.option_label || '')}" placeholder="Option label"></td>
+                        <td class="text-center"><input type="checkbox" class="form-check-input option-active" ${opt.active === false || opt.active === 0 ? '' : 'checked'}></td>
+                        <td class="text-end"><button class="btn btn-sm btn-outline-danger" onclick="removeCustomFieldOptionRow(${index})">Remove</button></td>
+                    </tr>
+                `;
+            });
+        }
+
+        function addCustomFieldOptionRow() {
+            const select = document.getElementById('customFieldSelect');
+            const selectedOpt = select.options[select.selectedIndex];
+            if(selectedOpt && selectedOpt.dataset.fieldType !== 'dropdown') return alert('Only dropdown custom fields can have options.');
+            currentCustomFieldOptions.push({ option_label: '', active: true });
+            renderCustomFieldOptionRows();
+        }
+
+        function removeCustomFieldOptionRow(index) {
+            currentCustomFieldOptions.splice(index, 1);
+            renderCustomFieldOptionRows();
+        }
+
+        function collectCustomFieldOptionRows() {
+            const rows = Array.from(document.querySelectorAll('#customFieldOptionsBody tr[data-index]'));
+            return rows.map((row, idx) => ({
+                option_label: row.querySelector('.option-label').value.trim(),
+                active: row.querySelector('.option-active').checked,
+                sort_order: parseInt(row.querySelector('.option-order').value || (idx + 1), 10)
+            })).filter(opt => opt.option_label).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+        }
+
+        function saveCustomFieldOptions() {
+            const select = document.getElementById('customFieldSelect');
+            const fieldId = select.value;
+            const selectedOpt = select.options[select.selectedIndex];
+            if(!fieldId) return alert('Select a booking custom field first.');
+            if(selectedOpt && selectedOpt.dataset.fieldType !== 'dropdown') return alert('Only dropdown custom fields can have options.');
+            const options = collectCustomFieldOptionRows();
+            fetch('/admin/custom_field_options/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ field_id: fieldId, options })
+            }).then(r => { if(!r.ok) throw new Error('Could not save dropdown options.'); return r.json(); }).then(res => {
+                if(res.status === 'error') alert(res.message);
+                else { alert('Dropdown options saved.'); loadCustomFieldOptions(); }
+            }).catch(err => alert(err.message));
+        }
+
+        function escapeHtml(value) {
+            return String(value || '').replace(/[&<>"']/g, function(ch) {
+                return ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'})[ch];
+            });
+        }
+
+        {% if session.get('is_superadmin') %}
+        
+        // --- TAX CONFIG LOGIC ---
+        let currentEditTaxId = null;
+        const taxModal = document.getElementById('taxModal') ? new bootstrap.Modal(document.getElementById('taxModal')) : null;
+        function openTaxModal() { loadTaxConfig(); taxModal.show(); }
+        
+        function loadTaxConfig() {
+            const year = document.getElementById('taxYearSelectInput').value;
+            fetch('/admin/tax_config/' + year).then(r => r.json()).then(data => {
+                document.getElementById('primaryRebateInput').value = data.primary_rebate;
+                document.getElementById('secondaryRebateInput').value = data.secondary_rebate;
+                document.getElementById('tertiaryRebateInput').value = data.tertiary_rebate;
+                document.getElementById('thresholdUnder65Input').value = data.threshold_under_65;
+                document.getElementById('threshold65Input').value = data.threshold_65_to_74;
+                document.getElementById('threshold75Input').value = data.threshold_75_plus;
+                const tbody = document.getElementById('taxBracketsBody');
+                tbody.innerHTML = '';
+                if(data.brackets.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No tax brackets defined for this year.</td></tr>';
+                } else {
+                    data.brackets.forEach(b => {
+                        tbody.innerHTML += `
+                            <tr>
+                                <td>${b.min_income}</td>
+                                <td>${b.max_income}</td>
+                                <td>${b.base_tax}</td>
+                                <td>${b.rate}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-primary me-1" onclick="editTaxBracket(${b.id}, ${b.min_income}, ${b.max_income}, ${b.base_tax}, ${b.rate})">Edit</button>
+                                    <button class="btn btn-sm btn-outline-danger" onclick="deleteTaxBracket(${b.id})">Remove</button>
+                                </td>
+                            </tr>
+                        `;
+                    });
+                }
+            });
+        }
+        
+        function editTaxBracket(id, min, max, base, rate) {
+            currentEditTaxId = id;
+            document.getElementById('newTaxMin').value = min;
+            document.getElementById('newTaxMax').value = max;
+            document.getElementById('newTaxBase').value = base;
+            document.getElementById('newTaxRate').value = rate;
+            document.getElementById('btnSaveBracket').innerText = "Update Bracket";
+            document.getElementById('btnCancelEditBracket').style.display = 'inline-block';
+        }
+
+        function cancelEditTaxBracket() {
+            currentEditTaxId = null;
+            document.getElementById('newTaxMin').value = '';
+            document.getElementById('newTaxMax').value = '';
+            document.getElementById('newTaxBase').value = '';
+            document.getElementById('newTaxRate').value = '';
+            document.getElementById('btnSaveBracket').innerText = "+ Add Bracket";
+            document.getElementById('btnCancelEditBracket').style.display = 'none';
+        }
+
+        function saveTaxRebate() {
+            const fd = {
+                tax_year: document.getElementById('taxYearSelectInput').value,
+                primary_rebate: document.getElementById('primaryRebateInput').value,
+                secondary_rebate: document.getElementById('secondaryRebateInput').value,
+                tertiary_rebate: document.getElementById('tertiaryRebateInput').value,
+                threshold_under_65: document.getElementById('thresholdUnder65Input').value,
+                threshold_65_to_74: document.getElementById('threshold65Input').value,
+                threshold_75_plus: document.getElementById('threshold75Input').value
+            };
+            fetch('/admin/tax_config/rebate/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fd) }).then(() => { alert("Rebate Saved"); loadTaxConfig(); });
+        }
+        
+        function saveTaxBracket() {
+            const fd = {
+                id: currentEditTaxId,
+                tax_year: document.getElementById('taxYearSelectInput').value,
+                min_income: document.getElementById('newTaxMin').value,
+                max_income: document.getElementById('newTaxMax').value,
+                base_tax: document.getElementById('newTaxBase').value,
+                rate: document.getElementById('newTaxRate').value
+            };
+            if(!fd.min_income || !fd.max_income || !fd.rate) return alert("Please fill all required bracket fields.");
+            fetch('/admin/tax_config/bracket/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fd) }).then(() => {
+                cancelEditTaxBracket();
+                loadTaxConfig(); 
+            });
+        }
+        
+        function deleteTaxBracket(id) {
+            if(confirm("Delete bracket?")) {
+                fetch('/admin/tax_config/bracket/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({id: id}) }).then(() => loadTaxConfig());
+            }
+        }
+
+        function copyPreviousYearTax() {
+            const currentYear = parseInt(document.getElementById('taxYearSelectInput').value);
+            const prevYear = currentYear - 1;
+            if(confirm(`Are you sure you want to copy the tax brackets, rebates and thresholds from ${prevYear} to ${currentYear}? This will overwrite any existing data for ${currentYear}.`)) {
+                fetch('/admin/tax_config/copy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({from_year: prevYear, to_year: currentYear})
+                }).then(r => r.json()).then(res => {
+                    if(res.status === 'success') {
+                        alert('Tax configuration copied successfully!');
+                        loadTaxConfig();
+                    }
+                });
+            }
+        }
+
+        // --- PUBLIC HOLIDAYS LOGIC ---
+        const holidayModal = document.getElementById('holidayModal') ? new bootstrap.Modal(document.getElementById('holidayModal')) : null;
+        function openHolidayModal() { loadHolidays(); holidayModal.show(); }
+        
+        function loadHolidays() {
+            const year = document.getElementById('holidayYearSelect').value;
+            fetch('/admin/holidays/' + year).then(r => r.json()).then(data => {
+                const tbody = document.getElementById('holidaysBody');
+                tbody.innerHTML = '';
+                if(data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3" class="text-muted text-center py-4">No holidays exist for this year. Click "Populate" above.</td></tr>';
+                } else {
+                    data.forEach(h => {
+                        tbody.innerHTML += `
+                            <tr>
+                                <td class="fw-bold text-info-emphasis">${h.date_str}</td>
+                                <td>${h.name}</td>
+                                <td class="text-end"><button class="btn btn-sm btn-outline-danger" onclick="deleteHoliday(${h.id})">X</button></td>
+                            </tr>
+                        `;
+                    });
+                }
+            });
+        }
+        
+        function saveHoliday() {
+            const dateStr = document.getElementById('newHolDate').value;
+            if(!dateStr) return alert("Please select a date.");
+            const year = dateStr.substring(0, 4);
+            const fd = {
+                year: year,
+                date_str: dateStr,
+                name: document.getElementById('newHolName').value || 'Public Holiday'
+            };
+            fetch('/admin/holidays/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fd) }).then(() => {
+                document.getElementById('holidayYearSelect').value = year;
+                document.getElementById('newHolDate').value = ''; document.getElementById('newHolName').value = '';
+                loadHolidays();
+            });
+        }
+        
+        function deleteHoliday(id) {
+            if(confirm("Remove this holiday?")) fetch('/admin/holidays/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({id: id}) }).then(() => loadHolidays());
+        }
+        
+        function generateStandardHolidays() {
+            const year = document.getElementById('holidayYearSelect').value;
+            fetch('/admin/holidays/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({year: year}) }).then(() => loadHolidays());
+        }
+
+        // --- COMPANY LOGIC ---
+        const companiesModal = new bootstrap.Modal(document.getElementById('companiesModal'));
+        const companyFormModal = new bootstrap.Modal(document.getElementById('companyFormModal'));
+
+        function fetchCompanies() {
+            fetch('/admin/companies').then(r => r.json()).then(data => {
+                companiesList = data;
+                const switcher = document.getElementById('switchCompanySelect');
+                if(switcher) {
+                    switcher.innerHTML = '';
+                    data.forEach(c => {
+                        const opt = document.createElement('option');
+                        opt.value = c.id;
+                        opt.text = c.name;
+                        if(c.id == currentCompanyId) opt.selected = true;
+                        switcher.appendChild(opt);
+                    });
+                }
+
+                const uCompany = document.getElementById('userCompanyId');
+                if(uCompany) {
+                    uCompany.innerHTML = '';
+                    data.forEach(c => {
+                        const opt = document.createElement('option');
+                        opt.value = c.id;
+                        opt.text = c.name;
+                        uCompany.appendChild(opt);
+                    });
+                }
+
+                const tbody = document.getElementById('companiesTableBody');
+                if(tbody) {
+                    tbody.innerHTML = '';
+                    data.forEach(c => {
+                        let apps = [];
+                        if(c.can_booking) apps.push('Booking');
+                        if(c.can_invoicing) apps.push('Invoicing');
+                        if(c.can_finance) apps.push('Finance');
+                        if(c.can_accounting) apps.push('Accounting');
+                        if(c.can_payroll) apps.push('Payroll');
+
+                        tbody.innerHTML += `
+                            <tr>
+                                <td>${c.id}</td>
+                                <td><strong>${c.name}</strong></td>
+                                <td><span class="badge bg-dark">${c.industry_template || 'Cleaning'}</span></td>
+                                <td><span class="text-success fw-bold small">${apps.join(', ') || 'None'}</span></td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-primary me-1" onclick='openCompanyForm(${JSON.stringify(c).replace(/'/g, "&#39;")})'>Edit</button>
+                                    <button class="btn btn-sm btn-outline-dark" onclick='openTenantSetupWizard(${c.id})'>Setup Wizard</button>
+                                </td>
+                            </tr>
+                        `;
+                    });
+                }
+            });
+        }
+
+        function switchCompany() {
+            const cid = document.getElementById('switchCompanySelect').value;
+            fetch('/admin/switch_company', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ company_id: cid })
+            }).then(() => window.location.reload());
+        }
+
+        function openCompaniesModal() { fetchCompanies(); companiesModal.show(); }
+
+        function normaliseTransportPolicy(value) {
+            return value === 'standard' ? 'yes' : (value || 'yes');
+        }
+
+        function toggleTransportAmountField() {
+            const policy = document.getElementById('companyTransport').value;
+            const wrap = document.getElementById('transportAmountWrap');
+            if (wrap) wrap.style.display = policy === 'none' ? 'none' : '';
+        }
+
+        function openCompanyForm(company) {
+            companiesModal.hide();
+            document.getElementById('companyFormTitle').innerText = company ? "Edit Company" : "New Company";
+            document.getElementById('companyId').value = company ? company.id : "";
+            document.getElementById('companyName').value = company ? company.name : "";
+            document.getElementById('companyRegNo').value = company && company.registration_number ? company.registration_number : "";
+            document.getElementById('companyVatNo').value = company && company.vat_number ? company.vat_number : "";
+            document.getElementById('companyAddress').value = company && company.address ? company.address : "";
+            document.getElementById('companyTransport').value = company ? normaliseTransportPolicy(company.transport_policy) : "yes";
+            document.getElementById('companyTransportAmountPerLift').value = company && company.transport_amount_per_lift !== undefined && company.transport_amount_per_lift !== null ? company.transport_amount_per_lift : 25;
+            toggleTransportAmountField();
+            const selectedIndustry = company && company.industry_template ? company.industry_template : "Cleaning";
+            loadIndustryTemplateOptions(selectedIndustry).then(() => {
+                document.getElementById('companyIndustryTemplate').value = selectedIndustry;
+                showIndustryTemplateHint(document.getElementById('companyIndustryTemplate').value);
+            });
+            document.getElementById('companyLogo').value = "";
+            const logoPreviewWrap = document.getElementById('companyLogoPreviewWrap');
+            const logoPreview = document.getElementById('companyLogoPreview');
+            if(company && company.logo_file) {
+                logoPreview.src = `/uploads/logos/${encodeURIComponent(company.logo_file)}`;
+                logoPreviewWrap.classList.remove('d-none');
+            } else {
+                logoPreview.src = "";
+                logoPreviewWrap.classList.add('d-none');
+            }
+            
+            document.getElementById('compAppBooking').checked = company ? company.can_booking : false;
+            document.getElementById('compAppInvoicing').checked = company ? company.can_invoicing : false;
+            document.getElementById('compAppFinance').checked = company ? company.can_finance : false;
+            document.getElementById('compAppAccounting').checked = company ? company.can_accounting : false;
+            document.getElementById('compAppPayroll').checked = company ? company.can_payroll : false;
+            
+            document.getElementById('compGoogleSync').checked = company ? company.google_calendar_sync : false;
+
+            companyFormModal.show();
+        }
+
+        document.addEventListener('change', function(e) {
+            if(e.target && e.target.id === 'companyLogo' && e.target.files && e.target.files[0]) {
+                const logoPreviewWrap = document.getElementById('companyLogoPreviewWrap');
+                const logoPreview = document.getElementById('companyLogoPreview');
+                if(logoPreview && logoPreviewWrap) {
+                    logoPreview.src = URL.createObjectURL(e.target.files[0]);
+                    logoPreviewWrap.classList.remove('d-none');
+                }
+            }
+        });
+
+        function saveCompany(openSetupAfterSave=false) {
+            const fd = new FormData();
+            fd.append('id', document.getElementById('companyId').value);
+            fd.append('name', document.getElementById('companyName').value);
+            fd.append('registration_number', document.getElementById('companyRegNo').value);
+            fd.append('vat_number', document.getElementById('companyVatNo').value);
+            fd.append('address', document.getElementById('companyAddress').value);
+            fd.append('transport_policy', document.getElementById('companyTransport').value);
+            fd.append('transport_amount_per_lift', document.getElementById('companyTransportAmountPerLift').value || 25);
+            fd.append('industry_template', document.getElementById('companyIndustryTemplate').value);
+            
+            fd.append('can_booking', document.getElementById('compAppBooking').checked);
+            fd.append('can_invoicing', document.getElementById('compAppInvoicing').checked);
+            fd.append('can_finance', document.getElementById('compAppFinance').checked);
+            fd.append('can_accounting', document.getElementById('compAppAccounting').checked);
+            fd.append('can_payroll', document.getElementById('compAppPayroll').checked);
+            
+            fd.append('google_calendar_sync', document.getElementById('compGoogleSync').checked);
+
+            const logoInput = document.getElementById('companyLogo');
+            if(logoInput && logoInput.files && logoInput.files.length > 0) {
+                fd.append('logo', logoInput.files[0]);
+            }
+
+            if(!document.getElementById('companyName').value) return alert("Company name is required.");
+
+            fetch('/admin/companies/save', { method: 'POST', body: fd })
+            .then(r => r.json()).then(res => {
+                if(res.status === 'error') alert(res.message);
+                else {
+                    const savedCompanyId = res.company_id || document.getElementById('companyId').value;
+                    if(res.logo_url) {
+                        const logoPreviewWrap = document.getElementById('companyLogoPreviewWrap');
+                        const logoPreview = document.getElementById('companyLogoPreview');
+                        if(logoPreview && logoPreviewWrap) {
+                            logoPreview.src = res.logo_url + '?v=' + Date.now();
+                            logoPreviewWrap.classList.remove('d-none');
+                        }
+                    }
+                    companyFormModal.hide();
+                    fetchCompanies();
+                    if(openSetupAfterSave && savedCompanyId) openTenantSetupWizard(savedCompanyId);
+                    else if(String(savedCompanyId) === String(currentCompanyId)) window.location.reload();
+                }
+            });
+        }
+
+        let tenantSetupTemplates = {};
+        let currentSetupStep = 1;
+        const tenantSetupModal = document.getElementById('tenantSetupModal') ? new bootstrap.Modal(document.getElementById('tenantSetupModal')) : null;
+
+        function showIndustryTemplateHint(templateName) {
+            const hints = {
+                Cleaning: 'Domestic/commercial cleaning: bookings, services, staff, supplies and transport.',
+                Transportation: 'Trucking/transport: trips, pickup/drop-off, drivers, trucks, fuel and maintenance categories.',
+                Construction: 'Construction/projects: sites, workers, materials, equipment and project-cost categories.',
+                'Finance Auditing': 'Finance/audit practice: engagements, client workpapers, deadlines, compliance and practice finance categories.',
+                Custom: 'Start with neutral terminology and configure your own labels, fields and categories.'
+            };
+            const el = document.getElementById('industryTemplateHint');
+            if(el) el.innerText = hints[templateName] || hints.Cleaning;
+        }
+
+        function showSetupStep(step) {
+            currentSetupStep = Math.max(1, Math.min(6, step));
+            document.querySelectorAll('.setup-step').forEach(el => el.classList.add('d-none'));
+            const target = document.getElementById(`setupStep${currentSetupStep}`);
+            if(target) target.classList.remove('d-none');
+            document.querySelectorAll('#setupStepList button').forEach((btn, idx) => btn.classList.toggle('active', idx + 1 === currentSetupStep));
+            if(currentSetupStep === 6) renderSetupReview();
+        }
+
+        function moveSetupStep(direction) { showSetupStep(currentSetupStep + direction); }
+
+        function getFieldTypeOptions(selected) {
+            const types = ['text', 'number', 'date', 'time', 'dropdown', 'checkbox', 'textarea'];
+            return types.map(t => `<option value="${t}" ${t === selected ? 'selected' : ''}>${t}</option>`).join('');
+        }
+
+        function renderSetupLabels(labels) {
+            const keys = [
+                ['booking_name', 'Booking label'], ['client_name', 'Client label'], ['service_name', 'Service label'], ['employee_name', 'Employee label'],
+                ['booking_app_title', 'Booking app title'], ['finance_app_title', 'Finance app title'], ['job_location_label', 'Location label']
+            ];
+            const body = document.getElementById('setupLabelsBody');
+            body.innerHTML = keys.map(([key, caption]) => `
+                <div class="col-md-6">
+                    <label class="form-label fw-bold small">${caption}</label>
+                    <input type="text" class="form-control setup-label-input" data-key="${key}" value="${(labels[key] || '').replace(/"/g, '&quot;')}">
+                </div>
+            `).join('');
+        }
+
+        function renderSetupBookingFields(fields) {
+            const body = document.getElementById('setupBookingFieldsBody');
+            body.innerHTML = '';
+            (fields || []).forEach(f => addSetupBookingField(f));
+        }
+
+        function addSetupBookingField(field={}) {
+            const body = document.getElementById('setupBookingFieldsBody');
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><input type="text" class="form-control form-control-sm setup-field-label" value="${(field.field_label || '').replace(/"/g, '&quot;')}" placeholder="Field label"></td>
+                <td><select class="form-select form-select-sm setup-field-type">${getFieldTypeOptions(field.field_type || 'text')}</select></td>
+                <td class="text-center"><input type="checkbox" class="form-check-input setup-field-required" ${field.required ? 'checked' : ''}></td>
+                <td class="text-center"><input type="checkbox" class="form-check-input setup-field-visible" ${field.visible === 0 ? '' : 'checked'}></td>
+                <td class="text-center"><button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('tr').remove()">Remove</button></td>
+            `;
+            tr.dataset.fieldKey = field.field_key || '';
+            body.appendChild(tr);
+        }
+
+        function renderSetupFinanceCategories(categories) {
+            const body = document.getElementById('setupFinanceCategoriesBody');
+            body.innerHTML = '';
+            (categories || []).forEach(c => addSetupFinanceCategory(typeof c === 'string' ? {category_name: c, active: 1} : c));
+        }
+
+        function addSetupFinanceCategory(category={}) {
+            const body = document.getElementById('setupFinanceCategoriesBody');
+            const row = document.createElement('div');
+            row.className = 'input-group input-group-sm mb-2 setup-finance-category-row';
+            row.innerHTML = `
+                <span class="input-group-text">Category</span>
+                <input type="text" class="form-control setup-finance-category-name" value="${(category.category_name || '').replace(/"/g, '&quot;')}" placeholder="Category name">
+                <select class="form-select setup-finance-category-type" style="max-width: 150px;">
+                    <option value="expense" ${(category.category_type || 'expense') === 'expense' ? 'selected' : ''}>Expense</option>
+                    <option value="income" ${category.category_type === 'income' ? 'selected' : ''}>Income</option>
+                </select>
+                <span class="input-group-text"><input type="checkbox" class="form-check-input mt-0 setup-finance-category-active" ${category.active === 0 ? '' : 'checked'}></span>
+                <button type="button" class="btn btn-outline-danger" onclick="this.closest('.setup-finance-category-row').remove()">Remove</button>
+            `;
+            body.appendChild(row);
+        }
+
+        function renderSetupScorecard(blocks) {
+            const body = document.getElementById('setupScorecardBlocksBody');
+            body.innerHTML = '';
+            (blocks || []).forEach(block => addSetupScorecardBlock(block));
+        }
+
+        function addSetupScorecardBlock(block={}) {
+            const body = document.getElementById('setupScorecardBlocksBody');
+            const card = document.createElement('div');
+            card.className = 'card border-0 shadow-sm mb-3 setup-scorecard-block';
+            card.innerHTML = `
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <div class="input-group input-group-sm" style="max-width: 520px;">
+                        <span class="input-group-text fw-bold">Block Name</span>
+                        <input type="text" class="form-control setup-scorecard-block-name" value="${(block.block_name || '').replace(/"/g, '&quot;')}" placeholder="e.g. Experience & Skills">
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('.setup-scorecard-block').remove()">Remove Block</button>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-sm table-bordered bg-white align-middle mb-2">
+                            <thead class="table-light"><tr><th>Question</th><th style="width: 140px;">Max Score</th><th style="width: 80px;"></th></tr></thead>
+                            <tbody class="setup-scorecard-questions-body"></tbody>
+                        </table>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="addSetupScorecardQuestion(this.closest('.setup-scorecard-block'))">+ Add Question</button>
+                </div>
+            `;
+            body.appendChild(card);
+            (block.questions || []).forEach(q => addSetupScorecardQuestion(card, q));
+        }
+
+        function addSetupScorecardQuestion(blockCard, question={}) {
+            const tbody = blockCard.querySelector('.setup-scorecard-questions-body');
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><input type="text" class="form-control form-control-sm setup-scorecard-question-text" value="${(question.question_text || '').replace(/"/g, '&quot;')}" placeholder="Question"></td>
+                <td><input type="number" class="form-control form-control-sm setup-scorecard-question-score" value="${question.max_score || 10}" min="1" max="100" step="1"></td>
+                <td class="text-center"><button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('tr').remove()">Remove</button></td>
+            `;
+            tbody.appendChild(tr);
+        }
+
+        function collectTenantSetupPayload() {
+            const labels = {};
+            document.querySelectorAll('.setup-label-input').forEach(inp => labels[inp.dataset.key] = inp.value.trim());
+            const bookingFields = Array.from(document.querySelectorAll('#setupBookingFieldsBody tr')).map(tr => ({
+                field_key: tr.dataset.fieldKey || '',
+                field_label: tr.querySelector('.setup-field-label').value.trim(),
+                field_type: tr.querySelector('.setup-field-type').value,
+                required: tr.querySelector('.setup-field-required').checked,
+                visible: tr.querySelector('.setup-field-visible').checked
+            })).filter(f => f.field_label);
+            const financeCategories = Array.from(document.querySelectorAll('.setup-finance-category-row')).map(row => ({
+                category_name: row.querySelector('.setup-finance-category-name').value.trim(),
+                category_type: row.querySelector('.setup-finance-category-type').value,
+                active: row.querySelector('.setup-finance-category-active').checked
+            })).filter(c => c.category_name);
+            const evaluationScorecard = Array.from(document.querySelectorAll('.setup-scorecard-block')).map(block => ({
+                block_name: block.querySelector('.setup-scorecard-block-name').value.trim(),
+                active: true,
+                questions: Array.from(block.querySelectorAll('.setup-scorecard-questions-body tr')).map(row => ({
+                    question_text: row.querySelector('.setup-scorecard-question-text').value.trim(),
+                    max_score: parseInt(row.querySelector('.setup-scorecard-question-score').value) || 10,
+                    active: true
+                })).filter(q => q.question_text)
+            })).filter(b => b.block_name && b.questions.length);
+            return {
+                company_id: document.getElementById('setupCompanyId').value,
+                industry_template: document.getElementById('setupIndustryTemplate').value,
+                apply_defaults: document.getElementById('setupApplyDefaults').checked,
+                labels,
+                booking_fields: bookingFields,
+                finance_categories: financeCategories,
+                evaluation_scorecard: evaluationScorecard
+            };
+        }
+
+        function renderSetupReview() {
+            const data = collectTenantSetupPayload();
+            document.getElementById('setupReviewBody').innerHTML = `
+                <div class="card border-0 bg-white shadow-sm mb-2"><div class="card-body">
+                    <div><strong>Industry:</strong> ${data.industry_template}</div>
+                    <div><strong>Labels:</strong> ${Object.values(data.labels).filter(Boolean).join(', ')}</div>
+                    <div><strong>Booking fields:</strong> ${data.booking_fields.map(f => f.field_label).join(', ') || 'None'}</div>
+                    <div><strong>Finance categories:</strong> ${data.finance_categories.map(c => c.category_name).join(', ') || 'None'}</div>
+                    <div><strong>Evaluation scorecard:</strong> ${data.evaluation_scorecard.length} block(s), ${data.evaluation_scorecard.reduce((sum, b) => sum + b.questions.length, 0)} question(s)</div>
+                </div></div>
+            `;
+        }
+
+        function loadSetupTemplateDefaults() {
+            const industry = document.getElementById('setupIndustryTemplate').value;
+            const template = tenantSetupTemplates[industry] || tenantSetupTemplates.Cleaning || {labels:{}, booking_fields:[], finance_categories:[], evaluation_scorecard:[]};
+            renderSetupLabels(template.labels || {});
+            renderSetupBookingFields(template.booking_fields || []);
+            renderSetupFinanceCategories(template.finance_categories || []);
+            renderSetupScorecard(template.evaluation_scorecard || []);
+        }
+
+        function openTenantSetupWizard(companyId) {
+            if(!tenantSetupModal) return;
+            document.getElementById('setupCompanyId').value = companyId;
+            Promise.all([
+                fetch('/admin/industry_templates').then(r => r.json()),
+                fetch(`/admin/tenant_setup/${companyId}`).then(r => r.json())
+            ]).then(([templates, setup]) => {
+                tenantSetupTemplates = templates;
+                const industry = (setup.company && setup.company.industry_template) || 'Cleaning';
+                const setupSelect = document.getElementById('setupIndustryTemplate');
+                setupSelect.innerHTML = '';
+                Object.keys(templates || {}).forEach(name => {
+                    const opt = document.createElement('option');
+                    opt.value = name;
+                    opt.textContent = name;
+                    if(name === industry) opt.selected = true;
+                    setupSelect.appendChild(opt);
+                });
+                document.getElementById('setupIndustryTemplate').value = industry;
+                document.getElementById('setupApplyDefaults').checked = false;
+                renderSetupLabels(setup.labels || (templates[industry] || templates.Cleaning).labels || {});
+                renderSetupBookingFields(setup.booking_fields || []);
+                renderSetupFinanceCategories(setup.finance_categories || []);
+                renderSetupScorecard(setup.evaluation_scorecard || (templates[industry] || templates.Cleaning).evaluation_scorecard || []);
+                showSetupStep(1);
+                showTenantSetupModal();
+            });
+        }
+
+        function hideModalIfVisible(modalInstance, modalElementId) {
+            const el = document.getElementById(modalElementId);
+            if(el && el.classList.contains('show') && modalInstance) modalInstance.hide();
+        }
+
+        function showTenantSetupModal() {
+            hideModalIfVisible(companiesModal, 'companiesModal');
+            hideModalIfVisible(companyFormModal, 'companyFormModal');
+            setTimeout(() => {
+                tenantSetupModal.show();
+            }, 250);
+        }
+
+        function saveTenantSetup() {
+            const payload = collectTenantSetupPayload();
+            fetch('/admin/tenant_setup/save', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+            }).then(r => r.json()).then(res => {
+                if(res.status === 'error') return alert(res.message || 'Could not save setup.');
+                alert('Tenant setup saved successfully.');
+                tenantSetupModal.hide();
+                if(res.switched_company) {
+                    window.location.reload();
+                } else {
+                    fetchCompanies();
+                }
+            });
+        }
+        {% endif %}
+
+        {% if session.get('is_superadmin') or session.get('is_company_admin') %}
+        const auditModal = document.getElementById('auditModal') ? new bootstrap.Modal(document.getElementById('auditModal')) : null;
+        function openAuditModal() {
+            fetch('/admin/audit_logs').then(r => r.json()).then(data => {
+                const tbody = document.getElementById('auditTableBody');
+                if(!tbody) return;
+                tbody.innerHTML = '';
+                if(data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted p-4">No system activity found in the last 90 days.</td></tr>';
+                } else {
+                    data.forEach(log => {
+                        let badgeColor = "secondary";
+                        if(log.app_name.includes("Booking")) badgeColor = "primary";
+                        if(log.app_name.includes("Finance")) badgeColor = "warning text-dark";
+                        if(log.app_name.includes("Payroll")) badgeColor = "success";
+                        if(log.app_name.includes("Invoicing")) badgeColor = "info text-dark";
+                        if(log.app_name.includes("System")) badgeColor = "dark";
+
+                        tbody.innerHTML += `
+                            <tr>
+                                <td class="text-nowrap small text-muted">${log.timestamp}</td>
+                                <td><strong>${log.username}</strong></td>
+                                <td><span class="badge bg-${badgeColor}">${log.app_name}</span></td>
+                                <td>${log.action}</td>
+                                <td class="text-muted">${log.details}</td>
+                            </tr>
+                        `;
+                    });
+                }
+                auditModal.show();
+            });
+        }
+
+        const usersModal = document.getElementById('usersModal') ? new bootstrap.Modal(document.getElementById('usersModal')) : null;
+        const userFormModal = document.getElementById('userFormModal') ? new bootstrap.Modal(document.getElementById('userFormModal')) : null;
+
+        function openUsersModal() {
+            fetch('/admin/users').then(r => r.json()).then(data => {
+                const tbody = document.getElementById('usersTableBody');
+                if(!tbody) return;
+                tbody.innerHTML = '';
+                data.forEach(u => {
+                    let roles = [];
+                    if(u.is_superadmin) roles.push('<span class="badge bg-warning text-dark">Superadmin</span>');
+                    else if(u.is_company_admin) roles.push('<span class="badge bg-danger">Company Admin</span>');
+                    else roles.push('<span class="badge bg-secondary">Staff</span>');
+
+                    let apps = [];
+                    if(u.can_booking) apps.push('<span class="badge bg-primary">Booking</span>');
+                    if(u.can_invoicing) apps.push('<span class="badge bg-info text-dark">Invoicing</span>');
+                    if(u.can_finance) apps.push('<span class="badge bg-warning text-dark">Finance</span>');
+                    if(u.can_accounting) apps.push('<span class="badge bg-dark">Accounting</span>');
+                    if(u.can_payroll) apps.push('<span class="badge bg-success">Payroll</span>');
+
+                    let actions = u.is_superadmin ? '' : `
+                        <button class="btn btn-sm btn-outline-primary fw-bold" onclick='openUserForm(${JSON.stringify(u).replace(/'/g, "&#39;")})'>Edit</button>
+                        <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteUser(${u.id})">Del</button>
+                    `;
+
+                    tbody.innerHTML += `
+                        <tr>
+                            <td><strong>${u.username}</strong></td>
+                            <td>${u.company_name || 'N/A'}</td>
+                            <td>${roles.join(' ')}</td>
+                            <td>${apps.join(' ') || '<span class="text-muted small">No Access</span>'}</td>
+                            <td>${actions}</td>
+                        </tr>
+                    `;
+                });
+                usersModal.show();
+            });
+        }
+
+        function openUserForm(user) {
+            usersModal.hide();
+            document.getElementById('userFormTitle').innerText = user ? "Edit User" : "New User";
+            document.getElementById('userId').value = user ? user.id : "";
+            document.getElementById('userName').value = user ? user.username : "";
+            document.getElementById('userPassword').value = "";
+            document.getElementById('userCompanyId').value = user ? user.company_id : (isSuperAdmin && companiesList.length > 0 ? companiesList[0].id : currentCompanyId);
+            
+            document.getElementById('userCanBooking').checked = user ? user.can_booking : false;
+            document.getElementById('userCanInvoicing').checked = user ? user.can_invoicing : false;
+            document.getElementById('userCanFinance').checked = user ? user.can_finance : false;
+            document.getElementById('userCanAccounting').checked = user ? user.can_accounting : false;
+            document.getElementById('userCanPayroll').checked = user ? user.can_payroll : false;
+            
+            const isCompAdminCb = document.getElementById('userIsCompanyAdmin');
+            if(isCompAdminCb) isCompAdminCb.checked = user ? user.is_company_admin : false;
+
+            userFormModal.show();
+        }
+
+        function saveUser() {
+            const data = {
+                id: document.getElementById('userId').value,
+                username: document.getElementById('userName').value,
+                password: document.getElementById('userPassword').value,
+                company_id: document.getElementById('userCompanyId').value,
+                can_booking: document.getElementById('userCanBooking').checked,
+                can_invoicing: document.getElementById('userCanInvoicing').checked,
+                can_finance: document.getElementById('userCanFinance').checked,
+                can_accounting: document.getElementById('userCanAccounting').checked,
+                can_payroll: document.getElementById('userCanPayroll').checked
+            };
+
+            const isCompAdminCb = document.getElementById('userIsCompanyAdmin');
+            if(isCompAdminCb) data.is_company_admin = isCompAdminCb.checked;
+
+            if(!data.username) return alert("Username required.");
+            if(!data.id && !data.password) return alert("Password required for new users.");
+
+            fetch('/admin/users/save', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            }).then(r => r.json()).then(res => {
+                if(res.status === 'error') alert(res.message);
+                else { userFormModal.hide(); openUsersModal(); }
+            });
+        }
+
+        function deleteUser(id) {
+            if(confirm("Are you sure you want to delete this user?")) {
+                fetch('/admin/users/delete', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({id: id})
+                }).then(() => openUsersModal());
+            }
+        }
+        {% endif %}
+    
+        let companyImportModal = null;
+        let fullDatabaseRestoreModal = null;
+
+        function activeAdminCompanyQuery() {
+            if (isSuperAdmin) {
+                const switcher = document.getElementById('switchCompanySelect');
+                const companyId = switcher && switcher.value ? switcher.value : currentCompanyId;
+                return companyId ? `?company_id=${encodeURIComponent(companyId)}` : '';
+            }
+            return '';
+        }
+
+        function exportCompanyData() {
+            if (!confirm('Export this company\'s data only? This will not export the raw database file or other tenants\' data.')) return;
+            window.location.href = '/admin/export_company_data' + activeAdminCompanyQuery();
+        }
+
+        function openCompanyImportModal() {
+            companyImportModal = companyImportModal || new bootstrap.Modal(document.getElementById('companyImportModal'));
+            document.getElementById('companyImportResult').innerHTML = '';
+            document.getElementById('companyImportFile').value = '';
+            companyImportModal.show();
+        }
+
+        function downloadImportTemplate() {
+            const type = document.getElementById('companyImportType').value;
+            window.location.href = `/admin/import_template/${encodeURIComponent(type)}`;
+        }
+
+        function runCompanyImport(validateOnly) {
+            const fileInput = document.getElementById('companyImportFile');
+            if (!fileInput.files || !fileInput.files.length) return alert('Please choose a CSV file first.');
+            const fd = new FormData();
+            fd.append('import_type', document.getElementById('companyImportType').value);
+            fd.append('file', fileInput.files[0]);
+            if (validateOnly) fd.append('validate_only', '1');
+            if (isSuperAdmin) {
+                const switcher = document.getElementById('switchCompanySelect');
+                if (switcher && switcher.value) fd.append('company_id', switcher.value);
+            }
+            const result = document.getElementById('companyImportResult');
+            result.innerHTML = '<div class="text-muted">Processing import...</div>';
+            fetch('/admin/import_company_data', { method: 'POST', body: fd })
+                .then(r => r.json().catch(() => ({status:'error', message:'Server returned a non-JSON response.'})))
+                .then(res => {
+                    const errors = (res.errors || []).map(e => `<li>${escapeHtml(e)}</li>`).join('');
+                    const cls = res.status === 'success' ? 'alert-success' : 'alert-danger';
+                    result.innerHTML = `<div class="alert ${cls}"><strong>${escapeHtml(res.message || '')}</strong>${errors ? `<ul class="mb-0 mt-2">${errors}</ul>` : ''}</div>`;
+                })
+                .catch(err => { result.innerHTML = `<div class="alert alert-danger">${escapeHtml(err.message)}</div>`; });
+        }
+
+        function exportFullDatabaseBackup() {
+            if (!isSuperAdmin) return alert('Only Super Admins can export the full database backup.');
+            if (!confirm('Export the full raw database backup? This includes all tenants and system data.')) return;
+            window.location.href = '/admin/export_full_database';
+        }
+
+        function openFullDatabaseRestoreModal() {
+            if (!isSuperAdmin) return alert('Only Super Admins can restore the full database.');
+            fullDatabaseRestoreModal = fullDatabaseRestoreModal || new bootstrap.Modal(document.getElementById('fullDatabaseRestoreModal'));
+            document.getElementById('fullDatabaseRestoreResult').innerHTML = '';
+            document.getElementById('fullDatabaseRestoreFile').value = '';
+            fullDatabaseRestoreModal.show();
+        }
+
+        function restoreFullDatabaseBackup() {
+            if (!isSuperAdmin) return alert('Only Super Admins can restore the full database.');
+            const fileInput = document.getElementById('fullDatabaseRestoreFile');
+            if (!fileInput.files || !fileInput.files.length) return alert('Please choose a backup ZIP or .db file first.');
+            const phrase = prompt('Type RESTORE to confirm full database restore.');
+            if (phrase !== 'RESTORE') return;
+            const fd = new FormData();
+            fd.append('file', fileInput.files[0]);
+            const result = document.getElementById('fullDatabaseRestoreResult');
+            result.innerHTML = '<div class="text-muted">Restoring database...</div>';
+            fetch('/admin/import_full_database', { method: 'POST', body: fd })
+                .then(r => r.json().catch(() => ({status:'error', message:'Server returned a non-JSON response.'})))
+                .then(res => {
+                    const cls = res.status === 'success' ? 'alert-success' : 'alert-danger';
+                    result.innerHTML = `<div class="alert ${cls}">${escapeHtml(res.message || '')}</div>`;
+                })
+                .catch(err => { result.innerHTML = `<div class="alert alert-danger">${escapeHtml(err.message)}</div>`; });
+        }
+
+</script>
+
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

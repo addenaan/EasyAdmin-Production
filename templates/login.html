@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0d6efd">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <title>AFY Cloud Solutions</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            min-height: 100vh;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(rgba(244, 246, 249, 0.08), rgba(244, 246, 249, 0.08)), url('/static/login_background.png') center center / cover no-repeat fixed;
+            font-family: Arial, sans-serif;
+        }
+        .login-card {
+            background: rgba(255, 255, 255, 0.92);
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 450px;
+            text-align: center;
+            backdrop-filter: blur(6px);
+        }
+        .logo-img { max-height: 290px; margin-bottom: 20px; border-radius: 8px; }
+        .login-footer { font-size: 0.78rem; color: #6c757d; }
+        .login-footer a { text-decoration: none; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <img src="/static/AFYCloudSolutions.png" alt="AFY Cloud Solutions Logo" class="logo-img">
+        
+        {% if error %}
+        <div class="alert alert-danger py-2">{{ error }}</div>
+        {% endif %}
+        
+        <form method="POST">
+            <div class="mb-3 text-start">
+                <label class="form-label text-muted small fw-bold">Username</label>
+                <input type="text" name="username" class="form-control form-control-lg" required>
+            </div>
+            <div class="mb-4 text-start">
+                <label class="form-label text-muted small fw-bold">Password</label>
+                <input type="password" name="password" class="form-control form-control-lg" required>
+            </div>
+            <button type="submit" class="btn btn-primary w-100 btn-lg fw-bold">Secure Login</button>
+        </form>
+
+        <div class="login-footer mt-4">
+            <div><a href="https://afyenterprises.com/terms_of_use.html" target="_blank" rel="noopener">Terms and Conditions of Use</a></div>
+            <div class="mt-2">Created by AFY Cloud Solutions, a division of AFY Enterprises (Pty) LTD</div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ session.company_name }} | Finance Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; padding-top: 30px; font-family: Arial, sans-serif; }
+        .main-card { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px;}
+        .dash-btn { height: 100px; font-size: 1.1rem; font-weight: bold; border-radius: 12px; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: 0.2s; text-align: center; padding: 10px;}
+        .dash-btn:hover { transform: translateY(-3px); box-shadow: 0 5px 15px rgba(0,0,0,0.15);}
+        .dash-btn span { font-size: 2rem; margin-bottom: 5px;}
+        .stat-value { font-size: 2rem; font-weight: bold; }
+        .stat-label { font-size: 0.9rem; color: #6c757d; text-transform: uppercase; letter-spacing: 1px; }
+        .sub-cost { font-size: 0.85rem; color: #dc3545; display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #eee; }
+        .emp-link { text-decoration: none; font-weight: bold; color: #0d6efd; }
+        .status-light { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: middle; }
+    </style>
+</head>
+<body>
+    <div class="container-fluid px-4">
+        <div class="d-flex justify-content-between align-items-center mb-4 pb-3 border-bottom">
+            <div class="d-flex align-items-center">
+                {% if session.company_logo %}
+                    <img src="/uploads/logos/{{ session.company_logo }}" alt="Logo" class="shadow-sm me-3" style="width: 60px; height: 60px; object-fit: contain; border-radius: 8px; background-color: white;">
+                {% else %}
+                    <div class="bg-warning text-dark d-flex align-items-center justify-content-center rounded me-3 shadow-sm" style="width: 60px; height: 60px; font-size: 28px; font-weight: bold;">
+                        {{ session.company_name[0] }}
+                    </div>
+                {% endif %}
+                <div>
+                    <h2 class="mb-0" style="color: #198754;">Finance Operations</h2>
+                    <span class="text-muted">{{ session.company_name }} | Margins & Ledger</span>
+                </div>
+            </div>
+            <div>
+                <a href="/hub" class="btn btn-secondary fw-bold me-2">🔙 Back to Hub</a>
+                <a href="/logout" class="btn btn-outline-danger fw-bold">Logout</a>
+            </div>
+        </div>
+
+        <div class="row mb-4">
+            <div class="col"><button class="btn btn-primary w-100 dash-btn" onclick="openServicesModal()"><span>⚙️</span> Service Margins</button></div>
+            <div class="col"><button class="btn btn-info text-white w-100 dash-btn" onclick="openVendorDir()"><span>🏢</span> Providers & Suppliers</button></div>
+            <div class="col"><button class="btn btn-danger w-100 dash-btn" onclick="openExpenseModal()"><span>💸</span> Log Expense</button></div>
+            <div class="col"><button class="btn btn-warning text-dark w-100 dash-btn" onclick="openSuppliersModal()"><span>🧾</span> Recent Expenses</button></div>
+            <div class="col"><button class="btn btn-success w-100 dash-btn" onclick="openReportModal()"><span>📊</span> P&L Report</button></div>
+        </div>
+
+        <div class="row">
+            <div class="col-md-4">
+                <div class="main-card border-top border-primary border-4">
+                    <h4 class="text-primary text-center mb-4 border-bottom pb-2">Today's Projection</h4>
+                    <div class="mb-3 text-center"><div class="stat-label">Total Revenue</div><div class="stat-value text-dark">{{ today.revenue|fmt_money }}</div></div>
+                    
+                    <div class="bg-light p-2 rounded mb-3">
+                        <div class="text-center text-danger fw-bold mb-2 small">EXPENDITURES</div>
+                        <div class="sub-cost"><span>Staff Labor:</span> <span>{{ today.employee_cost|fmt_money }}</span></div>
+                        <div class="sub-cost"><span>Provider Costs:</span> <span>{{ today.provider_cost|fmt_money }}</span></div>
+                        <div class="sub-cost border-0"><span>Supplier Exp:</span> <span>{{ today.supplier_cost|fmt_money }}</span></div>
+                    </div>
+
+                    <div class="mt-3 p-3 text-center"><div class="stat-label text-success">Net Profit</div><div class="stat-value text-success">{{ today.profit|fmt_money }}</div></div>
+                    <small class="text-center text-muted d-block">{{ today.jobs }} Jobs Logged</small>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="main-card border-top border-warning border-4">
+                    <h4 class="text-warning text-center mb-4 border-bottom pb-2">Next 7 Days</h4>
+                    <div class="mb-3 text-center"><div class="stat-label">Total Revenue</div><div class="stat-value text-dark">{{ week.revenue|fmt_money }}</div></div>
+                    
+                    <div class="bg-light p-2 rounded mb-3">
+                        <div class="text-center text-danger fw-bold mb-2 small">EXPENDITURES</div>
+                        <div class="sub-cost"><span>Staff Labor:</span> <span>{{ week.employee_cost|fmt_money }}</span></div>
+                        <div class="sub-cost"><span>Provider Costs:</span> <span>{{ week.provider_cost|fmt_money }}</span></div>
+                        <div class="sub-cost border-0"><span>Supplier Exp:</span> <span>{{ week.supplier_cost|fmt_money }}</span></div>
+                    </div>
+
+                    <div class="mt-3 p-3 text-center"><div class="stat-label text-success">Net Profit</div><div class="stat-value text-success">{{ week.profit|fmt_money }}</div></div>
+                    <small class="text-center text-muted d-block">{{ week.jobs }} Jobs Logged</small>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="main-card border-top border-info border-4">
+                    <h4 class="text-info text-center mb-4 border-bottom pb-2">This Month</h4>
+                    <div class="mb-3 text-center"><div class="stat-label">Total Revenue</div><div class="stat-value text-dark">{{ month.revenue|fmt_money }}</div></div>
+                    
+                    <div class="bg-light p-2 rounded mb-3">
+                        <div class="text-center text-danger fw-bold mb-2 small">EXPENDITURES</div>
+                        <div class="sub-cost"><span>Staff Labor:</span> <span>{{ month.employee_cost|fmt_money }}</span></div>
+                        <div class="sub-cost"><span>Provider Costs:</span> <span>{{ month.provider_cost|fmt_money }}</span></div>
+                        <div class="sub-cost border-0"><span>Supplier Exp:</span> <span>{{ month.supplier_cost|fmt_money }}</span></div>
+                    </div>
+
+                    <div class="mt-3 p-3 text-center"><div class="stat-label text-success">Net Profit</div><div class="stat-value text-success">{{ month.profit|fmt_money }}</div></div>
+                    <small class="text-center text-muted d-block">{{ month.jobs }} Jobs Logged</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="vendorDirModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-info text-white"><h5 class="modal-title">Provider & Supplier Directory</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <div class="d-flex justify-content-between mb-3"><button class="btn btn-primary" onclick="openVendorProfile(null)">+ Add New Vendor</button></div>
+                    <table class="table table-hover align-middle bg-white border">
+                        <thead class="table-light">
+                            <tr><th>Ref No.</th><th>Company / Name</th><th>Type</th><th>Phone</th><th>Email</th><th>Status</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for v in vendors %}
+                            <tr>
+                                <td>{{ v.emp_number }}</td>
+                                <td><span class="emp-link">{{ v.name }}</span></td>
+                                <td><span class="badge {{ 'bg-primary' if v.emp_type == 'Provider' else 'bg-secondary' }}">{{ v.emp_type }}</span></td>
+                                <td>{{ v.phone or 'N/A' }}</td>
+                                <td>{{ v.email or 'N/A' }}</td>
+                                <td>
+                                    {% if v.status == 'Active' %}<span class="status-light" style="background-color: #198754;" title="Active"></span> Active
+                                    {% else %}<span class="status-light" style="background-color: #dc3545;" title="Inactive"></span> Inactive{% endif %}
+                                </td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-secondary" onclick='openVendorProfile({{ v | tojson | safe }})'>✏️ Edit Profile</button>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="7" class="text-center text-muted py-4">No Providers or Suppliers added yet.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="vendorProfileModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white"><h5 class="modal-title" id="vendorProfileTitle">Vendor Profile</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <input type="hidden" id="vId">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label small fw-bold">Company / Individual Name</label><input type="text" id="vName" class="form-control form-control-sm mb-2" required>
+                            <label class="form-label small fw-bold text-primary">Vendor Type</label>
+                            <select id="vType" class="form-select form-select-sm mb-2 border-primary">
+                                <option value="Provider">Provider (Assigned to Bookings)</option>
+                                <option value="Supplier">Supplier (Operational Expense)</option>
+                            </select>
+                            <label class="form-label small fw-bold">Status</label>
+                            <select id="vStatus" class="form-select form-select-sm mb-2"><option value="Active">Active</option><option value="Inactive">Inactive</option></select>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label small fw-bold">Phone Number</label><input type="text" id="vPhone" class="form-control form-control-sm mb-2">
+                            <label class="form-label small fw-bold">Email Address</label><input type="email" id="vEmail" class="form-control form-control-sm mb-2">
+                            <label class="form-label small fw-bold">Bank Details</label><input type="text" id="vBank" class="form-control form-control-sm mb-2" placeholder="Bank, Acc No, Branch">
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label small fw-bold">Physical / Postal Address</label><textarea id="vAddr" class="form-control form-control-sm" rows="2"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-primary" onclick="saveVendor()">Save Profile</button></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="servicesModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white"><h5 class="modal-title" id="serviceModalTitle">Service Master List</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <div class="card p-3 mb-4 shadow-sm border-0">
+                        <h6 class="text-primary mb-3">Add / Edit Service</h6>
+                        <input type="hidden" id="sId">
+                        <div class="row">
+                            <div class="col-md-4"><label class="small fw-bold">Service Name</label><input type="text" id="sName" class="form-control" placeholder="e.g. Standard Home Clean"></div>
+                            <div class="col-md-4"><label class="small fw-bold">Client Price (R)</label><input type="number" id="sPrice" class="form-control" placeholder="600.00"></div>
+                            <div class="col-md-4"><label class="small fw-bold">Cost to Company (R)</label><input type="number" id="sCost" class="form-control" placeholder="250.00"></div>
+                        </div>
+                        <button class="btn btn-sm btn-primary mt-3 w-100" onclick="saveService()">Save Service Margin</button>
+                    </div>
+                    
+                    <table class="table table-hover bg-white border">
+                        <thead class="table-light"><tr><th>Service</th><th>Client Price</th><th>Company Cost</th><th>Gross Margin</th><th>Action</th></tr></thead>
+                        <tbody>
+                            {% for s in services %}
+                            <tr>
+                                <td><strong>{{ s.name }}</strong></td><td class="text-success">{{ s.client_price|fmt_money }}</td><td class="text-danger">{{ s.company_cost|fmt_money }}</td>
+                                <td><strong>{{ (s.client_price - s.company_cost)|fmt_money }}</strong></td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-secondary me-1" onclick='editService({{ s | tojson | safe }})'>Edit</button>
+                                    <button class="btn btn-sm btn-outline-danger" onclick='deleteService({{ s.id }}, {{ s.name | tojson | safe }})'>Delete</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="expenseModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white"><h5 class="modal-title">Log Supplier / Operational Expense</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body">
+                    <div class="mb-3"><label class="small fw-bold">Date</label><input type="date" id="eDate" class="form-control" required></div>
+                    <div class="mb-3">
+                        <label class="small fw-bold text-primary">Category</label>
+                        <select id="eCat" class="form-select border-danger">
+                            <option>Cleaning Supplies</option>
+                            <option>Transport / Fuel</option>
+                            <option>Contractor / Supplier Payout</option>
+                            <option>Marketing</option>
+                            <option>Office / Admin</option>
+                            <option>Other</option>
+                        </select>
+                    </div>
+                    <div class="mb-3"><label class="small fw-bold">Supplier Name</label><input type="text" id="eSupplier" class="form-control" placeholder="e.g. Takealot, Makro"></div>
+                    <div class="mb-3"><label class="small fw-bold">Description</label><input type="text" id="eDesc" class="form-control" placeholder="What was purchased?"></div>
+                    <div class="mb-3"><label class="small fw-bold">Amount (R)</label><input type="number" id="eAmount" class="form-control" placeholder="0.00"></div>
+                    
+                    <div class="mb-3 bg-white p-2 rounded border border-info">
+                        <label class="small fw-bold text-info-emphasis mb-1">Upload Tax Invoice (PDF or Image)</label>
+                        <input type="file" id="eInvoice" class="form-control form-control-sm" accept=".pdf, image/jpeg, image/png">
+                        <div class="form-text" style="font-size: 0.75rem;">Save a digital copy of the receipt for SARS tax compliance.</div>
+                    </div>
+                </div>
+                <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-danger" onclick="saveExpense()">Save Expense</button></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="suppliersModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-warning text-dark"><h5 class="modal-title">Recent Expenses Ledger</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+
+                    <form method="GET" action="/finance" class="row g-2 align-items-end mb-3 bg-white border rounded p-2">
+                        <div class="col-md-7">
+                            <label class="form-label small fw-bold text-muted mb-1">Server Search</label>
+                            <input type="text" name="expense_q" class="form-control form-control-sm" value="{{ expense_q or '' }}" placeholder="Search date, category, supplier or description...">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small fw-bold text-muted mb-1">Rows</label>
+                            <select name="expense_per_page" class="form-select form-select-sm">
+                                {% for n in [10, 25, 50, 100] %}<option value="{{ n }}" {% if expense_pagination and expense_pagination.per_page == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <button class="btn btn-sm btn-warning fw-bold" type="submit">Search</button>
+                            <a href="/finance" class="btn btn-sm btn-outline-secondary">Reset</a>
+                        </div>
+                    </form>
+                    <div class="small text-muted mb-2">Showing {{ expense_pagination.start }}-{{ expense_pagination.end }} of {{ expense_pagination.total }} expenses.</div>
+                    <table class="table table-hover bg-white border align-middle">
+                        <thead class="table-light"><tr><th>Date</th><th>Category</th><th>Supplier</th><th>Description</th><th class="text-end">Amount</th><th class="text-center">Invoice</th></tr></thead>
+                        <tbody>
+                            {% for e in expenses %}
+                            <tr>
+                                <td>{{ e.date|fmt_date }}</td>
+                                <td><span class="badge bg-secondary">{{ e.category }}</span></td>
+                                <td><strong>{{ e.supplier }}</strong></td>
+                                <td>{{ e.description }}</td>
+                                <td class="text-end text-danger fw-bold">-{{ e.amount|fmt_money }}</td>
+                                <td class="text-center">
+                                    {% if e.invoice_file %}
+                                    <a href="/uploads/expenses/{{ e.invoice_file }}" target="_blank" class="btn btn-sm btn-outline-primary fw-bold">📄 View</a>
+                                    {% else %}
+                                    <span class="text-muted small">N/A</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="6" class="text-center text-muted py-4">No expenses logged yet.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+
+                    <div class="d-flex justify-content-between align-items-center mt-2">
+                        <div class="small text-muted">Page {{ expense_pagination.page }} of {{ expense_pagination.pages }}</div>
+                        <div>
+                            {% if expense_pagination.has_prev %}<a class="btn btn-sm btn-outline-dark" href="/finance?expense_q={{ expense_q|urlencode }}&expense_per_page={{ expense_pagination.per_page }}&expense_page={{ expense_pagination.prev_page }}">Previous</a>{% endif %}
+                            {% if expense_pagination.has_next %}<a class="btn btn-sm btn-outline-dark ms-1" href="/finance?expense_q={{ expense_q|urlencode }}&expense_per_page={{ expense_pagination.per_page }}&expense_page={{ expense_pagination.next_page }}">Next</a>{% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="reportModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white"><h5 class="modal-title">Profit & Loss Report</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <div class="row mb-4">
+                        <div class="col-md-5"><label class="small">Start Date</label><input type="date" id="repStart" class="form-control"></div>
+                        <div class="col-md-5"><label class="small">End Date</label><input type="date" id="repEnd" class="form-control"></div>
+                        <div class="col-md-2 d-flex align-items-end"><button class="btn btn-success w-100" onclick="runFinanceReport()">Run P&L</button></div>
+                    </div>
+                    <div id="reportResults" style="display: none;">
+                        <div class="card p-4 border-0 shadow-sm">
+                            <h4 class="text-center text-success mb-4 border-bottom pb-2">Statement of Profit & Loss</h4>
+                            <table class="table table-borderless">
+                                <tbody>
+                                    <tr><td><strong>Total Booking Revenue</strong></td><td class="text-end fw-bold" id="rRev"></td></tr>
+                                    <tr class="border-bottom"><td colspan="2" class="text-danger small fw-bold">EXPENDITURES</td></tr>
+                                    <tr><td class="text-danger ps-4">Staff Labor Costs</td><td class="text-end text-danger" id="rEmp"></td></tr>
+                                    <tr><td class="text-danger ps-4">Provider / Sub-contractor Costs</td><td class="text-end text-danger" id="rProv"></td></tr>
+                                    <tr class="border-bottom"><td class="text-danger ps-4">Supplier / Operational Expenses</td><td class="text-end text-danger" id="rSupp"></td></tr>
+                                    <tr class="table-success mt-2"><td class="fs-5"><strong>NET PROFIT</strong></td><td class="text-end fs-5 fw-bold text-success" id="rNet"></td></tr>
+                                </tbody>
+                            </table>
+                            <small class="text-center text-muted mt-3 d-block">Report includes <span id="rJobs"></span> completed/projected assignments.</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.getElementById('eDate').value = new Date().toISOString().split('T')[0];
+        
+        const servicesModal = new bootstrap.Modal(document.getElementById('servicesModal'));
+        const expenseModal = new bootstrap.Modal(document.getElementById('expenseModal'));
+        const suppliersModal = new bootstrap.Modal(document.getElementById('suppliersModal'));
+        const reportModal = new bootstrap.Modal(document.getElementById('reportModal'));
+        const vendorDirModal = new bootstrap.Modal(document.getElementById('vendorDirModal'));
+        const vendorProfileModal = new bootstrap.Modal(document.getElementById('vendorProfileModal'));
+
+        function openVendorDir() { vendorDirModal.show(); }
+        
+        function openVendorProfile(v) { 
+            vendorDirModal.hide(); 
+            document.getElementById('vendorProfileTitle').innerText = v ? 'Edit Vendor Profile' : 'Add New Vendor'; 
+            document.getElementById('vId').value = v ? v.id : ''; 
+            document.getElementById('vName').value = v ? v.name : ''; 
+            document.getElementById('vType').value = v ? (v.emp_type || 'Provider') : 'Provider'; 
+            document.getElementById('vStatus').value = v ? (v.status || 'Active') : 'Active'; 
+            document.getElementById('vPhone').value = v ? (v.phone || '') : ''; 
+            document.getElementById('vEmail').value = v ? (v.email || '') : ''; 
+            document.getElementById('vBank').value = v ? (v.bank_details || '') : ''; 
+            document.getElementById('vAddr').value = v ? (v.address || '') : ''; 
+            vendorProfileModal.show(); 
+        }
+
+        function saveVendor() {
+            const data = { 
+                id: document.getElementById('vId').value, 
+                name: document.getElementById('vName').value, 
+                emp_type: document.getElementById('vType').value, 
+                status: document.getElementById('vStatus').value, 
+                phone: document.getElementById('vPhone').value, 
+                email: document.getElementById('vEmail').value, 
+                bank_details: document.getElementById('vBank').value, 
+                address: document.getElementById('vAddr').value 
+            };
+            if(!data.name) return alert("Name is required.");
+            fetch('/update_vendor', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)})
+            .then(() => location.reload());
+        }
+
+        function openServicesModal() { document.getElementById('sId').value = ''; document.getElementById('sName').value = ''; document.getElementById('sPrice').value = ''; document.getElementById('sCost').value = ''; servicesModal.show(); }
+        function editService(s) { document.getElementById('sId').value = s.id; document.getElementById('sName').value = s.name; document.getElementById('sPrice').value = s.client_price; document.getElementById('sCost').value = s.company_cost; }
+        function saveService() {
+            const data = { id: document.getElementById('sId').value, name: document.getElementById('sName').value, price: document.getElementById('sPrice').value, cost: document.getElementById('sCost').value };
+            if(!data.name || !data.price || !data.cost) return alert("Fill all fields.");
+            fetch('/update_service', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)}).then(() => location.reload());
+        }
+
+
+        function deleteService(serviceId, serviceName) {
+            if(!serviceId) return alert('Service ID is missing.');
+            if(!confirm(`Delete service "${serviceName}"? Existing invoices and quotes already created will not be changed.`)) return;
+            fetch('/delete_service', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ id: serviceId })
+            }).then(async r => {
+                const data = await r.json().catch(() => ({}));
+                if(!r.ok || data.status === 'error') throw new Error(data.message || 'Could not delete service.');
+                location.reload();
+            }).catch(err => alert(err.message));
+        }
+
+        function openExpenseModal() { document.getElementById('eSupplier').value = ''; document.getElementById('eDesc').value = ''; document.getElementById('eAmount').value = ''; document.getElementById('eInvoice').value = ''; expenseModal.show(); }
+        
+        // NEW JAVASCRIPT FOR MULTIPART FORM DATA
+        function saveExpense() {
+            const date = document.getElementById('eDate').value;
+            const category = document.getElementById('eCat').value;
+            const supplier = document.getElementById('eSupplier').value;
+            const desc = document.getElementById('eDesc').value;
+            const amount = document.getElementById('eAmount').value;
+            
+            if(!date || !amount) return alert("Date and Amount required.");
+
+            const fd = new FormData();
+            fd.append('date', date);
+            fd.append('category', category);
+            fd.append('supplier', supplier);
+            fd.append('description', desc);
+            fd.append('amount', amount);
+            
+            const fileInput = document.getElementById('eInvoice');
+            if (fileInput.files.length > 0) {
+                fd.append('invoice_file', fileInput.files[0]);
+            }
+
+            fetch('/log_expense', {
+                method: 'POST', 
+                body: fd
+            }).then(() => location.reload());
+        }
+
+        function openSuppliersModal() { suppliersModal.show(); }
+        
+        function openReportModal() { document.getElementById('reportResults').style.display = 'none'; reportModal.show(); }
+        function money(value) {
+            if(window.EasyAdminFormat) return window.EasyAdminFormat.money(value);
+            return Number(value || 0).toLocaleString('en-ZA', {minimumFractionDigits:2, maximumFractionDigits:2});
+        }
+        function runFinanceReport() {
+            const start = document.getElementById('repStart').value; const end = document.getElementById('repEnd').value;
+            if(!start || !end) return alert("Select both dates.");
+            fetch('/finance_report', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({start_date: start, end_date: end})})
+            .then(res => res.json()).then(data => {
+                document.getElementById('rRev').innerText = money(data.stats.revenue);
+                document.getElementById('rEmp').innerText = '-' + money(data.stats.employee_cost);
+                document.getElementById('rProv').innerText = '-' + money(data.stats.provider_cost);
+                document.getElementById('rSupp').innerText = '-' + money(data.stats.supplier_cost);
+                document.getElementById('rNet').innerText = money(data.stats.profit);
+                document.getElementById('rJobs').innerText = data.stats.jobs;
+                document.getElementById('reportResults').style.display = 'block';
+            });
+        }
+
+        let idleTimer;
+        const timeoutValue = 1800000; 
+        function resetIdleTimer() { clearTimeout(idleTimer); idleTimer = setTimeout(() => { window.location.href = "/logout"; }, timeoutValue); }
+        window.onload = resetIdleTimer; document.onmousemove = resetIdleTimer; document.onkeypress = resetIdleTimer; document.onclick = resetIdleTimer; document.onscroll = resetIdleTimer;
+    </script>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

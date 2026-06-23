@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0d6efd">
+    <title>Easy Admin Offline</title>
+    <link rel="stylesheet" href="/static/mobile.css?v=20260622">
+</head>
+<body class="offline-page">
+    <main class="offline-card">
+        <img src="/static/easy_admin_logo.png" alt="Easy Admin" class="offline-logo">
+        <h1>You are offline</h1>
+        <p>Easy Admin Mobile needs an internet connection for live bookings, uploads, notes and status updates.</p>
+        <a href="/mobile" class="primary-btn">Try again</a>
+    </main>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

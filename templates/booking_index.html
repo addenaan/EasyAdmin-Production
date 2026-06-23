@@ -1,0 +1,2346 @@
+{% set labels = tenant_labels or {} %}
+{% set booking_label = labels.get('booking_name', 'Booking') %}
+{% set client_label = labels.get('client_name', 'Client') %}
+{% set service_label = labels.get('service_name', 'Service') %}
+{% set employee_label = labels.get('employee_name', 'Employee') %}
+{% set booking_app_title = labels.get('booking_app_title', 'Booking & Ops') %}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ session.company_name }} | {{ booking_app_title }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.10/index.global.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <style>
+        body { background-color: #f8f9fa; padding-top: 30px; font-family: Arial, sans-serif; }
+        .main-card { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px;}
+        .dash-btn { height: 100px; font-size: 1.1rem; font-weight: bold; border-radius: 12px; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: 0.2s;}
+        .dash-btn:hover { transform: translateY(-3px); box-shadow: 0 5px 15px rgba(0,0,0,0.15);}
+        .dash-btn span { font-size: 2rem; margin-bottom: 5px;}
+        .booking-item { cursor: pointer; transition: background 0.2s; border-left: 4px solid #0d6efd; }
+        .booking-item:hover { background-color: #f1f3f5; }
+        .badge-monthly { background-color: #0d6efd; }
+        .badge-adhoc { background-color: #6c757d; }
+        #calendar-view { display: none; }
+        .wizard-client-btn { text-align: left; }
+    </style>
+</head>
+<body>
+    <div class="container-fluid px-4">
+        <div class="d-flex justify-content-between align-items-center mb-4 pb-3 border-bottom">
+            <div class="d-flex align-items-center">
+                {% if session.company_logo %}
+                    <img src="/uploads/logos/{{ session.company_logo }}" alt="Logo" class="shadow-sm me-3" style="width: 60px; height: 60px; object-fit: contain; border-radius: 8px; background-color: white;">
+                {% else %}
+                    <div class="bg-primary text-white d-flex align-items-center justify-content-center rounded me-3 shadow-sm" style="width: 60px; height: 60px; font-size: 28px; font-weight: bold;">
+                        {{ session.company_name[0] }}
+                    </div>
+                {% endif %}
+                <div>
+                    <h2 class="mb-0 text-primary fw-bold">{{ booking_app_title }}</h2>
+                    <span class="text-muted">{{ session.company_name }} | {{ booking_label }}s & Logistics</span>
+                </div>
+            </div>
+            <div>
+                <a href="/hub" class="btn btn-secondary fw-bold me-2">🔙 Back to Hub</a>
+                <button class="btn btn-info text-white fw-bold me-2" onclick="openBulkBookingModal()">🔁 Bulk Booking Scheduler</button>
+                <a href="/logout" class="btn btn-outline-danger fw-bold">Logout</a>
+            </div>
+        </div>
+
+        <div id="dashboard-view">
+            <div class="row mb-4 g-2">
+                <div class="col"><button class="btn btn-primary w-100 dash-btn" onclick="openNewBookingModal()"><span>+</span> Log Booking</button></div>
+                <div class="col"><button class="btn btn-success w-100 dash-btn" onclick="toggleView('calendar')"><span>📅</span> Calendar</button></div>
+                <div class="col"><button class="btn btn-info text-white w-100 dash-btn" onclick="openClientProfile(null)"><span>👤</span> New Client</button></div>
+                <div class="col"><button class="btn btn-dark w-100 dash-btn" onclick="openClientDirectory()"><span>🗂️</span> Client Directory</button></div>
+                <div class="col"><button class="btn btn-secondary w-100 dash-btn" onclick="openProjectDirectory()"><span>🏗️</span> Projects</button></div>
+                <div class="col"><button class="btn btn-warning text-dark w-100 dash-btn" onclick="openBookingOpsReports()"><span>📊</span> Reports</button></div>
+                
+                <div class="col-md-12 mt-2">
+                    <button class="btn btn-secondary w-100 dash-btn" onclick="openRoutePlannerModal()" style="height: 60px; flex-direction: row; gap: 10px;">
+                        <span>🗺️</span> Plan Daily Route
+                    </button>
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="col-md-4"><div class="main-card border-top border-primary border-4"><h4 class="text-primary mb-3">Today</h4><div class="list-group list-group-flush" id="listToday"></div></div></div>
+                <div class="col-md-4"><div class="main-card border-top border-warning border-4"><h4 class="text-warning mb-3">Tomorrow</h4><div class="list-group list-group-flush" id="listTomorrow"></div></div></div>
+                <div class="col-md-4"><div class="main-card border-top border-info border-4"><h4 class="text-info mb-3">Next 7 Days</h4><div class="list-group list-group-flush" id="listWeek"></div></div></div>
+            </div>
+        </div>
+
+        <div id="calendar-view">
+            <div class="d-flex justify-content-between mb-3">
+                <h4>Full Month View</h4>
+                <div>
+                    <button class="btn btn-success me-2" onclick="openBookingsExportModal()">⬇️ Export {{ booking_label }}s</button>
+                    <button class="btn btn-primary me-2" onclick="openNewBookingModal()">+ Add {{ booking_label }}</button>
+                    <button class="btn btn-secondary" onclick="toggleView('dashboard')">🔙 Back to Dashboard</button>
+                </div>
+            </div>
+            <div class="main-card p-3">
+                <div id="calendar"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="newBookingModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title fw-bold" id="newBookingModalTitle">Step 1: Select {{ client_label }}</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light" style="min-height: 400px;">
+                    
+                    <div id="step1">
+                        <div id="wizardCurrentClientIndicator" class="alert alert-info border-primary shadow-sm py-2 mb-3" style="display:none;">
+                            <div class="small text-muted fw-bold">Current Booking Client</div>
+                            <div class="fw-bold text-primary fs-5" id="wizardCurrentClientName"></div>
+                        </div>
+                        <input type="text" id="wizardClientSearch" class="form-control border-primary mb-3" placeholder="Search {{ client_label|lower }}s..." onkeyup="filterWizardClients()">
+                        <div class="list-group shadow-sm border" id="wizardClientList" style="max-height: 350px; overflow-y: auto;">
+                            {% for c in clients %}
+                            <button type="button" class="list-group-item list-group-item-action wizard-client-btn fw-bold" data-client-id="{{ c.id }}" data-client-name="{{ c.display_name|e }}" onclick="selectWizardClient(this)">
+                                {{ c.option_label or c.display_name }}
+                            </button>
+                            {% endfor %}
+                            {% if not clients %}
+                            <div class="p-3 text-center text-muted">No {{ client_label|lower }}s available.</div>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div id="step2" style="display:none;">
+                        
+                        <div class="form-check mb-3 p-3 bg-white border rounded shadow-sm border-primary">
+                            <input class="form-check-input ms-1 border-primary" type="checkbox" id="wizardSplit" onchange="toggleWizMode()" checked>
+                            <label class="form-check-label ms-2 fw-bold text-primary fs-6" for="wizardSplit">Create separate bookings for each employee</label>
+                            <div class="small text-muted ms-2 mt-1">Checked: Set transport & overtime individually per staff member. Unchecked: Group staff into a single shift with shared master logistics.</div>
+                        </div>
+
+                        <div id="globalLogistics" class="bg-white border border-dark rounded p-3 mb-4 shadow-sm" style="display:none;">
+                            <h6 class="text-dark fw-bold border-bottom pb-2">Master Logistics (Applies to all selected staff)</h6>
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label class="small fw-bold text-primary mb-1">Company Transport</label>
+                                    <select id="globalTransport" class="form-select border-primary form-select-sm">
+                                        <option value="">No Transport Required</option>
+                                        <option value="Pickup">Pickup Only</option>
+                                        <option value="Drop Off">Drop Off Only</option>
+                                        <option value="Pickup & Drop Off">Pickup & Drop Off</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="small fw-bold text-warning text-dark mb-1">Additional Overtime Hours</label>
+                                    <input type="number" id="globalOvertime" step="0.5" class="form-control border-warning form-control-sm" value="0" min="0" onchange="document.querySelectorAll('.wizard-emp-row').forEach(row => { if(row.querySelector('.wizard-emp-cb').checked) refreshWizardEmployeeHours(row); })" onkeyup="document.querySelectorAll('.wizard-emp-row').forEach(row => { if(row.querySelector('.wizard-emp-cb').checked) refreshWizardEmployeeHours(row); })">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-6">
+                                <label class="small fw-bold">Booking Date for Availability Check</label>
+                                <input type="date" id="wizardAvailabilityDate" class="form-control border-dark" onchange="syncWizardAvailabilityDate(); refreshWizardStaffAvailability();">
+                            </div>
+                            <div class="col-md-6 d-flex align-items-end">
+                                <div class="small text-muted">Week runs Monday to Sunday. Hours include this proposed booking when staff is selected.</div>
+                            </div>
+                        </div>
+                        <input type="text" id="wizardEmpSearch" class="form-control border-primary mb-3" placeholder="Search {{ employee_label|lower }}s..." onkeyup="filterWizardEmps()">
+                        <div class="list-group shadow-sm border" id="wizardEmpList" style="max-height: 300px; overflow-y: auto;">
+                            {% for e in employees %}
+                            <div class="list-group-item wizard-emp-row py-3">
+                                <div class="form-check fw-bold text-dark fs-5 mb-0">
+                                    <input class="form-check-input wizard-emp-cb border-dark" type="checkbox" value="{{ e.name }}" id="empCb_{{ loop.index }}" onchange="toggleEmpLogistics('{{ loop.index }}'); refreshWizardEmployeeHours(this.closest('.wizard-emp-row'));">
+                                    <label class="form-check-label" style="cursor:pointer;" for="empCb_{{ loop.index }}">{{ e.name }}</label>
+                                    <div class="small mt-1 staff-hours-summary text-muted" id="hours_{{ loop.index }}">Select staff to view week/month hours.</div>
+                                </div>
+                                <div class="mt-3 logistics-panel bg-light border rounded p-3" id="logistics_{{ loop.index }}" style="display:none;">
+                                    <div class="row g-3">
+                                        <div class="col-md-6">
+                                            <label class="small fw-bold text-primary mb-1">Company Transport</label>
+                                            <select class="form-select form-select-sm border-primary emp-transport">
+                                                <option value="">No Transport Required</option>
+                                                <option value="Pickup">Pickup Only</option>
+                                                <option value="Drop Off">Drop Off Only</option>
+                                                <option value="Pickup & Drop Off">Pickup & Drop Off</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="small fw-bold text-warning text-dark mb-1">Additional Overtime Hours</label>
+                                            <input type="number" step="0.5" class="form-control form-control-sm border-warning emp-overtime" value="0" min="0" onchange="refreshWizardEmployeeHours(this.closest('.wizard-emp-row'))" onkeyup="refreshWizardEmployeeHours(this.closest('.wizard-emp-row'))">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <div id="step3" style="display:none;">
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label class="small fw-bold">Date</label>
+                                <input type="date" id="wizardDate" class="form-control border-dark" onchange="document.getElementById('wizardAvailabilityDate').value=this.value; refreshWizardStaffAvailability();">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="small fw-bold">Time</label>
+                                <input type="time" id="wizardTime" class="form-control border-dark" value="08:00">
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="small fw-bold">{{ service_label }}</label>
+                            <select id="wizardService" class="form-select border-primary" multiple size="3">
+                                {% for s in services %}<option value="{{ s.name }}">{{ s.name }}</option>{% endfor %}
+                            </select>
+                            <div class="form-text small">Hold Ctrl/Cmd to select multiple {{ service_label|lower }}s.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="small fw-bold">Link to Project (Optional)</label>
+                            <select id="wizardProject" class="form-select border-secondary">
+                                <option value="">No Project / Normal {{ service_label }}</option>
+                                {% for p in projects %}
+                                    {% if p.status != 'Cancelled' %}
+                                    <option value="{{ p.id }}" data-client-id="{{ p.client_id or '' }}">{{ p.project_name }}{% if p.project_code %} ({{ p.project_code }}){% endif %}</option>
+                                    {% endif %}
+                                {% endfor %}
+                            </select>
+                            <div class="form-text small">Use this when the booking is a workday linked to a fixed-price project. Project-linked bookings are not pulled into normal service invoicing.</div>
+                        </div>
+                        {% if booking_custom_fields %}
+                        <div class="bg-white border rounded p-3 mb-3 shadow-sm" id="wizardCustomFieldsSection">
+                            <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">Additional {{ booking_label }} Details</h6>
+                            <div class="row g-3">
+                                {% for f in booking_custom_fields %}
+                                <div class="col-md-6">
+                                    <label class="small fw-bold">{{ f.field_label }}{% if f.required %} <span class="text-danger">*</span>{% endif %}</label>
+                                    {% if f.field_type == 'textarea' %}
+                                        <textarea class="form-control booking-custom-field" rows="2" data-field-key="{{ f.field_key }}" data-required="{{ 1 if f.required else 0 }}"></textarea>
+                                    {% elif f.field_type == 'checkbox' %}
+                                        <div class="form-check mt-2">
+                                            <input class="form-check-input booking-custom-field" type="checkbox" data-field-key="{{ f.field_key }}" data-required="0">
+                                            <label class="form-check-label small">Yes</label>
+                                        </div>
+                                    {% elif f.field_type == 'dropdown' %}
+                                        <select class="form-select booking-custom-field" data-field-key="{{ f.field_key }}" data-required="{{ 1 if f.required else 0 }}">
+                                            <option value="">Select...</option>
+                                            {% for opt in f.options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}
+                                            {% if not f.options %}<option value="" disabled>No options configured</option>{% endif %}
+                                        </select>
+                                    {% else %}
+                                        <input type="{{ 'time' if f.field_type == 'time' else 'date' if f.field_type == 'date' else 'number' if f.field_type == 'number' else 'text' }}" class="form-control booking-custom-field" data-field-key="{{ f.field_key }}" data-required="{{ 1 if f.required else 0 }}">
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+                        <div class="mb-3">
+                            <label class="small fw-bold">{{ booking_label }} Notes (Optional)</label>
+                            <textarea id="wizardNotes" class="form-control" rows="3" placeholder="Gate codes, special instructions..."></textarea>
+                        </div>
+                        <div class="bg-white border rounded p-3 mb-3 shadow-sm" id="wizardAttachmentsSection">
+                            <h6 class="fw-bold text-secondary border-bottom pb-2 mb-3">{{ booking_label }} Attachments</h6>
+                            <div id="wizardAttachmentList" class="small mb-2 text-muted">No attachments uploaded yet.</div>
+                            <input type="file" id="wizardAttachmentFiles" class="form-control form-control-sm" multiple>
+                            <div class="form-text small">Attach files such as photos, signed job cards, site instructions, or supporting documents. Files are uploaded after the {{ booking_label|lower }} is saved.</div>
+                        </div>
+                    </div>
+
+                </div>
+                <div class="modal-footer d-flex justify-content-between bg-dark">
+                    <div>
+                        <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-danger fw-bold ms-2" id="wizBtnDelete" style="display:none;" onclick="deleteWizardBooking()">Delete Booking</button>
+                    </div>
+                    <div>
+                        <button type="button" class="btn btn-secondary fw-bold" id="wizBtnBack" style="display:none;" onclick="wizBack()">Back</button>
+                        <button type="button" class="btn btn-primary fw-bold ms-2" id="wizBtnNext" onclick="wizNext()">Next</button>
+                        <button type="button" class="btn btn-success fw-bold ms-2" id="wizBtnFinish" style="display:none;" onclick="saveWizardBooking()">Finish</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="modal fade" id="bulkBookingModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-info text-white">
+                    <h5 class="modal-title fw-bold" id="bulkBookingModalTitle">Step 1: Select {{ client_label }}</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light" style="min-height: 400px;">
+                    
+                    <div id="bulkStep1">
+                        <input type="text" id="bulkClientSearch" class="form-control border-info mb-3" placeholder="Search {{ client_label|lower }}s..." onkeyup="filterBulkClients()">
+                        <div class="list-group shadow-sm border" id="bulkClientList" style="max-height: 350px; overflow-y: auto;">
+                            {% for c in clients %}
+                            <button type="button" class="list-group-item list-group-item-action bulk-client-btn fw-bold" data-client-id="{{ c.id }}" data-client-name="{{ c.display_name|e }}" onclick="selectBulkClient(this)">
+                                {{ c.option_label or c.display_name }}
+                            </button>
+                            {% endfor %}
+                            {% if not clients %}
+                            <div class="p-3 text-center text-muted">No {{ client_label|lower }}s available.</div>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div id="bulkStep2" style="display:none;">
+                        
+                        <div class="form-check mb-3 p-3 bg-white border rounded shadow-sm border-info">
+                            <input class="form-check-input ms-1 border-info" type="checkbox" id="bulkSplit" onchange="toggleBulkMode()" checked>
+                            <label class="form-check-label ms-2 fw-bold text-info-emphasis fs-6" for="bulkSplit">Create separate bookings for each employee</label>
+                            <div class="small text-muted ms-2 mt-1">Checked: Set transport & overtime individually per staff member. Unchecked: Group staff into a single shift with shared master logistics.</div>
+                        </div>
+
+                        <div id="bulkGlobalLogistics" class="bg-white border border-dark rounded p-3 mb-4 shadow-sm" style="display:none;">
+                            <h6 class="text-dark fw-bold border-bottom pb-2">Master Logistics (Applies to all selected staff)</h6>
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label class="small fw-bold text-info-emphasis mb-1">Company Transport</label>
+                                    <select id="bulkGlobalTransport" class="form-select border-info form-select-sm">
+                                        <option value="">No Transport Required</option>
+                                        <option value="Pickup">Pickup Only</option>
+                                        <option value="Drop Off">Drop Off Only</option>
+                                        <option value="Pickup & Drop Off">Pickup & Drop Off</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="small fw-bold text-warning text-dark mb-1">Additional Overtime Hours</label>
+                                    <input type="number" id="bulkGlobalOvertime" step="0.5" class="form-control border-warning form-control-sm" value="0" min="0">
+                                </div>
+                            </div>
+                        </div>
+
+                        <input type="text" id="bulkEmpSearch" class="form-control border-info mb-3" placeholder="Search {{ employee_label|lower }}s..." onkeyup="filterBulkEmps()">
+                        <div class="list-group shadow-sm border" id="bulkEmpList" style="max-height: 300px; overflow-y: auto;">
+                            {% for e in employees %}
+                            <div class="list-group-item bulk-emp-row py-3">
+                                <div class="form-check fw-bold text-dark fs-5 mb-0">
+                                    <input class="form-check-input bulk-emp-cb border-dark" type="checkbox" value="{{ e.name }}" id="bulkEmpCb_{{ loop.index }}" onchange="toggleBulkEmpLogistics('{{ loop.index }}')">
+                                    <label class="form-check-label" style="cursor:pointer;" for="bulkEmpCb_{{ loop.index }}">{{ e.name }}</label>
+                                </div>
+                                <div class="mt-3 bulk-logistics-panel bg-light border rounded p-3" id="bulkLogistics_{{ loop.index }}" style="display:none;">
+                                    <div class="row g-3">
+                                        <div class="col-md-6">
+                                            <label class="small fw-bold text-info-emphasis mb-1">Company Transport</label>
+                                            <select class="form-select form-select-sm border-info bulk-emp-transport">
+                                                <option value="">No Transport Required</option>
+                                                <option value="Pickup">Pickup Only</option>
+                                                <option value="Drop Off">Drop Off Only</option>
+                                                <option value="Pickup & Drop Off">Pickup & Drop Off</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="small fw-bold text-warning text-dark mb-1">Additional Overtime Hours</label>
+                                            <input type="number" step="0.5" class="form-control form-control-sm border-warning bulk-emp-overtime" value="0" min="0">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <div id="bulkStep3" style="display:none;">
+                        <p class="text-muted small mb-3">The system will automatically generate a booking for every matching day of the week between your Start and End dates.</p>
+                        
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label class="small fw-bold">Start Date</label>
+                                <input type="date" id="bulkStartDate" class="form-control border-dark">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="small fw-bold">End Date</label>
+                                <input type="date" id="bulkEndDate" class="form-control border-dark">
+                            </div>
+                        </div>
+                        
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label class="small fw-bold">Standard Shift Time</label>
+                                <input type="time" id="bulkTime" class="form-control border-dark" value="08:00">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="small fw-bold">{{ service_label }}</label>
+                                <select id="bulkService" class="form-select border-info">
+                                    {% for s in services %}<option value="{{ s.name }}">{{ s.name }}</option>{% endfor %}
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="small fw-bold">Link to Project (Optional)</label>
+                            <select id="bulkProject" class="form-select border-secondary">
+                                <option value="">No Project / Normal {{ service_label }}</option>
+                                {% for p in projects %}
+                                    {% if p.status != 'Cancelled' %}
+                                    <option value="{{ p.id }}" data-client-id="{{ p.client_id or '' }}">{{ p.project_name }}{% if p.project_code %} ({{ p.project_code }}){% endif %}</option>
+                                    {% endif %}
+                                {% endfor %}
+                            </select>
+                            <div class="form-text small">Bulk bookings linked to a project are treated as project workdays, not normal service bookings for invoicing.</div>
+                        </div>
+
+                        <div class="mb-3 bg-white p-3 border rounded border-info">
+                            <label class="form-label fw-bold text-info-emphasis small mb-2">Select {{ booking_label }} Days</label>
+                            <div class="d-flex flex-wrap gap-3">
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="0" id="bDay0"><label class="form-check-label small" for="bDay0">Monday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="1" id="bDay1"><label class="form-check-label small" for="bDay1">Tuesday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="2" id="bDay2"><label class="form-check-label small" for="bDay2">Wednesday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="3" id="bDay3"><label class="form-check-label small" for="bDay3">Thursday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="4" id="bDay4"><label class="form-check-label small" for="bDay4">Friday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="5" id="bDay5"><label class="form-check-label small" for="bDay5">Saturday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="6" id="bDay6"><label class="form-check-label small" for="bDay6">Sunday</label></div>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="small fw-bold">Booking Notes (Optional)</label>
+                            <textarea id="bulkNotes" class="form-control" rows="2" placeholder="Gate codes, special instructions..."></textarea>
+                        </div>
+
+                        {% if booking_custom_fields %}
+                        <div class="bg-white border rounded p-3 mb-3 shadow-sm" id="bulkCustomFieldsSection">
+                            <h6 class="fw-bold text-info-emphasis border-bottom pb-2">Additional {{ booking_label }} Details</h6>
+                            <div class="row g-3">
+                                {% for f in booking_custom_fields %}
+                                <div class="col-md-6">
+                                    <label class="small fw-bold">{{ f.field_label }}{% if f.required %} <span class="text-danger">*</span>{% endif %}</label>
+                                    {% if f.field_type == 'textarea' %}
+                                        <textarea class="form-control bulk-custom-field" rows="2" data-field-key="{{ f.field_key }}" data-required="{{ 1 if f.required else 0 }}"></textarea>
+                                    {% elif f.field_type == 'checkbox' %}
+                                        <div class="form-check mt-2">
+                                            <input class="form-check-input bulk-custom-field" type="checkbox" data-field-key="{{ f.field_key }}" data-required="0">
+                                            <label class="form-check-label small">Yes</label>
+                                        </div>
+                                    {% elif f.field_type == 'dropdown' %}
+                                        <select class="form-select bulk-custom-field" data-field-key="{{ f.field_key }}" data-required="{{ 1 if f.required else 0 }}">
+                                            <option value="">Select...</option>
+                                            {% for opt in f.options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}
+                                            {% if not f.options %}<option value="" disabled>No options configured</option>{% endif %}
+                                        </select>
+                                    {% else %}
+                                        <input type="{{ 'time' if f.field_type == 'time' else 'date' if f.field_type == 'date' else 'number' if f.field_type == 'number' else 'text' }}" class="form-control bulk-custom-field" data-field-key="{{ f.field_key }}" data-required="{{ 1 if f.required else 0 }}">
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+
+                </div>
+                <div class="modal-footer d-flex justify-content-between bg-dark">
+                    <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+                    <div>
+                        <button type="button" class="btn btn-secondary fw-bold" id="bulkBtnBack" style="display:none;" onclick="bulkBack()">Back</button>
+                        <button type="button" class="btn btn-info text-white fw-bold ms-2" id="bulkBtnNext" onclick="bulkNext()">Next</button>
+                        <button type="button" class="btn btn-success fw-bold ms-2" id="bulkBtnFinish" style="display:none;" onclick="saveBulkBooking()">Generate Dates</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="modal fade" id="editModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white"><h5 class="modal-title">Manage Assignment</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <input type="hidden" id="editBookingId">
+                    <div class="mb-3"><label class="form-label text-muted small fw-bold">Client</label><select id="editClientName" class="form-select">{% for client in clients %}<option value="{{ client.id }}" data-client-name="{{ client.display_name|e }}">{{ client.option_label or client.display_name }}</option>{% endfor %}</select></div>
+                    
+                    <div class="mb-3">
+                        <label class="form-label text-muted small fw-bold">{{ service_label }}</label>
+                        <select id="editBookingType" class="form-select border-primary" multiple size="3">
+                            {% for service in services %}
+                            <option value="{{ service.name }}">{{ service.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="mb-3"><label class="form-label text-muted small fw-bold">Assigned Employees</label><select id="editEmployeeName" class="form-select" multiple size="3">{% for employee in employees %}<option value="{{ employee.name }}">{{ employee.name }}</option>{% endfor %}</select></div>
+                    
+                    <div class="mb-3 bg-white p-2 rounded border">
+                        <label class="form-label text-primary small fw-bold mb-1">Company Transport Logistics</label>
+                        <div class="form-check"><input class="form-check-input edit-t-check" type="checkbox" value="Drop Off" id="editTDropOff"><label class="form-check-label small" for="editTDropOff">Company Drop Off Required</label></div>
+                        <div class="form-check"><input class="form-check-input edit-t-check" type="checkbox" value="Pickup" id="editTPickup"><label class="form-check-label small" for="editTPickup">Company Pickup Required</label></div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label text-muted small fw-bold">Additional Overtime Hours Worked (Optional)</label>
+                        <input type="number" id="editBookingOvertime" class="form-control border-warning" step="0.5" min="0" placeholder="e.g. 1.5">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label text-muted small fw-bold">Booking Notes (Optional)</label>
+                        <textarea id="editBookingNotes" class="form-control" rows="2" placeholder="Gate codes, special requests..."></textarea>
+                    </div>
+
+                    <div class="row mb-3"><div class="col-6"><label class="form-label text-muted small fw-bold">Date</label><input type="date" id="editBookingDate" class="form-control"></div><div class="col-6"><label class="form-label text-muted small fw-bold">Time</label><input type="time" id="editBookingTime" class="form-control"></div></div>
+                </div>
+                <div class="modal-footer d-flex justify-content-between">
+                    <button type="button" class="btn btn-danger" onclick="deleteBooking()">Delete</button>
+                    <div><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-primary" onclick="saveEdit()">Save Changes</button></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="modal fade" id="clientDirModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Client Directory & Management</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="d-flex justify-content-between mb-3">
+                        <input type="text" id="dirClientSearch" class="form-control border-dark me-3" placeholder="Search Name, Phone, or Address..." onkeyup="filterDirectory()">
+                        <button class="btn btn-primary" onclick="openClientProfile(null)" style="white-space: nowrap;">+ Add New Client</button>
+                    </div>
+                    <table class="table table-hover bg-white border" id="dirTable">
+                        <thead class="table-light">
+                            <tr><th>Name</th><th>Type</th><th>Phone</th><th>Address</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for client in clients %}
+                            <tr>
+                                <td><strong>{{ client.name }} {{ client.surname or '' }}</strong></td>
+                                <td><span class="badge {{ 'badge-monthly' if client.client_type == 'Monthly Contract' else 'badge-adhoc' }}">{{ client.client_type or 'Ad hoc' }}</span></td>
+                                <td>{{ client.phone or 'N/A' }}</td>
+                                <td>{{ client.address or 'N/A' }}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-secondary" onclick='openClientProfile({{ client | tojson | safe }})'>👤 Edit</button> 
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="modal fade" id="clientProfileModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header bg-primary text-white"><h5 class="modal-title" id="clientProfileTitle">Client Profile</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><input type="hidden" id="cId"><div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">First Name</label><input type="text" id="cName" class="form-control" required></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Surname</label><input type="text" id="cSurname" class="form-control"></div></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Client Type</label><select id="cType" class="form-select border-primary"><option value="Ad hoc">Ad hoc (Once-off)</option><option value="Monthly Contract">Monthly Contract</option></select></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Discount Percent</label><div class="input-group"><input type="number" id="cDiscountPercent" class="form-control" min="0" max="100" step="0.01" placeholder="0"><span class="input-group-text">%</span></div><div class="form-text small">Applied automatically when creating invoices for this client.</div></div><div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Telephone Number</label><input type="text" id="cPhone" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Email Address</label><input type="email" id="cEmail" class="form-control" placeholder="For emailing invoices"></div></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Physical Address</label><div class="row"><div class="col-4 mb-2"><label class="form-label small fw-bold text-muted">Building Number</label><input type="text" id="cBuildingNumber" class="form-control"></div><div class="col-8 mb-2"><label class="form-label small fw-bold text-muted">Street Name</label><input type="text" id="cStreetName" class="form-control"></div></div><div class="row"><div class="col-7 mb-2"><label class="form-label small fw-bold text-muted">Suburb</label><input type="text" id="cSuburb" class="form-control"></div><div class="col-5 mb-2"><label class="form-label small fw-bold text-muted">Postal Code</label><input type="text" id="cPostalCode" class="form-control"></div></div><textarea id="cAddress" class="form-control d-none" rows="2"></textarea></div><div class="mb-3"><label class="form-label small fw-bold">Company Name</label><input type="text" id="cCompany" class="form-control" placeholder="For Tax Invoices"></div><div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Company Reg No.</label><input type="text" id="cRegNo" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Vat No.</label><input type="text" id="cVatNo" class="form-control"></div></div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveClient()">Save Client</button></div></div></div></div>
+    
+    <div class="modal fade" id="clientReportModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header bg-warning text-dark">
+                    <h5 class="modal-title">Booking & Ops Reports</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="card border-0 shadow-sm mb-3">
+                        <div class="card-body">
+                            <div class="row g-3 align-items-end">
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-bold">Report Type</label>
+                                    <select id="bookingOpsReportType" class="form-select border-warning" onchange="renderBookingOpsReportHelp()">
+                                        <option value="bookings">{{ booking_label }} Report</option>
+                                        <option value="customers">{{ client_label }} Report</option>
+                                        <option value="projects">Project Report</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-bold">Start Date</label>
+                                    <input type="date" id="repStart" class="form-control border-dark">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-bold">End Date</label>
+                                    <input type="date" id="repEnd" class="form-control border-dark">
+                                </div>
+                                <div class="col-md-3 d-flex gap-2">
+                                    <button id="btnRunReport" class="btn btn-warning text-dark fw-bold w-100" onclick="runBookingOpsReport()">Generate</button>
+                                    <button id="btnExportBookingOpsReport" class="btn btn-success fw-bold" onclick="exportBookingOpsReport()" disabled>CSV</button>
+                                </div>
+                            </div>
+                            <div id="bookingOpsReportHelp" class="form-text mt-2">Shows all {{ booking_label|lower }}s in the selected date range.</div>
+                        </div>
+                    </div>
+                    <div id="clientReportPrintArea">
+                        <div id="clientReportResults" style="display:none;">
+                            <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-3">
+                                <div>
+                                    <h6 id="bookingOpsReportTitle" class="text-warning text-dark mb-0">Report Results</h6>
+                                    <div id="bookingOpsReportRange" class="small text-muted"></div>
+                                </div>
+                                <span id="bookingOpsReportCount" class="badge bg-dark"></span>
+                            </div>
+                            <div id="bookingOpsReportBody" style="max-height: 520px; overflow-y: auto;"></div>
+                        </div>
+                    </div>
+                    <div class="mt-4 text-end" id="clientExportBtns" style="display:none;">
+                        <button class="btn btn-danger fw-bold ms-2" onclick="exportClientPDF()">⬇️ Download PDF</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="bookingsExportModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">Export {{ booking_label }}s by Date Range</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold small">Start Date</label>
+                            <input type="date" id="bookingExportStart" class="form-control">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold small">End Date</label>
+                            <input type="date" id="bookingExportEnd" class="form-control">
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <label class="form-label fw-bold mb-0">Fields to include</label>
+                        <div>
+                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="setBookingExportFields(true)">Select All</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="setBookingExportFields(false)">Clear</button>
+                        </div>
+                    </div>
+                    <div class="card border-0 shadow-sm">
+                        <div class="card-body">
+                            <div class="row g-2">
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="id"> <span class="form-check-label">{{ booking_label }} ID</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="client" checked> <span class="form-check-label">{{ client_label }}</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="date" checked> <span class="form-check-label">Date</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="day" checked> <span class="form-check-label">Day of Week</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="time" checked> <span class="form-check-label">Time</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="employee" checked> <span class="form-check-label">{{ employee_label }}(s)</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="service" checked> <span class="form-check-label">{{ service_label }}</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="project" checked> <span class="form-check-label">Project</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="transport"> <span class="form-check-label">Transport</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="overtime_hours"> <span class="form-check-label">Overtime Hours</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="booking_notes" checked> <span class="form-check-label">Booking Notes</span></label></div>
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="is_invoiced"> <span class="form-check-label">Invoiced</span></label></div>
+                                {% for field in booking_custom_fields %}
+                                <div class="col-md-4"><label class="form-check"><input class="form-check-input booking-export-field" type="checkbox" value="custom:{{ field.field_key }}"> <span class="form-check-label">{{ field.field_label }}</span></label></div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-text mt-2">The export is company-scoped and includes only {{ booking_label | lower }}s for the selected date range.</div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-success fw-bold" onclick="exportBookingsRange()">Download CSV</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="modal fade" id="projectDirModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header bg-secondary text-white">
+                    <h5 class="modal-title">Projects & Fixed-Cost Work</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h6 class="fw-bold mb-0">Project Directory</h6>
+                            <div class="small text-muted">Projects are fixed-price client work that can run across multiple bookings.</div>
+                        </div>
+                        <button class="btn btn-secondary fw-bold" onclick="openProjectForm(null)">+ New Project</button>
+                    </div>
+                    <div class="table-responsive bg-white rounded border shadow-sm">
+                        <table class="table table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Project</th>
+                                    <th>{{ client_label }}</th>
+                                    <th>Dates</th>
+                                    <th class="text-end">Fixed Price</th>
+                                    <th>Assigned Staff</th>
+                                    <th>Status</th>
+                                    <th class="text-end">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="projectDirectoryBody">
+                                <tr><td colspan="7" class="text-muted text-center py-4">Loading projects...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="projectFormModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header bg-secondary text-white">
+                    <h5 class="modal-title" id="projectFormTitle">New Project</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <input type="hidden" id="projectId">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">Project Name</label>
+                            <input type="text" id="projectName" class="form-control border-secondary" placeholder="e.g. Bathroom Renovation" required>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-bold">Project Code</label>
+                            <input type="text" id="projectCode" class="form-control" placeholder="Optional">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-bold">Status</label>
+                            <select id="projectStatus" class="form-select">
+                                <option value="Quoted">Quoted</option>
+                                <option value="Approved">Approved</option>
+                                <option value="In Progress">In Progress</option>
+                                <option value="On Hold">On Hold</option>
+                                <option value="Completed">Completed</option>
+                                <option value="Invoiced">Invoiced</option>
+                                <option value="Cancelled">Cancelled</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">{{ client_label }}</label>
+                            <select id="projectClientId" class="form-select border-primary">
+                                <option value="">Select {{ client_label|lower }}...</option>
+                                {% for c in clients %}
+                                <option value="{{ c.id }}">{{ c.name }} {{ c.surname or '' }}{% if c.company_name %} - {{ c.company_name }}{% endif %}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-bold">Fixed Project Price (R)</label>
+                            <input type="number" id="projectFixedPrice" class="form-control border-success" min="0" step="0.01" value="0">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-bold">Start Date</label>
+                            <input type="date" id="projectStartDate" class="form-control">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-bold">Estimated End Date</label>
+                            <input type="date" id="projectEstimatedEndDate" class="form-control">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-bold">Actual End Date</label>
+                            <input type="date" id="projectActualEndDate" class="form-control">
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label small fw-bold">Site / Project Address</label>
+                            <input type="text" id="projectSiteAddress" class="form-control" placeholder="Optional project address or site location">
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label small fw-bold">Description / Scope</label>
+                            <textarea id="projectDescription" class="form-control" rows="2" placeholder="Short description of the fixed-price project"></textarea>
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label small fw-bold">Assign Employees / Providers</label>
+                            <div class="border rounded bg-white p-3" style="max-height: 220px; overflow-y: auto;">
+                                <div class="row g-2">
+                                    {% for e in employees %}
+                                    <div class="col-md-4">
+                                        <div class="form-check">
+                                            <input class="form-check-input project-employee-cb" type="checkbox" value="{{ e.id }}" id="projEmp{{ e.id }}">
+                                            <label class="form-check-label small fw-bold" for="projEmp{{ e.id }}">{{ e.name }}</label>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                    {% if not employees %}
+                                    <div class="text-muted small">No employees/providers available.</div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div class="form-text">This assigns staff to the project record. Actual work days are still scheduled through bookings.</div>
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label small fw-bold">Project Notes</label>
+                            <textarea id="projectNotes" class="form-control" rows="2"></textarea>
+                        </div>
+                        <div class="col-md-12">
+                            <div class="bg-white border rounded p-3 shadow-sm">
+                                <h6 class="fw-bold text-secondary border-bottom pb-2 mb-3">Project Attachments</h6>
+                                <div id="projectAttachmentList" class="small mb-2 text-muted">No attachments uploaded yet.</div>
+                                <input type="file" id="projectAttachmentFiles" class="form-control form-control-sm" multiple>
+                                <div class="form-text small">Upload files such as contracts, plans, photos, supplier quotes, approvals or project documents. Files are uploaded after the project is saved.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-danger me-auto" id="projectCancelBtn" onclick="cancelProject()" style="display:none;">Cancel Project</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="btn btn-success fw-bold" onclick="saveProject()">Save Project</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="routePlannerModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-secondary text-white">
+                    <h5 class="modal-title">🗺️ Daily Route Planner</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="row mb-3">
+                        <div class="col-md-4">
+                            <label class="small fw-bold">Select Date</label>
+                            <input type="date" id="routeDate" class="form-control">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="small fw-bold">Starting Point (e.g., Office Address)</label>
+                            <input type="text" id="routeStart" class="form-control" value="22 Salt River Road, Salt River, 7925">
+                        </div>
+                        <div class="col-md-2 d-flex align-items-end">
+                            <button class="btn btn-primary w-100" onclick="fetchRouteBookings()">Load</button>
+                        </div>
+                    </div>
+
+                    <div class="bg-white border rounded p-3 mb-3">
+                        <h6 class="text-primary border-bottom pb-2">Bookings on Route</h6>
+                        <ul class="list-group list-group-flush" id="routeList">
+                            <li class="list-group-item text-muted small">Select a date and click Load...</li>
+                        </ul>
+                    </div>
+
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="optimizeRoute" checked>
+                        <label class="form-check-label small text-muted" for="optimizeRoute">
+                            <strong>Auto-Optimize geographical route</strong> (Uncheck to strictly force Google Maps to follow the chronological time order)
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-success" onclick="generateGoogleMaps()">📍 Open in Google Maps</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let calendar; let currentClientReportData = [];
+        const newBookingModal = new bootstrap.Modal(document.getElementById('newBookingModal'));
+        const editModal = new bootstrap.Modal(document.getElementById('editModal'));
+        const bulkBookingModal = new bootstrap.Modal(document.getElementById('bulkBookingModal'));
+        const clientDirModal = new bootstrap.Modal(document.getElementById('clientDirModal'));
+        const clientProfileModal = new bootstrap.Modal(document.getElementById('clientProfileModal'));
+        const clientReportModal = new bootstrap.Modal(document.getElementById('clientReportModal'));
+        const projectDirModal = new bootstrap.Modal(document.getElementById('projectDirModal'));
+        const projectFormModal = new bootstrap.Modal(document.getElementById('projectFormModal'));
+        const routePlannerModal = new bootstrap.Modal(document.getElementById('routePlannerModal'));
+        const bookingsExportModal = new bootstrap.Modal(document.getElementById('bookingsExportModal')); 
+        
+        let currentRouteData = []; 
+        let currentProjects = [];
+
+        function openBookingsExportModal() {
+            const today = new Date();
+            const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+            document.getElementById('bookingExportStart').value = localISODate(firstDay);
+            document.getElementById('bookingExportEnd').value = localISODate(today);
+            bookingsExportModal.show();
+        }
+
+        function setBookingExportFields(checked) {
+            document.querySelectorAll('.booking-export-field').forEach(cb => cb.checked = checked);
+        }
+
+        async function exportBookingsRange() {
+            const start = document.getElementById('bookingExportStart').value;
+            const end = document.getElementById('bookingExportEnd').value;
+            const fields = Array.from(document.querySelectorAll('.booking-export-field:checked')).map(cb => cb.value);
+            if (!start || !end) return alert('Please select a start and end date.');
+            if (!fields.length) return alert('Please select at least one field.');
+            const res = await fetch('/export_bookings_range', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ start_date: start, end_date: end, fields })
+            });
+            if (!res.ok) {
+                try { const err = await res.json(); alert(err.message || 'Export failed.'); }
+                catch(e) { alert('Export failed.'); }
+                return;
+            }
+            const blob = await res.blob();
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `Bookings_${start}_to_${end}.csv`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href);
+        }
+
+        function toggleView(view) {
+            if(view === 'calendar') {
+                document.getElementById('dashboard-view').style.display = 'none';
+                document.getElementById('calendar-view').style.display = 'block';
+                calendar.render();
+            } else {
+                document.getElementById('calendar-view').style.display = 'none';
+                document.getElementById('dashboard-view').style.display = 'block';
+                loadDashboardLists();
+            }
+        }
+
+        function getCheckedValues(className) { return Array.from(document.querySelectorAll(`.${className}:checked`)).map(cb => cb.value).join(', '); }
+        function setCheckedValues(className, csvString) { const arr = (csvString || '').split(', '); document.querySelectorAll(`.${className}`).forEach(cb => { cb.checked = arr.includes(cb.value); }); }
+        async function parseJsonOrError(response) {
+            const text = await response.text();
+            try {
+                const data = JSON.parse(text);
+                if (!response.ok || data.status === 'error') throw new Error(data.message || 'Request failed.');
+                return data;
+            } catch (err) {
+                if (err.message && err.message !== 'Unexpected end of JSON input') throw err;
+                throw new Error('The server returned an unexpected response. Please check the Flask console for the detailed error.');
+            }
+        }
+
+        function escapeHtml(value) {
+            return String(value || '').replace(/[&<>"']/g, function(ch) {
+                return ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'})[ch];
+            });
+        }
+
+
+        function formatFileSize(bytes) {
+            bytes = parseInt(bytes || 0, 10);
+            if (!bytes) return '';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        function clearAttachmentInput(inputId) {
+            const input = document.getElementById(inputId);
+            if (input) input.value = '';
+        }
+
+        async function uploadAttachments(linkedType, linkedIds, inputId) {
+            const input = document.getElementById(inputId);
+            if (!input || !input.files || input.files.length === 0) return;
+            linkedIds = Array.isArray(linkedIds) ? linkedIds : [linkedIds];
+            const fd = new FormData();
+            fd.append('linked_type', linkedType);
+            linkedIds.filter(Boolean).forEach(id => fd.append('linked_id', id));
+            Array.from(input.files).forEach(file => fd.append('files', file));
+            const res = await fetch('/api/attachments/upload', { method: 'POST', body: fd });
+            await parseJsonOrError(res);
+            clearAttachmentInput(inputId);
+        }
+
+        async function loadAttachments(linkedType, linkedId, listId) {
+            const list = document.getElementById(listId);
+            if (!list) return;
+            if (!linkedId) {
+                list.innerHTML = '<span class="text-muted">No saved record yet. Attachments will upload after saving.</span>';
+                return;
+            }
+            list.innerHTML = '<span class="text-muted">Loading attachments...</span>';
+            try {
+                const res = await fetch(`/api/attachments/${linkedType}/${linkedId}`);
+                const data = await parseJsonOrError(res);
+                const files = data.attachments || [];
+                if (!files.length) {
+                    list.innerHTML = '<span class="text-muted">No attachments uploaded yet.</span>';
+                    return;
+                }
+                list.innerHTML = files.map(file => `
+                    <div class="d-flex justify-content-between align-items-center border rounded p-2 mb-1 bg-light">
+                        <div>
+                            <a href="/download_attachment/${file.id}" class="fw-bold" target="_blank">${escapeHtml(file.original_filename)}</a>
+                            <span class="text-muted ms-2">${formatFileSize(file.file_size)}</span>
+                            <div class="text-muted small">Uploaded ${escapeHtml(file.uploaded_at || '')}${file.uploaded_by ? ' by ' + escapeHtml(file.uploaded_by) : ''}</div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteAttachment(${file.id}, '${linkedType}', ${linkedId}, '${listId}')">Delete</button>
+                    </div>
+                `).join('');
+            } catch (err) {
+                list.innerHTML = `<span class="text-danger">${escapeHtml(err.message || 'Could not load attachments.')}</span>`;
+            }
+        }
+
+        async function deleteAttachment(id, linkedType, linkedId, listId) {
+            if (!confirm('Delete this attachment?')) return;
+            try {
+                const res = await fetch('/api/attachments/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id })
+                });
+                await parseJsonOrError(res);
+                await loadAttachments(linkedType, linkedId, listId);
+            } catch (err) {
+                alert(err.message || 'Could not delete attachment.');
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            var calendarEl = document.getElementById('calendar');
+            calendar = new FullCalendar.Calendar(calendarEl, {
+                initialView: 'dayGridMonth', events: '/bookings',
+                headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek' },
+                height: 700,
+                eventClick: function(info) {
+                    if (info.event.extendedProps.event_type === 'leave') return;
+                    const d = info.event.start;
+                    const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                    const timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+                    openEditBooking(info.event.id, info.event.extendedProps, dateStr, timeStr);
+                }
+            });
+            loadDashboardLists();
+            document.getElementById('routeDate').value = localISODate();
+        });
+
+        function loadDashboardLists() {
+            const today = new Date();
+            const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+            const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+            const tomStr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth()+1).padStart(2,'0')}-${String(tomorrow.getDate()).padStart(2,'0')}`;
+            const nextWeek = new Date(today); nextWeek.setDate(nextWeek.getDate() + 7);
+
+            fetch('/bookings').then(r => r.json()).then(events => {
+                let htmlToday = '', htmlTom = '', htmlWeek = '';
+                events.forEach(ev => {
+                    if (ev.extendedProps && ev.extendedProps.event_type === 'leave') return;
+                    const evDateStr = ev.start.split('T')[0];
+                    const evTimeStr = ev.start.split('T')[1] || '00:00';
+                    const evDate = new Date(evDateStr);
+                    const bookingTypeDisplay = ev.extendedProps.booking_type ? ev.extendedProps.booking_type.split(',')[0] : 'Standard Home Clean';
+                    
+                    const itemHTML = `
+                        <div class="list-group-item booking-item py-3" onclick='openEditBooking(${ev.id}, ${JSON.stringify(ev.extendedProps).replace(/'/g, "'")}, "${evDateStr}", "${evTimeStr}")'>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <strong>🕒 ${evTimeStr}</strong>
+                                <span class="badge bg-primary rounded-pill">${bookingTypeDisplay}</span>
+                            </div>
+                            <div class="mt-1 text-dark fw-bold">${ev.extendedProps.client}</div>
+                            ${ev.extendedProps.project_name ? `<div class="small text-secondary fw-bold">Project: ${ev.extendedProps.project_name}</div>` : ''}
+                            <small class="text-muted">Staff: ${ev.extendedProps.employee || 'Unassigned'}</small>
+                        </div>`;
+                    if (evDateStr === todayStr) { htmlToday += itemHTML; }
+                    if (evDateStr === tomStr) { htmlTom += itemHTML; }
+                    if (evDate >= today && evDate <= nextWeek) { htmlWeek += itemHTML; }
+                });
+                document.getElementById('listToday').innerHTML = htmlToday || '<div class="p-3 text-muted">No bookings today.</div>';
+                document.getElementById('listTomorrow').innerHTML = htmlTom || '<div class="p-3 text-muted">No bookings tomorrow.</div>';
+                document.getElementById('listWeek').innerHTML = htmlWeek || '<div class="p-3 text-muted">No bookings this week.</div>';
+            });
+        }
+
+        // ==========================================
+        // NEW 3-STEP SINGLE WIZARD LOGIC
+        // ==========================================
+        let selectedWizClient = "";
+        let selectedWizClientId = "";
+        let currentWizStep = 1;
+        let wizardMode = 'create';
+        let editingBookingId = null;
+        
+        function filterWizardClients() {
+            const term = document.getElementById('wizardClientSearch').value.toLowerCase();
+            document.querySelectorAll('.wizard-client-btn').forEach(btn => {
+                btn.style.display = btn.innerText.toLowerCase().includes(term) ? 'block' : 'none';
+            });
+        }
+
+        function selectWizardClient(btn) {
+            document.querySelectorAll('.wizard-client-btn').forEach(b => b.classList.remove('active', 'bg-primary', 'text-white'));
+            btn.classList.add('active', 'bg-primary', 'text-white');
+            selectedWizClientId = btn.dataset.clientId || '';
+            selectedWizClient = btn.dataset.clientName || btn.innerText.trim();
+            filterProjectSelectByClient('wizardProject', selectedWizClientId);
+            document.getElementById('wizardCurrentClientName').innerText = selectedWizClient;
+            document.getElementById('wizardCurrentClientIndicator').style.display = 'block';
+        }
+
+        function filterWizardEmps() {
+            const term = document.getElementById('wizardEmpSearch').value.toLowerCase();
+            document.querySelectorAll('.wizard-emp-row').forEach(row => {
+                const name = row.querySelector('.form-check-label').innerText.toLowerCase();
+                const onLeave = row.dataset.onLeave === '1';
+                row.style.display = (!onLeave && name.includes(term)) ? 'block' : 'none';
+            });
+        }
+
+        function toggleWizMode() {
+            const isSplit = document.getElementById('wizardSplit').checked;
+            document.getElementById('globalLogistics').style.display = isSplit ? 'none' : 'block';
+            
+            document.querySelectorAll('.wizard-emp-row').forEach((row, idx) => {
+                const index = idx + 1;
+                toggleEmpLogistics(index);
+            });
+        }
+
+        function toggleEmpLogistics(index) {
+            const cb = document.getElementById('empCb_' + index);
+            const panel = document.getElementById('logistics_' + index);
+            const isSplit = document.getElementById('wizardSplit').checked;
+            
+            if (cb && cb.checked && isSplit) {
+                panel.style.display = 'block';
+            } else if (panel) {
+                panel.style.display = 'none';
+            }
+        }
+
+        function localISODate(dateObj = new Date()) {
+            const y = dateObj.getFullYear();
+            const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const d = String(dateObj.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        }
+
+        function getWizardDateValue() {
+            const availabilityEl = document.getElementById('wizardAvailabilityDate');
+            const detailEl = document.getElementById('wizardDate');
+            const selectedDate = (availabilityEl && availabilityEl.value) ? availabilityEl.value : ((detailEl && detailEl.value) ? detailEl.value : localISODate());
+            return selectedDate; // literal YYYY-MM-DD selected by user; no UTC conversion
+        }
+
+        function syncWizardAvailabilityDate() {
+            const availabilityDate = document.getElementById('wizardAvailabilityDate').value;
+            if (availabilityDate) document.getElementById('wizardDate').value = availabilityDate;
+        }
+
+        function staffStatusBadge(status, label, hours, weekStart = '', weekEnd = '', requestedDate = '') {
+            const cls = status === 'red' ? 'bg-danger' : (status === 'yellow' ? 'bg-warning text-dark' : 'bg-success');
+            const range = (weekStart && weekEnd) ? `${weekStart} to ${weekEnd}` : '';
+            const titleParts = [label];
+            if (requestedDate) titleParts.push(`booking date ${requestedDate}`);
+            if (range) titleParts.push(range);
+            return `<span class="badge ${cls} me-1" title="${titleParts.join(' | ')}">${label}: ${hours} hrs</span>`;
+        }
+
+        function staffMonthBadge(hours) {
+            return `<span class="badge bg-success me-1">Month: ${hours} hrs</span>`;
+        }
+
+        function refreshWizardStaffAvailability() {
+            const date = getWizardDateValue();
+            const exclude = editingBookingId ? `&exclude_booking_id=${encodeURIComponent(editingBookingId)}` : '';
+            fetch(`/booking_staff_hours?date=${encodeURIComponent(date)}${exclude}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') return;
+                    const byName = {};
+                    (data.employees || []).forEach(e => byName[e.employee] = e);
+                    document.querySelectorAll('.wizard-emp-row').forEach(row => {
+                        const cb = row.querySelector('.wizard-emp-cb');
+                        const summary = row.querySelector('.staff-hours-summary');
+                        const info = byName[cb.value];
+                        if (!info) return;
+                        row.dataset.onLeave = info.is_on_leave ? '1' : '0';
+                        if (info.is_on_leave) {
+                            cb.checked = false;
+                            cb.disabled = true;
+                            row.style.display = 'none';
+                            const panel = row.querySelector('.logistics-panel');
+                            if (panel) panel.style.display = 'none';
+                            if (summary) summary.innerHTML = '<span class="badge bg-warning text-dark">ON LEAVE</span>';
+                        } else {
+                            cb.disabled = false;
+                            if (summary && !cb.checked) {
+                                summary.innerHTML = `${staffStatusBadge(info.week_status, 'Week', info.week_hours, info.week_start, info.week_end, info.requested_date)} ${staffMonthBadge(info.month_hours)}<div class="small text-muted mt-1">Week: ${info.week_start} to ${info.week_end}</div>`;
+                            }
+                        }
+                    });
+                    filterWizardEmps();
+                    document.querySelectorAll('.wizard-emp-row').forEach(row => {
+                        if (row.querySelector('.wizard-emp-cb').checked) refreshWizardEmployeeHours(row);
+                    });
+                });
+        }
+
+        function refreshWizardEmployeeHours(row) {
+            if (!row) return;
+            const cb = row.querySelector('.wizard-emp-cb');
+            const summary = row.querySelector('.staff-hours-summary');
+            if (!cb || !summary) return;
+            if (!cb.checked) {
+                refreshWizardStaffAvailability();
+                return;
+            }
+            const isSplit = document.getElementById('wizardSplit').checked;
+            const overtimeInput = row.querySelector('.emp-overtime');
+            const overtime = isSplit ? (overtimeInput ? (overtimeInput.value || 0) : 0) : (document.getElementById('globalOvertime').value || 0);
+            const date = getWizardDateValue();
+            const exclude = editingBookingId ? `&exclude_booking_id=${encodeURIComponent(editingBookingId)}` : '';
+            fetch(`/booking_staff_hours?date=${encodeURIComponent(date)}&employee=${encodeURIComponent(cb.value)}&overtime_hours=${encodeURIComponent(overtime)}${exclude}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status !== 'success') return;
+                    const info = data.employee;
+                    if (info.is_on_leave) {
+                        cb.checked = false;
+                        cb.disabled = true;
+                        row.dataset.onLeave = '1';
+                        row.style.display = 'none';
+                        summary.innerHTML = '<span class="badge bg-warning text-dark">ON LEAVE</span>';
+                        return;
+                    }
+                    const messages = (info.week_messages || []).length ? `<div class="small text-muted mt-1">${info.week_messages.join(' | ')}</div>` : '';
+                    summary.innerHTML = `${staffStatusBadge(info.week_status, 'Week', info.week_hours, info.week_start, info.week_end, info.requested_date)} ${staffMonthBadge(info.month_hours)}<div class="small text-muted mt-1">Week: ${info.week_start} to ${info.week_end}</div>${messages}`;
+                });
+        }
+
+        function openNewBookingModal() {
+            wizardMode = 'create';
+            editingBookingId = null;
+            currentWizStep = 1;
+            selectedWizClient = "";
+            selectedWizClientId = "";
+            document.getElementById('wizardCurrentClientIndicator').style.display = 'none';
+            document.getElementById('wizardCurrentClientName').innerText = '';
+            document.getElementById('wizardClientSearch').value = '';
+            document.querySelectorAll('.wizard-client-btn').forEach(b => {
+                b.classList.remove('active', 'bg-primary', 'text-white');
+                b.style.display = 'block';
+            });
+            
+            document.getElementById('wizardEmpSearch').value = '';
+            document.querySelectorAll('.wizard-emp-row').forEach(row => { row.dataset.onLeave = '0'; row.style.display = 'block'; });
+            document.querySelectorAll('.wizard-emp-cb').forEach(cb => { cb.checked = false; cb.disabled = false; });
+            document.querySelectorAll('.staff-hours-summary').forEach(h => h.innerHTML = 'Select staff to view week/month hours.');
+            document.querySelectorAll('.logistics-panel').forEach(p => p.style.display = 'none');
+            document.querySelectorAll('.emp-transport').forEach(s => s.value = '');
+            document.querySelectorAll('.emp-overtime').forEach(i => i.value = '0');
+            
+            document.getElementById('wizardSplit').checked = true;
+            document.getElementById('globalTransport').value = '';
+            document.getElementById('globalOvertime').value = '0';
+            toggleWizMode();
+            
+            document.getElementById('wizardDate').value = localISODate();
+            document.getElementById('wizardAvailabilityDate').value = document.getElementById('wizardDate').value;
+            document.getElementById('wizardTime').value = '08:00';
+            document.getElementById('wizardNotes').value = '';
+            resetWizardCustomFields();
+            clearAttachmentInput('wizardAttachmentFiles');
+            loadAttachments('booking', null, 'wizardAttachmentList');
+            
+            Array.from(document.getElementById('wizardService').options).forEach(o => o.selected = false);
+            const wizardProject = document.getElementById('wizardProject');
+            if (wizardProject) { wizardProject.value = ''; filterProjectSelectByClient('wizardProject', selectedWizClientId); }
+            
+            updateWizUI();
+            refreshWizardStaffAvailability();
+            newBookingModal.show();
+        }
+
+        function updateWizUI() {
+            document.getElementById('step1').style.display = currentWizStep === 1 ? 'block' : 'none';
+            document.getElementById('step2').style.display = currentWizStep === 2 ? 'block' : 'none';
+            document.getElementById('step3').style.display = currentWizStep === 3 ? 'block' : 'none';
+            
+            document.getElementById('wizBtnBack').style.display = currentWizStep > 1 ? 'inline-block' : 'none';
+            document.getElementById('wizBtnNext').style.display = currentWizStep < 3 ? 'inline-block' : 'none';
+            document.getElementById('wizBtnFinish').style.display = currentWizStep === 3 ? 'inline-block' : 'none';
+            document.getElementById('wizBtnDelete').style.display = wizardMode === 'edit' ? 'inline-block' : 'none';
+            
+            const prefix = wizardMode === 'edit' ? 'Edit Booking - ' : '';
+            document.getElementById('newBookingModalTitle').innerText = prefix + (
+                currentWizStep === 1 ? 'Step 1: Select {{ client_label }}' : 
+                currentWizStep === 2 ? 'Step 2: Assign Staff & Logistics' : 
+                'Step 3: Shift Details & Execution');
+            document.getElementById('wizBtnFinish').innerText = wizardMode === 'edit' ? 'Save Changes' : 'Finish';
+        }
+
+        function wizNext() {
+            if (currentWizStep === 1) {
+                if (!selectedWizClient) return alert("Please select a client from the list to continue.");
+                currentWizStep++;
+                if (!document.getElementById('wizardAvailabilityDate').value) {
+                    document.getElementById('wizardAvailabilityDate').value = document.getElementById('wizardDate').value || localISODate();
+                }
+                updateWizUI();
+                refreshWizardStaffAvailability();
+            } else if (currentWizStep === 2) {
+                const selectedEmps = document.querySelectorAll('.wizard-emp-cb:checked');
+                if (selectedEmps.length === 0) return alert("Please select at least one employee.");
+                currentWizStep++;
+                updateWizUI();
+            }
+        }
+
+        function wizBack() {
+            if (currentWizStep > 1) {
+                currentWizStep--;
+                updateWizUI();
+            }
+        }
+
+        function deleteWizardBooking() {
+            if (wizardMode !== 'edit' || !editingBookingId) return alert('No booking selected to delete.');
+            if (!confirm('Delete this booking?')) return;
+            const btn = document.getElementById('wizBtnDelete');
+            btn.disabled = true;
+            btn.innerText = 'Deleting...';
+            fetch('/delete_booking', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: editingBookingId })
+            }).then(r => r.json()).then(data => {
+                if (data.status === 'error') throw new Error(data.message || 'Could not delete booking.');
+                newBookingModal.hide();
+                calendar.refetchEvents();
+                loadDashboardLists();
+            }).catch(err => alert(err.message)).finally(() => {
+                btn.disabled = false;
+                btn.innerText = 'Delete Booking';
+            });
+        }
+
+
+        function resetWizardCustomFields() {
+            document.querySelectorAll('.booking-custom-field').forEach(el => {
+                if (el.type === 'checkbox') el.checked = false;
+                else el.value = '';
+            });
+        }
+
+        function collectWizardCustomFields() {
+            const values = {};
+            let firstMissing = null;
+            document.querySelectorAll('.booking-custom-field').forEach(el => {
+                const key = el.dataset.fieldKey;
+                if (!key) return;
+                let value = '';
+                if (el.type === 'checkbox') value = el.checked ? 'Yes' : '';
+                else value = (el.value || '').trim();
+                if (el.dataset.required === '1' && !value && !firstMissing) firstMissing = el;
+                values[key] = value;
+            });
+            if (firstMissing) {
+                const label = firstMissing.closest('.col-md-6')?.querySelector('label')?.innerText || 'Required field';
+                alert(label.replace('*', '').trim() + ' is required.');
+                firstMissing.focus();
+                return null;
+            }
+            return values;
+        }
+
+        function populateWizardCustomFields(values) {
+            values = values || {};
+            document.querySelectorAll('.booking-custom-field').forEach(el => {
+                const key = el.dataset.fieldKey;
+                const value = values[key] || '';
+                if (el.type === 'checkbox') el.checked = ['yes', 'true', '1', 'on'].includes(String(value).toLowerCase());
+                else {
+                    if (el.tagName === 'SELECT' && value && !Array.from(el.options).some(opt => opt.value === value)) {
+                        const legacyOpt = document.createElement('option');
+                        legacyOpt.value = value;
+                        legacyOpt.textContent = value + ' (previously saved)';
+                        el.appendChild(legacyOpt);
+                    }
+                    el.value = value;
+                }
+            });
+        }
+
+        function saveWizardBooking() {
+            const bTypes = Array.from(document.getElementById('wizardService').selectedOptions).map(opt => opt.value).join(', ');
+            const date = document.getElementById('wizardDate').value;
+            const time = document.getElementById('wizardTime').value;
+            const notes = document.getElementById('wizardNotes').value;
+            const customFields = collectWizardCustomFields();
+            if (customFields === null) return;
+            const isSplit = document.getElementById('wizardSplit').checked;
+            
+            if (!bTypes) return alert("Please select at least one {{ service_label }}.");
+            if (!date || !time) return alert("Date and Time are required.");
+            
+            const assignments = [];
+            
+            if (isSplit) {
+                document.querySelectorAll('.wizard-emp-row').forEach(row => {
+                    const cb = row.querySelector('.wizard-emp-cb');
+                    if (cb.checked) {
+                        const empName = cb.value;
+                        const transport = row.querySelector('.emp-transport').value;
+                        const overtime = row.querySelector('.emp-overtime').value || 0;
+                        assignments.push({
+                            employee: empName,
+                            transport: transport,
+                            overtime_hours: overtime
+                        });
+                    }
+                });
+            } else {
+                let empNames = [];
+                document.querySelectorAll('.wizard-emp-row').forEach(row => {
+                    const cb = row.querySelector('.wizard-emp-cb');
+                    if (cb.checked) empNames.push(cb.value);
+                });
+                const globalTransport = document.getElementById('globalTransport').value;
+                const globalOvertime = parseFloat(document.getElementById('globalOvertime').value) || 0;
+                assignments.push({
+                    employee: empNames.join(', '),
+                    transport: globalTransport,
+                    overtime_hours: globalOvertime
+                });
+            }
+
+            if (assignments.length === 0 || !assignments.some(a => a.employee)) return alert("Please select at least one employee.");
+            
+            const btn = document.getElementById('wizBtnFinish');
+            btn.disabled = true;
+            btn.innerText = wizardMode === 'edit' ? 'Saving...' : 'Saving...';
+
+            if (wizardMode === 'edit') {
+                let empNames = [];
+                let transports = [];
+                let maxOvertime = 0;
+                assignments.forEach(a => {
+                    (a.employee || '').split(',').forEach(n => { const clean = n.trim(); if (clean && !empNames.includes(clean)) empNames.push(clean); });
+                    if (a.transport) transports.push(a.transport);
+                    maxOvertime = Math.max(maxOvertime, parseFloat(a.overtime_hours || 0));
+                });
+                const editPayload = {
+                    id: editingBookingId,
+                    client_id: selectedWizClientId,
+                    client: selectedWizClient,
+                    date: date,
+                    time: time,
+                    booking_type: bTypes,
+                    booking_notes: notes,
+                    employee: empNames.join(', '),
+                    transport: [...new Set(transports)].join(', '),
+                    overtime_hours: maxOvertime,
+                    custom_fields: customFields,
+                    project_id: document.getElementById('wizardProject') ? document.getElementById('wizardProject').value : ''
+                };
+                fetch('/edit_booking', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(editPayload) 
+                }).then(parseJsonOrError).then(async data => {
+                    await uploadAttachments('booking', data.booking_id || editingBookingId, 'wizardAttachmentFiles');
+                    newBookingModal.hide();
+                    calendar.refetchEvents();
+                    loadDashboardLists();
+                }).catch(err => alert(err.message)).finally(() => {
+                    btn.disabled = false;
+                    btn.innerText = 'Save Changes';
+                });
+                return;
+            }
+            
+            const data = {
+                client_id: selectedWizClientId,
+                client: selectedWizClient,
+                date: date,
+                time: time,
+                booking_type: bTypes,
+                booking_notes: notes,
+                assignments: assignments,
+                custom_fields: customFields,
+                project_id: document.getElementById('wizardProject') ? document.getElementById('wizardProject').value : ''
+            };
+            
+            fetch('/add', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify(data) 
+            }).then(parseJsonOrError).then(async data => {
+                await uploadAttachments('booking', data.booking_ids || [], 'wizardAttachmentFiles');
+                newBookingModal.hide(); 
+                calendar.refetchEvents(); 
+                loadDashboardLists(); 
+            }).catch(err => alert(err.message)).finally(() => {
+                btn.disabled = false;
+                btn.innerText = 'Finish';
+            });
+        }
+
+
+        // ==========================================
+        // NEW 3-STEP BULK SCHEDULER WIZARD LOGIC
+        // ==========================================
+        let selectedBulkClient = "";
+        let selectedBulkClientId = "";
+        let currentBulkStep = 1;
+        
+        function filterBulkClients() {
+            const term = document.getElementById('bulkClientSearch').value.toLowerCase();
+            document.querySelectorAll('.bulk-client-btn').forEach(btn => {
+                btn.style.display = btn.innerText.toLowerCase().includes(term) ? 'block' : 'none';
+            });
+        }
+
+        function selectBulkClient(btn) {
+            document.querySelectorAll('.bulk-client-btn').forEach(b => b.classList.remove('active', 'bg-info', 'text-white'));
+            btn.classList.add('active', 'bg-info', 'text-white');
+            selectedBulkClientId = btn.dataset.clientId || '';
+            selectedBulkClient = btn.dataset.clientName || btn.innerText.trim();
+            filterProjectSelectByClient('bulkProject', selectedBulkClientId);
+        }
+
+        function filterProjectSelectByClient(selectId, clientId) {
+            const select = document.getElementById(selectId);
+            if (!select) return;
+            const selectedClientId = String(clientId || '').trim();
+            const currentValue = select.value;
+            let currentVisible = true;
+            Array.from(select.options).forEach(opt => {
+                if (!opt.value) { opt.hidden = false; return; }
+                const optClientId = String(opt.dataset.clientId || '').trim();
+                const show = !selectedClientId || !optClientId || optClientId === selectedClientId;
+                opt.hidden = !show;
+                if (opt.value === currentValue && !show) currentVisible = false;
+            });
+            if (!currentVisible) select.value = '';
+        }
+
+
+        function rebuildProjectDropdown(selectId, selectedClientId = '', selectedValue = '') {
+            const select = document.getElementById(selectId);
+            if (!select) return;
+            const existingValue = selectedValue || select.value || '';
+            const defaultLabel = `No Project / Normal {{ service_label }}`;
+            select.innerHTML = `<option value="">${defaultLabel}</option>`;
+            (currentProjects || []).forEach(p => {
+                if ((p.status || '') === 'Cancelled') return;
+                const opt = document.createElement('option');
+                opt.value = p.id;
+                opt.dataset.clientId = String(p.client_id || '');
+                opt.textContent = `${p.project_name || ''}${p.project_code ? ' (' + p.project_code + ')' : ''}`;
+                select.appendChild(opt);
+            });
+            select.value = existingValue;
+            filterProjectSelectByClient(selectId, selectedClientId || '');
+        }
+
+        async function refreshProjectsData() {
+            try {
+                const res = await fetch('/api/projects');
+                const data = await parseJsonOrError(res);
+                currentProjects = data.projects || [];
+                rebuildProjectDropdown('wizardProject', selectedWizClientId || '');
+                rebuildProjectDropdown('bulkProject', selectedBulkClientId || '');
+            } catch (err) {
+                console.warn('Could not refresh project dropdowns:', err);
+            }
+        }
+
+        function filterBulkEmps() {
+            const term = document.getElementById('bulkEmpSearch').value.toLowerCase();
+            document.querySelectorAll('.bulk-emp-row').forEach(row => {
+                const name = row.querySelector('.form-check-label').innerText.toLowerCase();
+                row.style.display = name.includes(term) ? 'block' : 'none';
+            });
+        }
+
+        function toggleBulkMode() {
+            const isSplit = document.getElementById('bulkSplit').checked;
+            document.getElementById('bulkGlobalLogistics').style.display = isSplit ? 'none' : 'block';
+            
+            document.querySelectorAll('.bulk-emp-row').forEach((row, idx) => {
+                const index = idx + 1;
+                toggleBulkEmpLogistics(index);
+            });
+        }
+
+        function toggleBulkEmpLogistics(index) {
+            const cb = document.getElementById('bulkEmpCb_' + index);
+            const panel = document.getElementById('bulkLogistics_' + index);
+            const isSplit = document.getElementById('bulkSplit').checked;
+            
+            if (cb && cb.checked && isSplit) {
+                panel.style.display = 'block';
+            } else if (panel) {
+                panel.style.display = 'none';
+            }
+        }
+
+        function openBulkBookingModal() {
+            currentBulkStep = 1;
+            selectedBulkClient = "";
+            selectedBulkClientId = "";
+            document.getElementById('bulkClientSearch').value = '';
+            document.querySelectorAll('.bulk-client-btn').forEach(b => {
+                b.classList.remove('active', 'bg-info', 'text-white');
+                b.style.display = 'block';
+            });
+            
+            document.getElementById('bulkEmpSearch').value = '';
+            document.querySelectorAll('.bulk-emp-cb').forEach(cb => cb.checked = false);
+            document.querySelectorAll('.bulk-logistics-panel').forEach(p => p.style.display = 'none');
+            document.querySelectorAll('.bulk-emp-transport').forEach(s => s.value = '');
+            document.querySelectorAll('.bulk-emp-overtime').forEach(i => i.value = '0');
+            
+            document.getElementById('bulkSplit').checked = true;
+            document.getElementById('bulkGlobalTransport').value = '';
+            document.getElementById('bulkGlobalOvertime').value = '0';
+            toggleBulkMode();
+            
+            const today = new Date();
+            const firstDay = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+            const lastDay = new Date(today.getFullYear(), today.getMonth() + 2, 0);
+            document.getElementById('bulkStartDate').value = firstDay.toISOString().split('T')[0];
+            document.getElementById('bulkEndDate').value = lastDay.toISOString().split('T')[0];
+            
+            document.getElementById('bulkTime').value = '08:00';
+            document.getElementById('bulkNotes').value = '';
+            document.querySelectorAll('.bulk-custom-field').forEach(field => {
+                if (field.type === 'checkbox') field.checked = false;
+                else field.value = '';
+                field.classList.remove('is-invalid');
+            });
+            document.getElementById('bulkService').selectedIndex = 0;
+            const bulkProject = document.getElementById('bulkProject');
+            if (bulkProject) { bulkProject.value = ''; filterProjectSelectByClient('bulkProject', selectedBulkClientId); }
+            document.querySelectorAll('.bulk-day').forEach(cb => cb.checked = false);
+            
+            updateBulkUI();
+            bulkBookingModal.show();
+        }
+
+        function updateBulkUI() {
+            document.getElementById('bulkStep1').style.display = currentBulkStep === 1 ? 'block' : 'none';
+            document.getElementById('bulkStep2').style.display = currentBulkStep === 2 ? 'block' : 'none';
+            document.getElementById('bulkStep3').style.display = currentBulkStep === 3 ? 'block' : 'none';
+            
+            document.getElementById('bulkBtnBack').style.display = currentBulkStep > 1 ? 'inline-block' : 'none';
+            document.getElementById('bulkBtnNext').style.display = currentBulkStep < 3 ? 'inline-block' : 'none';
+            document.getElementById('bulkBtnFinish').style.display = currentBulkStep === 3 ? 'inline-block' : 'none';
+            
+            document.getElementById('bulkBookingModalTitle').innerText = 
+                currentBulkStep === 1 ? 'Step 1: Select {{ client_label }}' : 
+                currentBulkStep === 2 ? 'Step 2: Assign Staff & Logistics' : 
+                'Step 3: Auto-Schedule {{ booking_label }} Details';
+        }
+
+        function bulkNext() {
+            if (currentBulkStep === 1) {
+                if (!selectedBulkClient) return alert("Please select a client from the list to continue.");
+                currentBulkStep++;
+                updateBulkUI();
+            } else if (currentBulkStep === 2) {
+                const selectedEmps = document.querySelectorAll('.bulk-emp-cb:checked');
+                if (selectedEmps.length === 0) return alert("Please select at least one employee.");
+                currentBulkStep++;
+                updateBulkUI();
+            }
+        }
+
+        function bulkBack() {
+            if (currentBulkStep > 1) {
+                currentBulkStep--;
+                updateBulkUI();
+            }
+        }
+
+        function collectBulkCustomFields() {
+            const values = {};
+            let valid = true;
+            document.querySelectorAll('.bulk-custom-field').forEach(field => {
+                const key = field.dataset.fieldKey;
+                const required = field.dataset.required === '1';
+                const value = field.type === 'checkbox' ? (field.checked ? 'Yes' : '') : (field.value || '').trim();
+                field.classList.remove('is-invalid');
+                if (required && !value) {
+                    field.classList.add('is-invalid');
+                    valid = false;
+                }
+                values[key] = value;
+            });
+            if (!valid) {
+                alert('Please complete all required additional booking details.');
+                return null;
+            }
+            return values;
+        }
+
+        function saveBulkBooking() {
+            const service = document.getElementById('bulkService').value;
+            const startDate = document.getElementById('bulkStartDate').value;
+            const endDate = document.getElementById('bulkEndDate').value;
+            const time = document.getElementById('bulkTime').value;
+            const notes = document.getElementById('bulkNotes').value;
+            const isSplit = document.getElementById('bulkSplit').checked;
+            
+            let days = [];
+            document.querySelectorAll('.bulk-day:checked').forEach(cb => days.push(cb.value));
+
+            if(days.length === 0) return alert("Please select at least one Contract Day (e.g. Monday).");
+            if(!startDate || !endDate) return alert("Start and End dates are required.");
+            if(startDate > endDate) return alert("End Date must be after Start Date.");
+
+            const customFields = collectBulkCustomFields();
+            if (customFields === null) return;
+            
+            const assignments = [];
+            
+            if (isSplit) {
+                document.querySelectorAll('.bulk-emp-row').forEach(row => {
+                    const cb = row.querySelector('.bulk-emp-cb');
+                    if (cb.checked) {
+                        const empName = cb.value;
+                        const transport = row.querySelector('.bulk-emp-transport').value;
+                        const overtime = row.querySelector('.bulk-emp-overtime').value || 0;
+                        assignments.push({
+                            employee: empName,
+                            transport: transport,
+                            overtime_hours: overtime
+                        });
+                    }
+                });
+            } else {
+                let empNames = [];
+                let transports = [];
+                let maxOvertime = 0;
+                
+                document.querySelectorAll('.bulk-emp-row').forEach(row => {
+                    const cb = row.querySelector('.bulk-emp-cb');
+                    if (cb.checked) {
+                        empNames.push(cb.value);
+                    }
+                });
+                
+                const globalTransport = document.getElementById('bulkGlobalTransport').value;
+                const globalOvertime = parseFloat(document.getElementById('bulkGlobalOvertime').value) || 0;
+                
+                assignments.push({
+                    employee: empNames.join(', '),
+                    transport: globalTransport,
+                    overtime_hours: globalOvertime
+                });
+            }
+            
+            const payload = { 
+                client_id: selectedBulkClientId,
+                client: selectedBulkClient, 
+                start_date: startDate,
+                end_date: endDate,
+                time: time, 
+                days: days, 
+                booking_type: service, 
+                booking_notes: notes,
+                assignments: assignments,
+                custom_fields: customFields,
+                project_id: document.getElementById('bulkProject') ? document.getElementById('bulkProject').value : ''
+            };
+
+            const btn = document.getElementById('bulkBtnFinish');
+            btn.innerText = "Generating..."; btn.disabled = true;
+
+            fetch('/generate_recurring', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(res => res.json())
+            .then(data => {
+                alert(data.message);
+                bulkBookingModal.hide();
+                calendar.refetchEvents();
+                loadDashboardLists(); 
+                btn.innerText = "Generate Dates";
+                btn.disabled = false;
+            });
+        }
+
+
+        // ==========================================
+        // EXISTING EDIT / DIRECTORY FUNCTIONS
+        // ==========================================
+
+        function openEditBooking(id, props, dateStr, timeStr) {
+            wizardMode = 'edit';
+            editingBookingId = id;
+            currentWizStep = 1;
+            selectedWizClient = props.client || '';
+            selectedWizClientId = props.client_id || '';
+            document.getElementById('wizardCurrentClientName').innerText = selectedWizClient || 'No client selected';
+            document.getElementById('wizardCurrentClientIndicator').style.display = 'block';
+
+            document.getElementById('wizardClientSearch').value = '';
+            document.querySelectorAll('.wizard-client-btn').forEach(btn => {
+                btn.classList.remove('active', 'bg-primary', 'text-white');
+                btn.style.display = 'block';
+                if (String(btn.dataset.clientId || '') === String(selectedWizClientId || '')) btn.classList.add('active', 'bg-primary', 'text-white');
+            });
+
+            document.querySelectorAll('.wizard-emp-row').forEach(row => { row.dataset.onLeave = '0'; row.style.display = 'block'; });
+            document.querySelectorAll('.wizard-emp-cb').forEach(cb => { cb.checked = false; cb.disabled = false; });
+            document.querySelectorAll('.logistics-panel').forEach(p => p.style.display = 'none');
+            document.querySelectorAll('.emp-transport').forEach(s => s.value = '');
+            document.querySelectorAll('.emp-overtime').forEach(i => i.value = '0');
+            document.querySelectorAll('.staff-hours-summary').forEach(h => h.innerHTML = 'Select staff to view week/month hours.');
+
+            const empArr = (props.employee || '').split(',').map(e => e.trim()).filter(Boolean);
+            const transportArr = (props.transport || '').split(',').map(t => t.trim()).filter(Boolean);
+            document.querySelectorAll('.wizard-emp-row').forEach(row => {
+                const cb = row.querySelector('.wizard-emp-cb');
+                if (empArr.includes(cb.value)) {
+                    cb.checked = true;
+                    const transport = row.querySelector('.emp-transport');
+                    const overtime = row.querySelector('.emp-overtime');
+                    if (transport) transport.value = transportArr[0] || '';
+                    if (overtime) overtime.value = props.overtime_hours || 0;
+                }
+            });
+
+            document.getElementById('wizardSplit').checked = empArr.length <= 1;
+            document.getElementById('globalTransport').value = transportArr[0] || '';
+            document.getElementById('globalOvertime').value = props.overtime_hours || 0;
+            toggleWizMode();
+
+            document.getElementById('wizardDate').value = dateStr;
+            document.getElementById('wizardAvailabilityDate').value = dateStr;
+            document.getElementById('wizardTime').value = timeStr || '08:00';
+            document.getElementById('wizardNotes').value = props.booking_notes || '';
+            const editProject = document.getElementById('wizardProject');
+            if (editProject) { filterProjectSelectByClient('wizardProject', selectedWizClientId); editProject.value = props.project_id || ''; }
+            populateWizardCustomFields(props.custom_fields || {});
+            clearAttachmentInput('wizardAttachmentFiles');
+            loadAttachments('booking', editingBookingId, 'wizardAttachmentList');
+
+            const bTypes = (props.booking_type || 'Standard Home Clean').split(',').map(s => s.trim());
+            const bSel = document.getElementById('wizardService');
+            for (let i=0; i<bSel.options.length; i++) bSel.options[i].selected = bTypes.includes(bSel.options[i].value);
+
+            updateWizUI();
+            refreshWizardStaffAvailability();
+            document.querySelectorAll('.wizard-emp-row').forEach(row => {
+                if (row.querySelector('.wizard-emp-cb').checked) refreshWizardEmployeeHours(row);
+            });
+            newBookingModal.show();
+        }
+
+        function saveEdit() {
+            const id = document.getElementById('editBookingId').value;
+            const editClientSelect = document.getElementById('editClientName');
+            const clientId = editClientSelect.value;
+            const clientOption = editClientSelect.options[editClientSelect.selectedIndex];
+            const client = clientOption ? (clientOption.dataset.clientName || clientOption.textContent.trim()) : '';
+            const bTypes = Array.from(document.getElementById('editBookingType').selectedOptions).map(opt => opt.value).join(', ');
+            const date = document.getElementById('editBookingDate').value;
+            const time = document.getElementById('editBookingTime').value;
+            const emps = Array.from(document.getElementById('editEmployeeName').selectedOptions).map(opt => opt.value).join(', ');
+            const transport = getCheckedValues('edit-t-check');
+            const notes = document.getElementById('editBookingNotes').value;
+            const overtime = document.getElementById('editBookingOvertime').value || 0;
+
+            if (!bTypes) return alert("Service type required.");
+            
+            fetch('/edit_booking', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ 
+                    id: id, 
+                    client_id: clientId,
+                    client: client, 
+                    booking_type: bTypes, 
+                    employee: emps, 
+                    transport: transport, 
+                    booking_notes: notes,
+                    overtime_hours: overtime,
+                    date: date, 
+                    time: time 
+                }) 
+            }).then(parseJsonOrError).then(() => { editModal.hide(); calendar.refetchEvents(); loadDashboardLists(); }).catch(err => alert(err.message));
+        }
+
+        function deleteBooking() { 
+            if(confirm("Delete this booking?")) { 
+                fetch('/delete_booking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: document.getElementById('editBookingId').value }) })
+                .then(() => { editModal.hide(); calendar.refetchEvents(); loadDashboardLists(); }); 
+            } 
+        }
+
+
+        // ==========================================
+        // PROJECT DIRECTORY LOGIC
+        // ==========================================
+        function moneyFmt(value) {
+            if(window.EasyAdminFormat) return window.EasyAdminFormat.money(value);
+            return Number(value || 0).toLocaleString('en-ZA', {minimumFractionDigits:2, maximumFractionDigits:2});
+        }
+
+        function dateFmt(value) {
+            if(window.EasyAdminFormat) return window.EasyAdminFormat.date(value);
+            return String(value || '').slice(0, 10);
+        }
+
+        function statusBadgeClass(status) {
+            const map = {
+                'Quoted': 'bg-secondary',
+                'Approved': 'bg-info text-dark',
+                'In Progress': 'bg-primary',
+                'On Hold': 'bg-warning text-dark',
+                'Completed': 'bg-success',
+                'Invoiced': 'bg-dark',
+                'Cancelled': 'bg-danger'
+            };
+            return map[status] || 'bg-secondary';
+        }
+
+        async function openProjectDirectory() {
+            projectDirModal.show();
+            await loadProjects();
+        }
+
+        async function loadProjects() {
+            const tbody = document.getElementById('projectDirectoryBody');
+            tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center py-4">Loading projects...</td></tr>';
+            try {
+                const res = await fetch('/api/projects');
+                const data = await parseJsonOrError(res);
+                currentProjects = data.projects || [];
+                rebuildProjectDropdown('wizardProject', selectedWizClientId || '');
+                rebuildProjectDropdown('bulkProject', selectedBulkClientId || '');
+                if (!currentProjects.length) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center py-4">No projects created yet.</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = currentProjects.map(p => {
+                    const staff = (p.employees || []).map(e => e.name).join(', ') || '<span class="text-muted">Not assigned</span>';
+                    const dates = [dateFmt(p.start_date) || '', p.estimated_end_date ? 'to ' + dateFmt(p.estimated_end_date) : ''].filter(Boolean).join(' ');
+                    return `
+                        <tr>
+                            <td><div class="fw-bold">${escapeHtml(p.project_name || '')}</div><div class="small text-muted">${escapeHtml(p.project_code || '')}</div></td>
+                            <td>${escapeHtml(p.client_display || '')}</td>
+                            <td class="small">${escapeHtml(dates || 'No dates set')}</td>
+                            <td class="text-end fw-bold text-success">${moneyFmt(p.fixed_price)}</td>
+                            <td class="small">${staff}</td>
+                            <td><span class="badge ${statusBadgeClass(p.status)}">${escapeHtml(p.status || 'Quoted')}</span></td>
+                            <td class="text-end"><button class="btn btn-sm btn-outline-primary" onclick="openProjectForm(${p.id})">Edit</button></td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="7" class="text-danger text-center py-4">${escapeHtml(err.message || 'Could not load projects.')}</td></tr>`;
+            }
+        }
+
+        async function openProjectForm(projectId) {
+            projectDirModal.hide();
+            document.getElementById('projectFormTitle').innerText = projectId ? 'Edit Project' : 'New Project';
+            document.getElementById('projectId').value = projectId || '';
+            document.getElementById('projectName').value = '';
+            document.getElementById('projectCode').value = '';
+            document.getElementById('projectClientId').value = '';
+            document.getElementById('projectFixedPrice').value = 0;
+            document.getElementById('projectStatus').value = 'Quoted';
+            document.getElementById('projectStartDate').value = '';
+            document.getElementById('projectEstimatedEndDate').value = '';
+            document.getElementById('projectActualEndDate').value = '';
+            document.getElementById('projectSiteAddress').value = '';
+            document.getElementById('projectDescription').value = '';
+            document.getElementById('projectNotes').value = '';
+            clearAttachmentInput('projectAttachmentFiles');
+            loadAttachments('project', projectId || null, 'projectAttachmentList');
+            document.querySelectorAll('.project-employee-cb').forEach(cb => cb.checked = false);
+            document.getElementById('projectCancelBtn').style.display = projectId ? '' : 'none';
+
+            if (projectId) {
+                try {
+                    const res = await fetch(`/api/projects/${projectId}`);
+                    const data = await parseJsonOrError(res);
+                    const p = data.project;
+                    document.getElementById('projectName').value = p.project_name || '';
+                    document.getElementById('projectCode').value = p.project_code || '';
+                    document.getElementById('projectClientId').value = p.client_id || '';
+                    document.getElementById('projectFixedPrice').value = p.fixed_price || 0;
+                    document.getElementById('projectStatus').value = p.status || 'Quoted';
+                    document.getElementById('projectStartDate').value = p.start_date || '';
+                    document.getElementById('projectEstimatedEndDate').value = p.estimated_end_date || '';
+                    document.getElementById('projectActualEndDate').value = p.actual_end_date || '';
+                    document.getElementById('projectSiteAddress').value = p.site_address || '';
+                    document.getElementById('projectDescription').value = p.description || '';
+                    document.getElementById('projectNotes').value = p.notes || '';
+                    const selected = new Set((p.employees || []).map(e => String(e.id)));
+                    document.querySelectorAll('.project-employee-cb').forEach(cb => cb.checked = selected.has(String(cb.value)));
+                } catch (err) {
+                    alert(err.message || 'Could not load project.');
+                    return;
+                }
+            }
+            projectFormModal.show();
+        }
+
+        async function saveProject() {
+            const payload = {
+                id: document.getElementById('projectId').value,
+                project_name: document.getElementById('projectName').value.trim(),
+                project_code: document.getElementById('projectCode').value.trim(),
+                client_id: document.getElementById('projectClientId').value,
+                fixed_price: document.getElementById('projectFixedPrice').value,
+                status: document.getElementById('projectStatus').value,
+                start_date: document.getElementById('projectStartDate').value,
+                estimated_end_date: document.getElementById('projectEstimatedEndDate').value,
+                actual_end_date: document.getElementById('projectActualEndDate').value,
+                site_address: document.getElementById('projectSiteAddress').value.trim(),
+                description: document.getElementById('projectDescription').value.trim(),
+                notes: document.getElementById('projectNotes').value.trim(),
+                employee_ids: Array.from(document.querySelectorAll('.project-employee-cb:checked')).map(cb => cb.value)
+            };
+            if (!payload.project_name) return alert('Project name is required.');
+            try {
+                const res = await fetch('/api/projects/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await parseJsonOrError(res);
+                await uploadAttachments('project', data.project_id || payload.id, 'projectAttachmentFiles');
+                projectFormModal.hide();
+                await refreshProjectsData();
+                await loadProjects();
+                projectDirModal.show();
+            } catch (err) {
+                alert(err.message || 'Could not save project.');
+            }
+        }
+
+        async function cancelProject() {
+            const id = document.getElementById('projectId').value;
+            if (!id) return;
+            if (!confirm('Mark this project as Cancelled?')) return;
+            try {
+                const res = await fetch('/api/projects/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id })
+                });
+                await parseJsonOrError(res);
+                projectFormModal.hide();
+                await loadProjects();
+                projectDirModal.show();
+            } catch (err) {
+                alert(err.message || 'Could not cancel project.');
+            }
+        }
+
+        // ==========================================
+        // UPGRADED DIRECTORY & REPORT LOGIC
+        // ==========================================
+
+        function filterDirectory() {
+            const term = document.getElementById('dirClientSearch').value.toLowerCase();
+            const rows = document.querySelectorAll('#dirTable tbody tr');
+            rows.forEach(row => {
+                const text = row.innerText.toLowerCase();
+                row.style.display = text.includes(term) ? '' : 'none';
+            });
+        }
+
+        function openClientDirectory() { 
+            clientDirModal.show(); 
+        }
+        
+        function openClientProfile(client) { 
+            clientDirModal.hide(); 
+            document.getElementById('clientProfileTitle').innerText = client ? 'Edit Client Profile' : 'Add New Client'; 
+            document.getElementById('cId').value = client ? client.id : ''; 
+            document.getElementById('cName').value = client ? client.name : ''; 
+            document.getElementById('cSurname').value = client ? (client.surname || '') : ''; 
+            document.getElementById('cType').value = client ? (client.client_type || 'Ad hoc') : 'Ad hoc'; 
+            document.getElementById('cDiscountPercent').value = client ? (client.discount_percent || '') : ''; 
+            document.getElementById('cPhone').value = client ? (client.phone || '') : ''; 
+            document.getElementById('cEmail').value = client ? (client.email || '') : ''; 
+            document.getElementById('cBuildingNumber').value = client ? (client.building_number || '') : '';
+            document.getElementById('cStreetName').value = client ? (client.street_name || '') : '';
+            document.getElementById('cSuburb').value = client ? (client.suburb || '') : '';
+            document.getElementById('cPostalCode').value = client ? (client.postal_code || '') : '';
+            document.getElementById('cAddress').value = client ? (client.address || '') : ''; 
+            document.getElementById('cCompany').value = client ? (client.company_name || '') : ''; 
+            document.getElementById('cRegNo').value = client ? (client.registration_number || '') : ''; 
+            document.getElementById('cVatNo').value = client ? (client.vat_number || '') : ''; 
+            clientProfileModal.show(); 
+        }
+        
+        function saveClient() { 
+            const addressParts = [
+                [document.getElementById('cBuildingNumber').value, document.getElementById('cStreetName').value].filter(Boolean).join(' ').trim(),
+                document.getElementById('cSuburb').value,
+                document.getElementById('cPostalCode').value
+            ].filter(Boolean).join(', ');
+            document.getElementById('cAddress').value = addressParts;
+            const data = { id: document.getElementById('cId').value, name: document.getElementById('cName').value, surname: document.getElementById('cSurname').value, client_type: document.getElementById('cType').value, discount_percent: document.getElementById('cDiscountPercent').value, phone: document.getElementById('cPhone').value, email: document.getElementById('cEmail').value, address: addressParts, building_number: document.getElementById('cBuildingNumber').value, street_name: document.getElementById('cStreetName').value, suburb: document.getElementById('cSuburb').value, postal_code: document.getElementById('cPostalCode').value, company_name: document.getElementById('cCompany').value, registration_number: document.getElementById('cRegNo').value, vat_number: document.getElementById('cVatNo').value }; 
+            if(!data.name) return alert("First Name is required."); 
+            fetch('/update_client', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(() => location.reload()); 
+        }
+
+        function openBookingOpsReports() {
+            document.getElementById('clientReportResults').style.display = 'none';
+            document.getElementById('clientExportBtns').style.display = 'none';
+            document.getElementById('btnExportBookingOpsReport').disabled = true;
+            document.getElementById('bookingOpsReportBody').innerHTML = '';
+            const today = new Date();
+            const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+            document.getElementById('repStart').value = localISODate(firstDay);
+            document.getElementById('repEnd').value = localISODate(today);
+            renderBookingOpsReportHelp();
+            clientReportModal.show();
+        }
+
+        // Backwards-compatible wrapper for any older buttons that still call openClientReport().
+        function openClientReport(name) {
+            openBookingOpsReports();
+            if (name) {
+                document.getElementById('bookingOpsReportType').value = 'customers';
+                renderBookingOpsReportHelp();
+            }
+        }
+
+        function renderBookingOpsReportHelp() {
+            const type = document.getElementById('bookingOpsReportType').value;
+            const help = document.getElementById('bookingOpsReportHelp');
+            if(type === 'bookings') help.innerText = 'Shows every booking in the selected date range, including linked projects, staff, notes, invoiced status and attachment count.';
+            else if(type === 'customers') help.innerText = 'Groups booking activity by customer/client for the selected date range.';
+            else help.innerText = 'Shows active projects and linked bookings/workdays for the selected date range.';
+            document.getElementById('clientReportResults').style.display = 'none';
+            document.getElementById('clientExportBtns').style.display = 'none';
+            document.getElementById('btnExportBookingOpsReport').disabled = true;
+        }
+
+        function badgeYesNo(value) {
+            return value ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-secondary">No</span>';
+        }
+
+        function renderBookingReport(data) {
+            currentClientReportData = data.bookings || [];
+            const rows = currentClientReportData.map(b => `
+                <tr>
+                    <td class="fw-bold">${escapeHtml(dateFmt(b.date))}<br><small class="text-muted">${escapeHtml(b.day || '')}</small></td>
+                    <td>${escapeHtml(b.time || '')}</td>
+                    <td>${escapeHtml(b.client || '')}${b.project ? `<br><span class="badge bg-secondary">Project: ${escapeHtml(b.project)}</span>` : ''}</td>
+                    <td>${escapeHtml(b.service || '')}</td>
+                    <td>${escapeHtml(b.staff || '')}</td>
+                    <td>${escapeHtml(b.transport || '')}</td>
+                    <td class="text-end">${b.overtime_hours || 0}</td>
+                    <td>${b.notes ? escapeHtml(b.notes) : '<span class="text-muted">-</span>'}</td>
+                    <td>${badgeYesNo(b.invoiced)}</td>
+                    <td class="text-end">${b.attachment_count || 0}</td>
+                </tr>`).join('');
+            return `<div class="table-responsive bg-white rounded border shadow-sm"><table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light"><tr><th>Date</th><th>Time</th><th>{{ client_label }}</th><th>{{ service_label }}</th><th>{{ employee_label }}(s)</th><th>Transport</th><th class="text-end">OT</th><th>Notes</th><th>Invoiced</th><th class="text-end">Files</th></tr></thead>
+                <tbody>${rows || '<tr><td colspan="10" class="text-muted text-center py-4">No bookings found for this date range.</td></tr>'}</tbody>
+            </table></div>`;
+        }
+
+        function renderCustomerReport(data) {
+            currentClientReportData = data.customers || [];
+            if(!currentClientReportData.length) return '<div class="alert alert-info">No customer activity found for this date range.</div>';
+            return currentClientReportData.map(c => `
+                <div class="card border-0 shadow-sm mb-3">
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                        <div><strong>${escapeHtml(c.client)}</strong><div class="small text-muted">Last booking: ${escapeHtml(dateFmt(c.last_booking_date) || '-')} | Staff used: ${escapeHtml((c.staff_used || []).join(', ') || '-')}</div></div>
+                        <span class="badge bg-primary">${c.booking_count} booking(s)</span>
+                    </div>
+                    <div class="table-responsive"><table class="table table-sm mb-0 align-middle">
+                        <thead class="table-light"><tr><th>Date</th><th>{{ service_label }}</th><th>{{ employee_label }}(s)</th><th>Project</th><th>Notes</th><th>Invoiced</th><th class="text-end">Files</th></tr></thead>
+                        <tbody>${(c.bookings || []).map(b => `<tr><td class="fw-bold">${escapeHtml(dateFmt(b.date))}<br><small class="text-muted">${escapeHtml(b.day || '')}</small></td><td>${escapeHtml(b.service || '')}</td><td>${escapeHtml(b.staff || '')}</td><td>${escapeHtml(b.project || '')}</td><td>${b.notes ? escapeHtml(b.notes) : '<span class="text-muted">-</span>'}</td><td>${badgeYesNo(b.invoiced)}</td><td class="text-end">${b.attachment_count || 0}</td></tr>`).join('')}</tbody>
+                    </table></div>
+                </div>`).join('');
+        }
+
+        function renderProjectReport(data) {
+            currentClientReportData = data.projects || [];
+            if(!currentClientReportData.length) return '<div class="alert alert-info">No projects or project-linked bookings found for this date range.</div>';
+            return currentClientReportData.map(p => `
+                <div class="card border-0 shadow-sm mb-3">
+                    <div class="card-header bg-white">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <strong>${escapeHtml(p.project_name)}</strong> ${p.project_code ? `<span class="text-muted">(${escapeHtml(p.project_code)})</span>` : ''}
+                                <div class="small text-muted">${escapeHtml(p.client || 'No client')} | ${escapeHtml(dateFmt(p.start_date) || '-')} to ${escapeHtml(dateFmt(p.actual_end_date || p.estimated_end_date) || '-')}</div>
+                                ${p.site_address ? `<div class="small text-muted">Site: ${escapeHtml(p.site_address)}</div>` : ''}
+                            </div>
+                            <div class="text-end"><span class="badge bg-dark">${escapeHtml(p.status || '')}</span><div class="fw-bold text-success mt-1">${moneyFmt(p.fixed_price || 0)}</div></div>
+                        </div>
+                        <div class="row text-center mt-3 small">
+                            <div class="col"><strong>${p.booking_count || 0}</strong><br><span class="text-muted">Bookings</span></div>
+                            <div class="col"><strong>${p.total_days_worked || 0}</strong><br><span class="text-muted">Days Worked</span></div>
+                            <div class="col"><strong>${Number(p.total_overtime_hours || 0).toFixed(2)}</strong><br><span class="text-muted">OT Hours</span></div>
+                            <div class="col"><strong>${p.attachment_count || 0}</strong><br><span class="text-muted">Project Files</span></div>
+                        </div>
+                    </div>
+                    <div class="table-responsive"><table class="table table-sm mb-0 align-middle">
+                        <thead class="table-light"><tr><th>Date</th><th>{{ employee_label }}(s)</th><th>{{ service_label }}</th><th class="text-end">OT</th><th>Notes</th><th class="text-end">Files</th></tr></thead>
+                        <tbody>${(p.bookings || []).length ? (p.bookings || []).map(b => `<tr><td class="fw-bold">${escapeHtml(dateFmt(b.date))}<br><small class="text-muted">${escapeHtml(b.day || '')}</small></td><td>${escapeHtml(b.staff || '')}</td><td>${escapeHtml(b.service || '')}</td><td class="text-end">${b.overtime_hours || 0}</td><td>${b.notes ? escapeHtml(b.notes) : '<span class="text-muted">-</span>'}</td><td class="text-end">${b.attachment_count || 0}</td></tr>`).join('') : '<tr><td colspan="6" class="text-muted text-center py-3">No linked bookings in this date range.</td></tr>'}</tbody>
+                    </table></div>
+                </div>`).join('');
+        }
+
+        async function runBookingOpsReport() {
+            const type = document.getElementById('bookingOpsReportType').value;
+            const start = document.getElementById('repStart').value;
+            const end = document.getElementById('repEnd').value;
+            if(!start || !end) return alert('Select both dates.');
+            const btn = document.getElementById('btnRunReport');
+            btn.innerText = 'Generating...';
+            btn.disabled = true;
+            try {
+                const res = await fetch('/api/booking_ops_report', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({report_type: type, start_date: start, end_date: end})
+                });
+                const data = await res.json();
+                if(data.status === 'error') throw new Error(data.message || 'Could not generate report.');
+                let html = '';
+                let count = 0;
+                if(type === 'bookings') { html = renderBookingReport(data); count = (data.bookings || []).length; }
+                else if(type === 'customers') { html = renderCustomerReport(data); count = (data.customers || []).length; }
+                else { html = renderProjectReport(data); count = (data.projects || []).length; }
+                document.getElementById('bookingOpsReportBody').innerHTML = html;
+                document.getElementById('bookingOpsReportTitle').innerText = document.getElementById('bookingOpsReportType').selectedOptions[0].text;
+                document.getElementById('bookingOpsReportRange').innerText = `${start} to ${end}`;
+                document.getElementById('bookingOpsReportCount').innerText = `${count} record(s)`;
+                document.getElementById('clientReportResults').style.display = 'block';
+                document.getElementById('clientExportBtns').style.display = 'block';
+                document.getElementById('btnExportBookingOpsReport').disabled = false;
+            } catch(err) {
+                alert(err.message || 'An error occurred while generating the report.');
+            } finally {
+                btn.innerText = 'Generate';
+                btn.disabled = false;
+            }
+        }
+
+        function runClientReport() { return runBookingOpsReport(); }
+
+        function exportBookingOpsReport() {
+            const type = document.getElementById('bookingOpsReportType').value;
+            const start = document.getElementById('repStart').value;
+            const end = document.getElementById('repEnd').value;
+            if(!start || !end) return alert('Select both dates.');
+            fetch('/export_booking_ops_report', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({report_type: type, start_date: start, end_date: end})
+            }).then(res => {
+                if(!res.ok) throw new Error('Could not export report.');
+                return res.blob();
+            }).then(blob => {
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = `Booking_Ops_${type}_${start}_to_${end}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }).catch(err => alert(err.message));
+        }
+
+        function exportClientExcel() { exportBookingOpsReport(); }
+
+        function exportClientPDF() { 
+            const el = document.getElementById('clientReportPrintArea'); 
+            const type = document.getElementById('bookingOpsReportType').value;
+            const filename = `Booking_Ops_${type}_Report_${new Date().toISOString().split('T')[0]}.pdf`;
+            html2pdf().set({ margin: 0.5, filename: filename, jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' } }).from(el).save(); 
+        }
+
+        // ==========================================
+        // ROUTE PLANNER LOGIC
+        // ==========================================
+        function openRoutePlannerModal() {
+            document.getElementById('routeDate').value = localISODate();
+            document.getElementById('routeList').innerHTML = '<li class="list-group-item text-muted small">Click Load to fetch bookings...</li>';
+            currentRouteData = [];
+            routePlannerModal.show();
+        }
+
+        function fetchRouteBookings() {
+            const date = document.getElementById('routeDate').value;
+            if (!date) return alert("Please select a date.");
+
+            fetch('/daily_route', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ date: date })
+            })
+            .then(res => res.json())
+            .then(data => {
+                currentRouteData = data.route;
+                renderRouteList();
+            });
+        }
+
+        function renderRouteList() {
+            const list = document.getElementById('routeList');
+            list.innerHTML = '';
+
+            if (currentRouteData.length === 0) {
+                list.innerHTML = '<li class="list-group-item text-danger small">No bookings found for this date.</li>';
+                return;
+            }
+
+            currentRouteData.forEach((b, index) => {
+                const addressText = b.address === 'No address on file' 
+                    ? `<span class="text-danger fw-bold">Missing Address!</span>` 
+                    : `<span class="text-muted">${b.address}</span>`;
+
+                list.innerHTML += `
+                    <li class="list-group-item d-flex justify-content-between align-items-center py-2">
+                        <div>
+                            <strong>🕒 ${b.time}</strong> - ${b.client} <br>
+                            <small>📍 ${addressText}</small>
+                        </div>
+                        <button class="btn btn-sm btn-outline-danger" onclick="removeFromRoute(${index})" title="Remove from route">🗑️ Remove</button>
+                    </li>`;
+            });
+        }
+
+        function removeFromRoute(index) {
+            currentRouteData.splice(index, 1);
+            renderRouteList();
+        }
+
+        function generateGoogleMaps() {
+            const startPoint = document.getElementById('routeStart').value;
+            const optimize = document.getElementById('optimizeRoute').checked;
+
+            if (!startPoint) return alert("Please enter a starting point.");
+            if (currentRouteData.length === 0) return alert("There are no valid bookings left on the route.");
+
+            const validStops = currentRouteData.filter(b => b.address !== 'No address on file');
+            
+            if (validStops.length === 0) return alert("None of the remaining bookings have valid addresses.");
+            
+            const origin = encodeURIComponent(startPoint);
+            const destination = encodeURIComponent(validStops[validStops.length - 1].address);
+            
+            let waypointsParam = "";
+            if (validStops.length > 1) {
+                const intermediateStops = validStops.slice(0, -1).map(b => encodeURIComponent(b.address));
+                const optFlag = optimize ? "optimize:true|" : "";
+                waypointsParam = `&waypoints=${optFlag}${intermediateStops.join('|')}`;
+            }
+
+            const mapUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}${waypointsParam}`;
+            window.open(mapUrl, '_blank');
+        }
+
+        let idleTimer;
+        const timeoutValue = 1800000; 
+        function resetIdleTimer() { clearTimeout(idleTimer); idleTimer = setTimeout(() => { window.location.href = "/logout"; }, timeoutValue); }
+        window.onload = resetIdleTimer; document.onmousemove = resetIdleTimer; document.onkeypress = resetIdleTimer; document.onclick = resetIdleTimer; document.onscroll = resetIdleTimer;
+    </script>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

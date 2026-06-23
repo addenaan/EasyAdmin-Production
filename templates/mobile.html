@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0d6efd">
+    <title>Easy Admin Mobile | {{ session.get('company_name', 'Workspace') }}</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/static/pwa-icon-192.png">
+    <link rel="stylesheet" href="/static/mobile.css?v=20260622">
+</head>
+<body>
+    <div class="app-shell">
+        <header class="mobile-header">
+            <div class="brand-row">
+                <img src="/static/easy_admin_logo.png" alt="Easy Admin" class="brand-logo">
+                <div>
+                    <div class="eyebrow">Easy Admin Mobile</div>
+                    <h1>{{ session.get('company_name', 'Workspace') }}</h1>
+                    <p>Signed in as {{ session.get('username', 'User') }}</p>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button id="installBtn" class="ghost-btn hidden" type="button">Install App</button>
+                <a href="/hub" class="ghost-btn">Desktop</a>
+                <a href="/logout" class="ghost-btn danger">Logout</a>
+            </div>
+        </header>
+
+        <main class="mobile-main">
+            <section id="offlineNotice" class="notice warning hidden">You appear to be offline. Previously cached screens may still open, but live updates need internet access.</section>
+            <section id="toast" class="notice hidden"></section>
+
+            <nav class="mobile-tabs" aria-label="Mobile navigation">
+                <button class="tab-btn active" data-tab="dashboard">Home</button>
+                <button class="tab-btn" data-tab="bookings">Bookings</button>
+                <button class="tab-btn" data-tab="projects">Projects</button>
+                <button class="tab-btn" data-tab="invoices">Invoices</button>
+            </nav>
+
+            <section id="dashboardView" class="view active-view">
+                <div id="dashboardStats" class="stats-grid"></div>
+                <div class="section-heading"><h2>Today’s bookings</h2><button class="small-link" data-jump="bookings">View all</button></div>
+                <div id="todayBookings" class="card-list loading-card">Loading bookings...</div>
+                <div class="section-heading"><h2>Upcoming</h2></div>
+                <div id="upcomingBookings" class="card-list"></div>
+                <div class="section-heading"><h2>Active projects</h2><button class="small-link" data-jump="projects">View all</button></div>
+                <div id="activeProjects" class="card-list"></div>
+            </section>
+
+            <section id="bookingsView" class="view">
+                <div class="filter-card">
+                    <label>Start date<input id="bookingStart" type="date"></label>
+                    <label>End date<input id="bookingEnd" type="date"></label>
+                    <label>Status
+                        <select id="bookingStatus">
+                            <option value="">All statuses</option>
+                            <option>Scheduled</option>
+                            <option>In Progress</option>
+                            <option>Completed</option>
+                            <option>Cancelled</option>
+                        </select>
+                    </label>
+                    <button id="loadBookingsBtn" class="primary-btn" type="button">Load bookings</button>
+                </div>
+                <div id="bookingsList" class="card-list loading-card">Choose a date range to load bookings.</div>
+            </section>
+
+            <section id="projectsView" class="view">
+                <div class="filter-card compact">
+                    <input id="projectSearch" type="search" placeholder="Search project, code or client">
+                    <button id="loadProjectsBtn" class="primary-btn" type="button">Search</button>
+                </div>
+                <div id="projectsList" class="card-list loading-card">Loading projects...</div>
+            </section>
+
+            <section id="invoicesView" class="view">
+                <div class="filter-card">
+                    <label>Start date<input id="invoiceStart" type="date"></label>
+                    <label>End date<input id="invoiceEnd" type="date"></label>
+                    <button id="loadInvoicesBtn" class="primary-btn" type="button">Load invoices</button>
+                </div>
+                <div id="invoicesList" class="card-list loading-card">Loading invoices...</div>
+            </section>
+        </main>
+    </div>
+
+    <div id="detailSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+        <div class="sheet-backdrop" data-close-sheet></div>
+        <div class="sheet-panel">
+            <div class="sheet-handle"></div>
+            <div class="sheet-header">
+                <div>
+                    <div id="sheetKicker" class="eyebrow"></div>
+                    <h2 id="sheetTitle">Details</h2>
+                </div>
+                <button class="icon-btn" type="button" data-close-sheet>×</button>
+            </div>
+            <div id="sheetContent" class="sheet-content"></div>
+        </div>
+    </div>
+
+    <script defer src="/static/mobile.js?v=20260622"></script>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

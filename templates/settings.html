@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ session.get('company_name') }} | System Settings</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; padding-top: 30px; font-family: sans-serif; }
+        .settings-card { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px;}
+        .section-header { border-bottom: 2px solid #dee2e6; padding-bottom: 10px; margin-bottom: 20px; color: #0d6efd; font-weight: bold;}
+    </style>
+</head>
+<body>
+    <div class="container mb-5" style="max-width: 900px;">
+        <div class="d-flex justify-content-between align-items-center mb-4 pb-3 border-bottom">
+            <div>
+                <h2 class="mb-0 fw-bold">System Settings & Integrations</h2>
+                <span class="text-muted">{{ session.get('company_name') }}</span>
+            </div>
+            <div>
+                <a href="/hub" class="btn btn-secondary fw-bold">🔙 Back to Hub</a>
+            </div>
+        </div>
+
+        {% if success_msg %}
+        <div class="alert alert-success shadow-sm fw-bold">✅ {{ success_msg }}</div>
+        {% endif %}
+
+        <form method="POST" action="/settings">
+            
+            <div class="settings-card border-top border-primary border-4">
+                <h4 class="section-header">📧 Outbound Email Server (SMTP)</h4>
+                <p class="small text-muted mb-4">Configure these settings to automatically send Payslips, Invoices, and Quotes directly from the system using your company's email address.</p>
+                
+                <div class="row">
+                    <div class="col-md-8 mb-3">
+                        <label class="form-label fw-bold small">SMTP Server Host</label>
+                        <input type="text" name="smtp_server" id="smtp_server" class="form-control" value="{{ settings.get('smtp_server', '') }}" placeholder="e.g., smtp.gmail.com or smtp.office365.com">
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label class="form-label fw-bold small">SMTP Port</label>
+                        <input type="number" name="smtp_port" id="smtp_port" class="form-control" value="{{ settings.get('smtp_port', '465') }}" placeholder="465 (SSL) or 587 (TLS)">
+                    </div>
+                    
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label fw-bold small">Email Username</label>
+                        <input type="email" name="smtp_user" id="smtp_user" class="form-control" value="{{ settings.get('smtp_user', '') }}" placeholder="you@yourcompany.com">
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <label class="form-label fw-bold small">App Password</label>
+                        <input type="password" name="smtp_pass" id="smtp_pass" class="form-control" value="{{ settings.get('smtp_pass', '') }}" placeholder="Use an App Password if using Gmail">
+                    </div>
+                    <div class="col-md-12 mb-3">
+                        <label class="form-label fw-bold small">Default "Reply-To" Sender Email</label>
+                        <input type="email" name="sender_email" class="form-control" value="{{ settings.get('sender_email', '') }}" placeholder="Optional: Leave blank to use the Username">
+                    </div>
+                </div>
+
+                <div class="d-flex align-items-center mt-3 p-3 bg-light border rounded">
+                    <button type="button" class="btn btn-warning fw-bold" id="testEmailBtn" onclick="testEmailConnection()">Test Connection</button>
+                    <div class="ms-3 small text-muted">Tests connection & authentication. May take up to 10 seconds.</div>
+                </div>
+                <div id="emailTestAlert" style="display: none;"></div>
+            </div>
+
+            <div class="settings-card border-top border-success border-4">
+                <h4 class="section-header text-success">📅 Google Calendar Sync</h4>
+                <p class="small text-muted mb-4">Route your scheduled bookings into a specific Google Calendar. If left blank, bookings will default to the master account's primary calendar.</p>
+                
+                <div class="row">
+                    <div class="col-md-12 mb-3">
+                        <label class="form-label fw-bold small">Target Google Calendar ID</label>
+                        <input type="text" name="gcal_calendar_id" class="form-control" value="{{ settings.get('gcal_calendar_id', '') }}" placeholder="e.g., yourname@group.calendar.google.com">
+                    </div>
+                </div>
+                
+                <div class="alert alert-secondary small mb-0 mt-3">
+                    <strong>Developer Note:</strong> The actual Google OAuth 2.0 connection is managed by the <code>credentials.json</code> and <code>token.json</code> files stored securely on the server backend.
+                </div>
+            </div>
+
+            <div class="text-end mb-5">
+                <button type="submit" class="btn btn-primary btn-lg fw-bold px-5 shadow">Save All Settings</button>
+            </div>
+            
+        </form>
+    </div>
+
+    <script>
+        function testEmailConnection() {
+            const btn = document.getElementById('testEmailBtn');
+            const alertBox = document.getElementById('emailTestAlert');
+            
+            const server = document.getElementById('smtp_server').value;
+            const port = document.getElementById('smtp_port').value;
+            const user = document.getElementById('smtp_user').value;
+            const pass = document.getElementById('smtp_pass').value;
+
+            if (!server || !port || !user || !pass) {
+                alertBox.style.display = 'block';
+                alertBox.className = 'alert alert-danger mt-3 fw-bold shadow-sm';
+                alertBox.innerText = '❌ Please fill in the Server, Port, Username, and Password fields before testing.';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "Testing... (Wait 10s)";
+            alertBox.style.display = 'none';
+
+            fetch('/api/test_email_connection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    smtp_server: server,
+                    smtp_port: port,
+                    smtp_user: user,
+                    smtp_pass: pass
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                alertBox.style.display = 'block';
+                if (data.status === 'success') {
+                    alertBox.className = 'alert alert-success mt-3 fw-bold shadow-sm';
+                    alertBox.innerText = '✅ ' + data.message;
+                } else {
+                    alertBox.className = 'alert alert-danger mt-3 fw-bold shadow-sm';
+                    alertBox.innerText = '❌ ' + data.message;
+                }
+                btn.disabled = false;
+                btn.innerText = "Test Connection";
+            })
+            .catch(err => {
+                alertBox.style.display = 'block';
+                alertBox.className = 'alert alert-danger mt-3 fw-bold shadow-sm';
+                alertBox.innerText = '❌ Failed: Could not reach the server or request timed out.';
+                btn.disabled = false;
+                btn.innerText = "Test Connection";
+            });
+        }
+    </script>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

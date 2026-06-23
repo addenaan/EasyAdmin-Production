@@ -1,0 +1,2109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ session.get('company_name') }} | HR & Payroll</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <style>
+        body { background-color: #f8f9fa; padding-top: 30px; font-family: sans-serif;}
+        .payslip-container { padding: 40px; background: white; width: 100%; max-width: 800px; margin: auto; }
+        .amount { text-align: right; }
+        .totals-row { font-weight: bold; background-color: #f8f9fa; }
+        .emp-link { text-decoration: none; font-weight: bold; color: #0d6efd; cursor: pointer;}
+        .status-light { display: inline-block; width: 15px; height: 15px; border-radius: 50%; vertical-align: middle; }
+        .sars-code { font-size: 0.85em; color: #6c757d; float: right; margin-right: 15px; font-style: italic;}
+        
+        .nav-tabs .nav-link { color: #6c757d; background-color: #e9ecef; border: 1px solid #dee2e6; margin-right: 5px; cursor: pointer;}
+        .nav-tabs .nav-link.active { font-weight: bold; border-bottom-color: transparent; }
+        .tab-content { background: white; padding: 20px; border: 1px solid #dee2e6; border-top: none; border-radius: 0 0 5px 5px; box-shadow: 0 .125rem .25rem rgba(0,0,0,.075);}
+        
+        .score-box { background: #f8f9fa; border: 1px solid #dee2e6; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
+        .score-input { width: 70px; text-align: center; }
+
+        .table thead th { vertical-align: bottom; }
+        .search-row th { padding-top: 0 !important; padding-bottom: 10px !important; border-bottom-width: 2px; }
+        .column-search { font-size: 0.85rem; font-weight: normal; }
+    </style>
+</head>
+<body>
+    <div class="container mb-5">
+        <div class="d-flex justify-content-between align-items-center mb-4 pb-3 border-bottom">
+            <div class="d-flex align-items-center">
+                {% if session.company_logo %}
+                    <img src="/uploads/logos/{{ session.company_logo }}" alt="Logo" class="shadow-sm me-3" style="width: 60px; height: 60px; object-fit: contain; border-radius: 8px; background-color: white;">
+                {% else %}
+                    <div class="bg-success text-white d-flex align-items-center justify-content-center rounded me-3 shadow-sm" style="width: 60px; height: 60px; font-size: 28px; font-weight: bold;">
+                        {{ session.company_name[0] }}
+                    </div>
+                {% endif %}
+                <div><h2 class="mb-0 text-success fw-bold">HR & Payroll Portal</h2><span class="text-muted">{{ session.company_name }}</span></div>
+            </div>
+            <div>
+                <a href="/hub" class="btn btn-secondary me-2">🔙 Hub</a>
+                <a href="/logout" class="btn btn-outline-danger">Logout</a>
+            </div>
+        </div>
+
+        <ul class="nav nav-tabs nav-fill" id="hrTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active text-dark" id="admin-tab" data-bs-toggle="tab" data-bs-target="#tab-admin" type="button">Employee Administration</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link text-success" id="payroll-tab" data-bs-toggle="tab" data-bs-target="#tab-payroll" type="button">Payroll & Leave</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link text-primary" id="interviews-tab" data-bs-toggle="tab" data-bs-target="#tab-interviews" type="button">Interviews & Hiring</button>
+            </li>
+        </ul>
+
+        <div class="tab-content" id="hrTabsContent">
+            
+            <!-- TAB 1: EMPLOYEE ADMINISTRATION -->
+            <div class="tab-pane fade show active" id="tab-admin" role="tabpanel">
+                <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
+                    <h5 class="mb-0 text-secondary">Manage Employee Details</h5>
+                    <div>
+                        <button class="btn btn-sm btn-outline-success fw-bold me-2" onclick="openExportModal()">📥 Export List</button>
+                        <button class="btn btn-sm btn-primary fw-bold" onclick="openProfileModal(null)">+ Add New Employee</button>
+                    </div>
+                </div>
+                
+                <form method="GET" action="/payroll" class="row g-2 align-items-end mb-3 bg-light border rounded p-2">
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-muted mb-1">Server Search</label>
+                        <input type="text" name="payroll_q" class="form-control form-control-sm" value="{{ payroll_q or '' }}" placeholder="Search name, employee number, job title, status or type...">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small fw-bold text-muted mb-1">Rows</label>
+                        <select name="payroll_per_page" class="form-select form-select-sm">
+                            {% for n in [25, 50, 100] %}<option value="{{ n }}" {% if employee_pagination and employee_pagination.per_page == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-sm btn-dark fw-bold" type="submit">Search</button>
+                        <a href="/payroll" class="btn btn-sm btn-outline-secondary">Reset</a>
+                        <span class="small text-muted ms-2">Showing {{ employee_pagination.start }}-{{ employee_pagination.end }} of {{ employee_pagination.total }}</span>
+                    </div>
+                </form>
+                <table class="table table-hover align-middle" id="adminTable">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Emp No.</th><th>Full Name</th><th>Job Title</th><th>Type</th><th>Status</th><th>Actions</th>
+                        </tr>
+                        <tr class="search-row">
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="adminTable" data-col="0" placeholder="Search No..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="adminTable" data-col="1" placeholder="Search Name..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="adminTable" data-col="2" placeholder="Search Title..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="adminTable" data-col="3" placeholder="Search Type..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="adminTable" data-col="4" placeholder="Search Status..."></th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for emp in employees %}
+                        <tr class="admin-row">
+                            <td>{{ emp.emp_number }}</td>
+                            <td><strong class="text-primary">{{ emp.name }}</strong></td>
+                            <td>{{ emp.job_title or 'N/A' }}</td>
+                            <td>{{ emp.emp_type or 'Full-time' }}</td>
+                            <td>
+                                {% if emp.status == 'Active' %}<span class="badge bg-success">Active</span>
+                                {% elif emp.status == 'Resigned' %}<span class="badge bg-warning text-dark">Resigned</span>
+                                {% else %}<span class="badge bg-danger">{{ emp.status or 'Unknown' }}</span>{% endif %}
+                            </td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-dark edit-btn" onclick='openProfileModal({{ emp | tojson | safe }})'>👤 Edit Profile / Files</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <div class="d-flex justify-content-between align-items-center mt-2 mb-3">
+                    <div class="small text-muted">Page {{ employee_pagination.page }} of {{ employee_pagination.pages }}</div>
+                    <div>
+                        {% if employee_pagination.has_prev %}<a class="btn btn-sm btn-outline-dark" href="/payroll?payroll_q={{ payroll_q|urlencode }}&payroll_per_page={{ employee_pagination.per_page }}&payroll_page={{ employee_pagination.prev_page }}">Previous</a>{% endif %}
+                        {% if employee_pagination.has_next %}<a class="btn btn-sm btn-outline-dark ms-1" href="/payroll?payroll_q={{ payroll_q|urlencode }}&payroll_per_page={{ employee_pagination.per_page }}&payroll_page={{ employee_pagination.next_page }}">Next</a>{% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 2: PAYROLL & LEAVE -->
+            <div class="tab-pane fade" id="tab-payroll" role="tabpanel">
+                <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
+                    <div>
+                        <h5 class="mb-0 text-secondary d-inline-block me-3">Payroll Processing</h5>
+                        <small class="text-danger fw-bold">⚠️ Note: You must "Save to Ledger" for a payslip to appear on official SARS reports.</small>
+                    </div>
+                    <div>
+                        <button class="btn btn-sm btn-dark me-2" onclick="openEmp201Modal()">📉 EMP201 Report</button>
+                        <button class="btn btn-sm btn-outline-dark me-2 fw-bold" onclick="openUi19Modal()">📝 UI-19 Form</button>
+                        <button class="btn btn-sm btn-warning text-dark me-2 fw-bold" onclick="openEmp501Modal()">📊 EMP501 Export</button>
+                        <button class="btn btn-sm btn-outline-dark me-4 fw-bold" onclick="openBankExportModal()">🏦 Bank Payment Export</button>
+                        <span class="text-muted small me-2" id="selectionCount">0 selected</span>
+                        
+                        <!-- BULK ACTION BUTTONS -->
+                        <button class="btn btn-sm btn-outline-primary me-2 fw-bold" onclick="openBulkFinalizeModal()" title="Calculate and save selected payslips to the ledger">✅ Bulk Finalize Payroll</button>
+                        <button class="btn btn-sm btn-outline-info me-2 fw-bold" onclick="openBulkPayslipModal()" title="Generates/Emails payslips from finalised ledger records; drafts are marked clearly">📧 Bulk Payslips</button>
+                        <button class="btn btn-sm btn-outline-success fw-bold" onclick="openBulkIrp5Modal()">🗂️ Bulk IRP5</button>
+                    </div>
+                </div>
+                
+                <form method="GET" action="/payroll" class="row g-2 align-items-end mb-3 bg-light border rounded p-2">
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-muted mb-1">Server Search</label>
+                        <input type="text" name="payroll_q" class="form-control form-control-sm" value="{{ payroll_q or '' }}" placeholder="Search employees...">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small fw-bold text-muted mb-1">Rows</label>
+                        <select name="payroll_per_page" class="form-select form-select-sm">
+                            {% for n in [25, 50, 100] %}<option value="{{ n }}" {% if employee_pagination and employee_pagination.per_page == n %}selected{% endif %}>{{ n }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-sm btn-success fw-bold" type="submit">Search</button>
+                        <a href="/payroll" class="btn btn-sm btn-outline-secondary">Reset</a>
+                        <span class="small text-muted ms-2">Showing {{ employee_pagination.start }}-{{ employee_pagination.end }} of {{ employee_pagination.total }}</span>
+                    </div>
+                </form>
+                <table class="table table-hover align-middle" id="payrollTable">
+                    <thead class="table-light">
+                        <tr>
+                            <th style="width: 40px;"><input class="form-check-input border-secondary" type="checkbox" id="selectAll" onchange="toggleAll(this)"></th>
+                            <th>Name</th><th>Status</th><th>Leave Bal.</th><th>Sick Leave</th><th>Hours (Month)</th><th>Alert</th><th>Process</th>
+                        </tr>
+                        <tr class="search-row">
+                            <th></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="1" placeholder="Search Name..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="2" placeholder="Search Status..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="3" placeholder="Search Bal..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="4" placeholder="Search Sick..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="5" placeholder="Search Hours..."></th>
+                            <th></th> 
+                            <th></th> 
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for emp in employees %}
+                        <tr class="payroll-row {% if emp.status == 'Resigned' %}table-warning{% elif emp.status == 'Terminated' %}table-danger{% elif emp.status == 'On Leave' %}table-info{% endif %}">
+                            <td><input class="form-check-input border-secondary emp-cb" type="checkbox" value="{{ emp.id }}" data-name="{{ emp.name }}" data-status="{{ emp.status or 'Active' }}" title="{{ emp.status or 'Active' }}" onchange="updateSelectionCount()"></td>
+                            <td><span class="emp-link" onclick="openProfileModal({{ emp | tojson | safe }})">{{ emp.name }}</span></td>
+                            <td>
+                                {% if emp.status == 'Active' %}<span class="badge bg-success">Active</span>
+                                {% elif emp.status == 'Resigned' %}<span class="badge bg-warning text-dark">Resigned</span>
+                                {% elif emp.status == 'On Leave' %}<span class="badge bg-info text-dark">On Leave</span>
+                                {% elif emp.status == 'Terminated' %}<span class="badge bg-danger">Terminated</span>
+                                {% else %}<span class="badge bg-secondary">{{ emp.status or 'Unknown' }}</span>{% endif %}
+                            </td>
+                            <td>{{ emp.leave_balance }} Days</td>
+                            <td>{{ emp.sick_leave_balance }}{% if emp.sick_leave_balance != 'N/A' %} Days{% endif %}</td>
+                            <td><strong>{{ emp.hours_worked }} hrs</strong></td>
+                            <td>
+                                {% if emp.emp_type == 'Contract <25 Hrs' %}
+                                    {% if emp.hours_worked < 11 %}<span class="status-light" style="background-color: #198754;" title="Safe"></span>
+                                    {% elif emp.hours_worked > 13 %}<span class="status-light" style="background-color: #dc3545;" title="Over Threshold"></span>
+                                    {% else %}<span class="status-light" style="background-color: #fd7e14;" title="Warning"></span>{% endif %}
+                                {% else %}<span class="status-light" style="background-color: #198754;" title="Standard"></span>{% endif %}
+                            </td>
+                            <td>
+                                <div class="dropdown">
+                                    <button class="btn btn-sm btn-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">Actions</button>
+                                    <ul class="dropdown-menu">
+                                        <li><a class="dropdown-item" href="#" onclick='openPayslipModal({{ emp.id }}, {{ emp.name | tojson }}, {{ (emp.status or "Active") | tojson }})'>📄 Process Payslip</a></li>
+                                        <li><a class="dropdown-item" href="#" onclick='openLeaveModal({{ emp.id }}, {{ emp.name | tojson }}, {{ (emp.status or "Active") | tojson }})'>🏖️ Log Leave</a></li>
+                                        <li><hr class="dropdown-divider"></li>
+                                        <li><a class="dropdown-item text-primary" href="#" onclick="openReportModal({{ emp.id }}, '{{ emp.name }}')">📊 Run Activity Report</a></li>
+                                        <li><a class="dropdown-item text-success" href="#" onclick="openIrp5Modal({{ emp.id }}, '{{ emp.name }}')">📜 Generate IRP5</a></li>
+                                    </ul>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <div class="d-flex justify-content-between align-items-center mt-2 mb-3">
+                    <div class="small text-muted">Page {{ employee_pagination.page }} of {{ employee_pagination.pages }}</div>
+                    <div>
+                        {% if employee_pagination.has_prev %}<a class="btn btn-sm btn-outline-dark" href="/payroll?payroll_q={{ payroll_q|urlencode }}&payroll_per_page={{ employee_pagination.per_page }}&payroll_page={{ employee_pagination.prev_page }}">Previous</a>{% endif %}
+                        {% if employee_pagination.has_next %}<a class="btn btn-sm btn-outline-dark ms-1" href="/payroll?payroll_q={{ payroll_q|urlencode }}&payroll_per_page={{ employee_pagination.per_page }}&payroll_page={{ employee_pagination.next_page }}">Next</a>{% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 3: INTERVIEWS -->
+            <div class="tab-pane fade" id="tab-interviews" role="tabpanel">
+                <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
+                    <h5 class="mb-0 text-secondary">Candidate Pipeline</h5>
+                    <button class="btn btn-sm btn-primary fw-bold" onclick="openInterviewModal()">+ Log New Interview</button>
+                </div>
+                <table class="table table-hover align-middle" id="interviewsTable">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Candidate Name</th><th>Interview Date/Time</th><th>Phone</th><th>Score</th><th>Decision</th><th>Actions</th>
+                        </tr>
+                        <tr class="search-row">
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="interviewsTable" data-col="0" placeholder="Search Name..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="interviewsTable" data-col="1" placeholder="Search Date..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="interviewsTable" data-col="2" placeholder="Search Phone..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="interviewsTable" data-col="3" placeholder="Search Score..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="interviewsTable" data-col="4" placeholder="Search Decision..."></th>
+                            <th></th> 
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for iv in interviews %}
+                        <tr class="interview-row">
+                            <td><strong>{{ iv.name }}</strong></td>
+                            <td>{{ fmt_date(iv.interview_datetime) if iv.interview_datetime else 'N/A' }}</td>
+                            <td>{{ iv.phone or 'N/A' }}</td>
+                            <td><strong>{{ iv.total_score }} / {{ interview_scorecard_max_score or 0 }}</strong></td>
+                            <td>
+                                {% if iv.final_decision == 'Approved for placement' %}<span class="badge bg-success">Approved</span>
+                                {% elif iv.final_decision == 'Approved with conditions' %}<span class="badge bg-warning text-dark">Conditional</span>
+                                {% elif iv.final_decision == 'Not approved' %}<span class="badge bg-danger">Not Approved</span>
+                                {% else %}<span class="badge bg-secondary">Pending</span>{% endif %}
+                            </td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-primary" onclick='editInterview({{ iv | tojson | safe }})'>📝 Scorecard</button>
+                                <button class="btn btn-sm btn-outline-danger ms-1" onclick='deleteInterview({{ iv.id }})'>🗑️</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+        </div>
+    </div>
+
+
+    <!-- ============================================== -->
+    <!-- MODALS -->
+    <!-- ============================================== -->
+
+    <!-- Export Employee Data Modal -->
+    <div class="modal fade" id="exportModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">Export Employee Details</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <p class="small text-muted mb-3">Select the fields to include in the CSV export.</p>
+                    <div class="row bg-white p-3 border rounded shadow-sm">
+                        <div class="col-md-6">
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="emp_number" checked> <label class="form-check-label small">Emp No.</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="name" checked> <label class="form-check-label small fw-bold text-primary">Full Name</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="job_title" checked> <label class="form-check-label small">Job Title</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="emp_type" checked> <label class="form-check-label small">Employee Type</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="status" checked> <label class="form-check-label small">Status</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="start_date"> <label class="form-check-label small">Start Date</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="inactive_date"> <label class="form-check-label small">Inactive Date / Last Working Day</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="date_of_birth"> <label class="form-check-label small">Date of Birth</label></div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="id_passport"> <label class="form-check-label small">ID/Passport</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="phone"> <label class="form-check-label small">Phone</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="email"> <label class="form-check-label small">Email</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="tax_number"> <label class="form-check-label small">Tax Number</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="bank_name"> <label class="form-check-label small">Bank Name</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="account_holder"> <label class="form-check-label small">Account Holder</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="account_number"> <label class="form-check-label small">Account Number</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="branch_code"> <label class="form-check-label small">Branch Code</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="gross_salary"> <label class="form-check-label small">Base Salary (R)</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="workday_hours"> <label class="form-check-label small">Working Hours per Day</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="overtime_pay_treatment"> <label class="form-check-label small">Overtime PAYE Treatment</label></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-success fw-bold" onclick="exportEmployeeData()">Download CSV</button></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- BULK FINALIZE PAYROLL MODAL -->
+    <div class="modal fade" id="bulkFinalizeModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title fw-bold">Bulk Finalize Payroll</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <p class="small text-muted mb-3">This will calculate and save payslips to the Ledger for all selected employees. It does not email payslips or generate PDFs.</p>
+                    <div class="mb-3">
+                        <label class="small fw-bold">Target Payroll Date (YYYY-MM-DD)</label>
+                        <input type="date" class="form-control border-primary" id="bulkFinalizeDate">
+                        <div class="small text-muted mt-1">The selected date determines the payroll month and SARS tax year.</div>
+                    </div>
+                    <div id="bulkFinalizeStatus" class="small bg-white border rounded p-3 shadow-sm" style="min-height: 80px; white-space: pre-line;">Ready to finalize selected employees.</div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary fw-bold" id="btnRunBulkFinalize" onclick="processBulkFinalizePayroll()">Finalize Selected Payroll</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- BULK PAYSLIPS MODAL -->
+    <div class="modal fade" id="bulkPayslipModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-info text-dark">
+                    <h5 class="modal-title fw-bold">Process Bulk Payslips</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <p class="small text-muted">This will generate and optionally email payslips for all selected employees. Finalised ledger payslips are used where available. If no ledger payslip exists, a Draft Payslip is generated and clearly marked. This does not save anything to the ledger.</p>
+                    <div class="mb-3">
+                        <label class="small fw-bold">Target Payroll Date (YYYY-MM-DD)</label>
+                        <input type="date" class="form-control border-info" id="bulkPsDate">
+                    </div>
+                    <div class="form-check mb-4 bg-white p-3 border rounded shadow-sm">
+                        <input class="form-check-input border-info ms-1" type="checkbox" id="bulkPsEmail" checked>
+                        <label class="form-check-label ms-2 fw-bold text-dark" for="bulkPsEmail">Email Payslips to Employees</label>
+                        <div class="small text-muted ms-2 mt-1">Requires valid email addresses in profiles and configured SMTP settings.</div>
+                    </div>
+                    <div id="bulkPsStatus" class="fw-bold text-center text-primary fs-5 mb-2"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-info fw-bold" id="btnRunBulkPs" onclick="processBulkPayslips()">Generate Bulk Payslips</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- BULK IRP5 MODAL -->
+    <div class="modal fade" id="bulkIrp5Modal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title fw-bold">Generate Bulk IRP5s</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <p class="small text-muted">This will automatically compile and download individual IRP5 PDF documents for all selected employees based on their Ledger history.</p>
+                    <div class="mb-4">
+                        <label class="small fw-bold">Target Tax Year End (e.g. 2026)</label>
+                        <input type="number" class="form-control border-success" id="bulkIrp5Year" value="2026">
+                    </div>
+                    <div id="bulkIrp5Status" class="fw-bold text-center text-success fs-5 mb-2"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-success fw-bold text-white" id="btnRunBulkIrp5" onclick="processBulkIrp5()">Download Selected PDFs</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Payroll Bank Export Modal -->
+    <div class="modal fade" id="bankExportModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Payroll Bank Payment Export</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <p class="small text-muted">Exports payments from saved payslips in the Ledger. Bank files can differ by banking platform, so use the template matching your business banking import screen.</p>
+                    <div class="mb-3">
+                        <label class="small fw-bold">Payroll Month</label>
+                        <input type="month" class="form-control border-success" id="bankExportMonth">
+                    </div>
+                    <div class="mb-3">
+                        <label class="small fw-bold">Bank Template</label>
+                        <select class="form-select" id="bankExportTemplate">
+                            <option value="generic_csv">Generic CSV</option>
+                            <option value="fnb_enterprise_csv">FNB Enterprise CSV</option>
+                            <option value="absa_bio_csv">ABSA BIO CSV</option>
+                            <option value="standard_bank_bol_csv">Standard Bank Business Online CSV</option>
+                            <option value="nedbank_acb_csv">Nedbank / ACB-style CSV</option>
+                        </select>
+                    </div>
+                    <div id="bankExportStatus" class="small fw-bold text-danger"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-dark fw-bold" onclick="downloadPayrollBankFile()">Download Bank File</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Employee Profile Modal -->
+    <div class="modal fade" id="profileModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white"><h5 class="modal-title" id="profileModalTitle">Employee Profile</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <form id="employeeForm">
+                        <input type="hidden" id="empId" name="id">
+                        <div class="row">
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Full Name</label><input type="text" class="form-control" id="empName" name="name" required></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Job Title</label><input type="text" class="form-control" id="empJobTitle" name="job_title" required></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Status</label><select class="form-select" id="empStatus" name="status" required><option>Active</option><option>On Leave</option><option>Resigned</option><option>Terminated</option></select></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Contract Type</label><select class="form-select" id="empType" name="emp_type" required><option>Full-time (5 Days)</option><option>Full-time (6 Days)</option><option>Shift Worker</option><option>Contract >25 Hrs</option><option>Contract <25 Hrs</option></select></div>
+                            
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Start Date</label><input type="date" class="form-control" id="empStartDate" name="start_date" required></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Inactive Date / Last Working Day</label><input type="date" class="form-control" id="empInactiveDate" name="inactive_date"><div class="form-text small">Leave blank while active.</div></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Date of Birth</label><input type="date" class="form-control" id="empDob" name="date_of_birth" required></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">ID / Passport Number</label><input type="text" class="form-control" id="empIdPassport" name="id_passport" required></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold text-success">Monthly Base Salary / Rate (R)</label><input type="number" class="form-control border-success" id="empGross" name="gross_salary" step="0.01" required></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold text-success">Working Hours per Day</label><input type="number" class="form-control border-success" id="empWorkdayHours" name="workday_hours" step="0.25" min="0.25" value="7" required><div class="form-text small">Excludes statutory breaks.</div></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold text-success">Overtime PAYE Treatment</label><select class="form-select border-success" id="empOvertimePayTreatment" name="overtime_pay_treatment" required><option value="">Select...</option><option value="regular">Regular recurring overtime</option><option value="irregular">Irregular / once-off overtime</option></select><div class="form-text small">Used only for PAYE calculation.</div></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Phone Number</label><input type="text" class="form-control" id="empPhone" name="phone" required></div>
+                            
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Email Address</label><input type="email" class="form-control" id="empEmail" name="email"></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Emergency Contact</label><input type="text" class="form-control" id="empEmergency" name="emergency_contact" placeholder="Name & Phone" required></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Tax Number</label><input type="text" class="form-control" id="empTaxNum" name="tax_number"></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold text-primary">UIF Contributor</label><select class="form-select border-primary" id="empUifContributor" name="uif_contributor"><option value="Yes">Yes</option><option value="No">No</option></select></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold text-primary">Non-Contributor Reason</label><select class="form-select border-primary" id="empUifNonContributorReason" name="uif_non_contributor_reason"><option value="">N/A</option><option value="1">1 - Temporary employee (&lt;24 hrs/month)</option><option value="2">2 - Commission only</option><option value="3">3 - No income paid for period</option></select></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold text-primary">Termination Code</label><select class="form-select border-primary" id="empUifTerminationCode" name="uif_termination_code"><option value="">N/A</option><option value="2">2 - Deceased</option><option value="3">3 - Retired</option><option value="4">4 - Dismissed</option><option value="5">5 - Contract Expired</option><option value="6">6 - Resigned</option><option value="7">7 - Constructive Dismissal</option><option value="8">8 - Insolvency/Liquidation</option><option value="9">9 - Maternity/Adoption</option><option value="10">10 - Illness/Medically Boarded</option><option value="11">11 - Retrenched/Staff Reduction</option><option value="12">12 - Transfer to another Branch</option><option value="13">13 - Absconded</option><option value="14">14 - Business Closed</option><option value="15">15 - Death of Domestic Employer</option><option value="16">16 - Voluntary Severance Package</option><option value="17">17 - Reduced Work Time</option><option value="18">18 - Commissioning Parental</option><option value="19">19 - Parental Leave</option></select></div>
+                            <div class="col-12 mt-2"><h6 class="border-bottom pb-2 text-secondary fw-bold">Bank Payment Details</h6></div>
+                            <div class="col-md-4 mb-3"><label class="small fw-bold">Bank Name</label><input type="text" class="form-control" id="empBankName" name="bank_name" placeholder="e.g. FNB"></div>
+                            <div class="col-md-4 mb-3"><label class="small fw-bold">Account Holder</label><input type="text" class="form-control" id="empAccountHolder" name="account_holder" placeholder="Name on account"></div>
+                            <div class="col-md-4 mb-3"><label class="small fw-bold">Account Number</label><input type="text" class="form-control" id="empAccountNumber" name="account_number" inputmode="numeric"></div>
+                            <div class="col-md-4 mb-3"><label class="small fw-bold">Branch Code</label><input type="text" class="form-control" id="empBranchCode" name="branch_code" inputmode="numeric"></div>
+                            <div class="col-md-4 mb-3"><label class="small fw-bold">Account Type</label><select class="form-select" id="empAccountType" name="account_type"><option value="">Select...</option><option>Current</option><option>Savings</option><option>Transmission</option><option>Credit</option></select></div>
+                            <div class="col-md-4 mb-3"><label class="small fw-bold">Payment Reference</label><input type="text" class="form-control" id="empPaymentReference" name="payment_reference" placeholder="e.g. Salary"></div>
+                            
+                            <div class="col-md-12 mb-3"><label class="small fw-bold">Physical Address</label><input type="text" class="form-control" id="empAddress" name="address" required></div>
+                            
+                            <div class="col-md-6 mb-3">
+                                <label class="small fw-bold text-info">Additional Non-Statutory Leave (Days/Year)</label>
+                                <input type="number" step="0.5" class="form-control border-info" id="empAddLeave" name="additional_leave" placeholder="e.g. 5">
+                                <div class="form-text small">Extra leave given by company on top of the legal BCEA minimum.</div>
+                            </div>
+
+                            <!-- Document Uploads -->
+                            <div class="col-12 mt-3"><h6 class="border-bottom pb-2 text-secondary fw-bold">Digital Document File</h6></div>
+                            <div class="col-md-4 mb-3">
+                                <label class="small fw-bold">Upload CV</label>
+                                <input type="file" class="form-control form-control-sm" name="cv_file">
+                                <small id="currCv" class="text-primary d-block mt-1"></small>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="small fw-bold">Upload ID/Passport Copy</label>
+                                <input type="file" class="form-control form-control-sm" id="empIdFile" name="id_file">
+                                <small id="currId" class="text-primary d-block mt-1"></small>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="small fw-bold">Upload Signed Contract</label>
+                                <input type="file" class="form-control form-control-sm" id="empContractFile" name="contract_file">
+                                <small id="currContract" class="text-primary d-block mt-1"></small>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-dark" onclick="saveProfile()">Save Employee</button></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- INTERVIEW MODAL -->
+    <div class="modal fade" id="interviewModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white"><h5 class="modal-title" id="interviewModalTitle">Candidate Interview & Scorecard</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <form id="interviewForm">
+                        <input type="hidden" id="ivId" name="id">
+                        <input type="hidden" id="ivScoreData" name="scorecard_json">
+                        
+                        <div class="row mb-4">
+                            <div class="col-md-3 mb-2"><label class="small fw-bold">Candidate Name</label><input type="text" class="form-control form-control-sm border-primary" id="ivName" name="name" required></div>
+                            <div class="col-md-3 mb-2"><label class="small fw-bold">Interview Date & Time</label><input type="datetime-local" class="form-control form-control-sm border-primary" id="ivDatetime" name="interview_datetime"></div>
+                            <div class="col-md-3 mb-2"><label class="small fw-bold">Phone Number</label><input type="text" class="form-control form-control-sm" id="ivPhone" name="phone"></div>
+                            <div class="col-md-3 mb-2"><label class="small fw-bold">Email Address</label><input type="email" class="form-control form-control-sm" id="ivEmail" name="email"></div>
+                            <div class="col-md-4 mb-2"><label class="small fw-bold">ID / Passport Number</label><input type="text" class="form-control form-control-sm" id="ivIdPassport" name="id_passport"></div>
+                            <div class="col-md-8 mb-2"><label class="small fw-bold">Residential Address</label><input type="text" class="form-control form-control-sm" id="ivAddress" name="address"></div>
+                            
+                            <div class="col-md-6 mb-2 mt-2">
+                                <label class="small fw-bold">Upload Candidate CV</label>
+                                <input type="file" class="form-control form-control-sm" name="cv_file">
+                                <small id="ivCurrCv" class="text-primary d-block mt-1"></small>
+                            </div>
+                            <div class="col-md-6 mb-2 mt-2">
+                                <label class="small fw-bold">Upload Candidate ID Document</label>
+                                <input type="file" class="form-control form-control-sm" id="empIdFile" name="id_file">
+                                <small id="ivCurrId" class="text-primary d-block mt-1"></small>
+                            </div>
+                        </div>
+
+                        <h6 class="bg-dark text-white p-2 rounded fw-bold text-center">EVALUATION SCORECARD</h6>
+                        <div class="row">
+                            {% for block in interview_scorecard %}
+                            <div class="col-md-6">
+                                <div class="score-box">
+                                    {% set block_total = block.questions | sum(attribute='max_score') %}
+                                    <h6 class="text-primary">{{ loop.index }}. {{ block.block_name }} (0-{{ block_total }})</h6>
+                                    {% for q in block.questions %}
+                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                        <span class="small">{{ q.question_text }}</span>
+                                        <input type="number" class="form-control form-control-sm score-input sc-val" data-cat="{{ q.question_key }}" max="{{ q.max_score }}" min="0">
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            {% else %}
+                            <div class="col-12">
+                                <div class="alert alert-warning small mb-0">No evaluation scorecard has been configured for this tenant. Configure it in Hub → Tenants → Setup Wizard.</div>
+                            </div>
+                            {% endfor %}
+                        </div>
+
+                        <div class="row align-items-end mt-3 border-top pt-3">
+                            <div class="col-md-4 text-center">
+                                <label class="small text-muted mb-0">Total Computed Score</label>
+                                <h3 class="mb-0 text-primary"><span id="ivTotalDisplay">0</span> / {{ interview_scorecard_max_score or 0 }}</h3>
+                                <input type="hidden" id="ivTotalInput" name="total_score" value="0">
+                            </div>
+                            <div class="col-md-8">
+                                <label class="small fw-bold">Final Hiring Decision</label>
+                                <select class="form-select border-dark" id="ivDecision" name="final_decision">
+                                    <option value="Pending">Pending Review</option>
+                                    <option value="Approved for placement">Approved for placement</option>
+                                    <option value="Approved with conditions">Approved with conditions</option>
+                                    <option value="Not approved">Not approved</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="mt-3">
+                            <label class="small fw-bold">Interview Notes</label>
+                            <textarea class="form-control form-control-sm" id="ivInterviewNotes" name="interview_notes" rows="3" placeholder="Insert notes from the interview"></textarea>
+                        </div>
+
+                    </form>
+                </div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-primary fw-bold" onclick="saveInterview()">Save Candidate</button></div>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- INDIVIDUAL PROCESS PAYSLIP MODAL -->
+    <div class="modal fade" id="payslipModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">Process Individual Payslip</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <input type="hidden" id="psEmpId">
+                    <div class="row align-items-end mb-3">
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-muted">Employee</label>
+                            <input type="text" class="form-control fw-bold" id="psEmpName" readonly>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="small fw-bold text-muted">Status</label>
+                            <div id="psEmpStatusBadge" class="pt-2"></div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-success">Target Payroll Date</label>
+                            <input type="date" class="form-control border-success" id="psDate" onchange="runPayslipEngine()">
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-success fw-bold w-100" id="btnRunEngine" onclick="runPayslipEngine()">Calculate</button>
+                        </div>
+                    </div>
+                    <div class="row align-items-end mb-3">
+                        <div class="col-md-6">
+                            <label class="small fw-bold text-muted">Reimbursable Expenses (Non-taxable)</label>
+                            <input type="number" step="0.01" min="0" class="form-control" id="psReimbursableExpenses" value="0" onchange="if(document.getElementById('psDate').value) runPayslipEngine()">
+                            <small class="text-muted">Not Included in PAYE and UIF calculation.</small>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="small fw-bold text-muted">Bonus for this Month</label>
+                            <input type="number" step="0.01" min="0" class="form-control" id="psBonus" value="0" onchange="if(document.getElementById('psDate').value) runPayslipEngine()">
+                            <small class="text-muted">Included in PAYE and UIF calculation.</small>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="small fw-bold text-muted">Loan Repayment</label>
+                            <input type="number" step="0.01" min="0" class="form-control" id="psLoanRepayment" value="0" onchange="if(document.getElementById('psDate').value) runPayslipEngine()">
+                            <small class="text-muted">Deducted after PAYE and UIF calculation.</small>
+                        </div>
+                    </div>
+                    
+                    <!-- NEW: DYNAMIC PAYSLIP PREVIEW AREA -->
+                    <div id="payslipPreviewArea" style="display:none;" class="mt-4 border-top pt-4">
+                        <div class="d-flex justify-content-end mb-3 gap-2">
+                            <button class="btn btn-primary fw-bold shadow-sm" id="btnSaveLedger" onclick="savePayslipToLedger()">💾 Save to Ledger & Lock</button>
+                            <button class="btn btn-warning fw-bold shadow-sm" id="btnAdjustmentPayslip" style="display:none;" onclick="openAdjustmentPayslipModal()">➕ Create Adjustment Payslip</button>
+                            <button class="btn btn-info text-white fw-bold shadow-sm" id="btnEmailSingle" onclick="emailSinglePayslip()">📧 Email Draft</button>
+                            <button class="btn btn-dark fw-bold shadow-sm" id="btnViewPayslip" onclick="downloadSinglePayslip()">⬇️ Download PDF</button>
+                        </div>
+                        
+                        <div id="bulkPayslipContent" class="payslip-container shadow-sm border border-secondary rounded">
+                            <div class="row border-bottom pb-3 mb-4">
+                                <div class="col-7">
+                                    <img id="bpLogo" src="" style="max-height: 60px; display: none; margin-bottom: 10px;">
+                                    <h3 class="fw-bold mb-1" id="bpCompName"></h3>
+                                    <small class="text-muted d-block" id="bpCompReg"></small>
+                                    <small class="text-muted d-block" id="bpCompAddr"></small>
+                                </div>
+                                <div class="col-5 text-end">
+                                    <h3 id="bpDocTitle" class="text-danger fw-bold">DRAFT PAYSLIP</h3>
+                                    <br><strong>Date:</strong> <span id="bpDate"></span>
+                                    <br><strong>Employee:</strong> <span id="bpName"></span> (<span id="bpEmpNum"></span>)
+                                    <br><strong>ID:</strong> <span id="bpIdNum"></span>
+                                </div>
+                            </div>
+                            <table class="table table-bordered">
+                                <thead><tr class="bg-light"><th>Description</th><th class="amount">Earnings</th><th class="amount">Deductions</th></tr></thead>
+                                <tbody>
+                                    <tr><td>Calculated Gross <span id="bpDaysWorked" class="small text-muted fst-italic"></span> <span class="sars-code">Code: 3601</span></td><td class="amount" id="bpGross"></td><td></td></tr>
+                                    <tr><td>Overtime / Double Rate <span id="bpSundaysWorked" class="small text-muted fst-italic"></span> <span class="sars-code">Code: 3605</span></td><td class="amount" id="bpOvertime"></td><td></td></tr>
+                                    <tr id="bpReimbursableExpensesRow" style="display:none;"><td>Reimbursable Expenses (Non-taxable)</td><td class="amount text-success" id="bpReimbursableExpenses"></td><td></td></tr>
+                                    <tr id="bpBonusRow" style="display:none;"><td>Bonus <span class="sars-code">Code: 3605/3601 as applicable</span></td><td class="amount" id="bpBonus"></td><td></td></tr>
+                                    <tr id="bpTransportRow" style="display:none;"><td>Transport Reimbursement (Tax Free) <span class="sars-code">Code: 3702</span></td><td class="amount text-success" id="bpTransport"></td><td></td></tr>
+                                    <tr><td>PAYE Tax <span class="sars-code">Code: 4102</span></td><td></td><td class="amount" id="bpPaye"></td></tr>
+                                    <tr><td>UIF (Employee 1%) <span class="sars-code">Code: 4141</span></td><td></td><td class="amount" id="bpUif"></td></tr>
+                                    <tr id="bpLoanRepaymentRow" style="display:none;"><td>Loan Repayment</td><td></td><td class="amount" id="bpLoanRepayment"></td></tr>
+                                    <tr class="text-muted" style="font-style: italic;"><td>UIF (Employer 1%)</td><td class="amount" id="bpUifEr"></td><td></td></tr>
+                                    <tr class="totals-row border-dark"><td>NET PAY</td><td colspan="2" class="text-end text-success fs-5" id="bpNet"></td></tr>
+                                </tbody>
+                            </table>
+                            <div class="mt-4 border p-3 bg-light rounded">
+                                <h6 class="text-primary border-bottom pb-1 mb-2">Statutory Leave Balances</h6>
+                                <small>Annual Leave Balance: <strong id="bpLeave"></strong> Days</small><br>
+                                <small>Sick Leave Balance: <strong id="bpSickLeave"></strong> <span id="bpSickLeaveExt"></span></small><br>
+                                <small>Family Responsibility Leave: <strong id="bpFamilyLeave"></strong> <span id="bpFamilyLeaveExt"></span></small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Close Window</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Leave Modal -->
+    <div class="modal fade" id="editLeaveModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-warning text-dark">
+                    <h5 class="modal-title">Edit Leave Record</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <input type="hidden" id="editLeaveRecordId">
+                    <label class="form-label fw-bold small">Type of Leave</label>
+                    <select id="editLeaveType" class="form-select border-warning mb-3">
+                        <option value="Annual Leave">Annual Leave</option>
+                        <option value="Sick Leave">Sick Leave</option>
+                        <option value="Family Responsibility">Family Responsibility</option>
+                        <option value="Unpaid Leave">Unpaid Leave</option>
+                        <option value="Maternity Leave">Maternity Leave</option>
+                    </select>
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <label class="small fw-bold">Date Taken</label>
+                            <input type="date" id="editLeaveDate" class="form-control border-warning">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label class="small fw-bold">Number of Days</label>
+                            <input type="number" step="0.5" id="editLeaveDays" class="form-control border-warning">
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold small">Update Document</label>
+                        <input type="file" id="editLeaveDocUpload" class="form-control form-control-sm" accept=".pdf, image/jpeg, image/jpg">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-warning fw-bold text-dark" onclick="submitEditLeave()">Save Changes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leave Modal -->
+    <div class="modal fade" id="leaveModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-warning text-dark"><h5 class="modal-title">Log Leave / Absence</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <form id="leaveForm">
+                        <input type="hidden" id="leaveEmpId" name="employee_id">
+                        <div class="mb-3"><label class="small fw-bold">Employee</label><input type="text" class="form-control fw-bold" id="leaveEmpName" readonly><div id="leaveEmpStatusBadge" class="mt-2"></div></div>
+                        <div class="row">
+                            <div class="col-6 mb-3"><label class="small fw-bold">Date Taken</label><input type="date" class="form-control border-warning" id="leaveDate" name="date" required></div>
+                            <div class="col-6 mb-3"><label class="small fw-bold">Number of Days</label><input type="number" step="0.5" class="form-control border-warning" id="leaveDays" name="days" required placeholder="e.g. 1 or 0.5"></div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="small fw-bold">Leave Type</label>
+                            <select class="form-select border-warning" id="leaveType" name="leave_type">
+                                <option>Annual Leave</option>
+                                <option>Sick Leave</option>
+                                <option>Family Responsibility</option>
+                                <option>Unpaid Leave</option>
+                                <option>Maternity Leave</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="small fw-bold">Upload Supporting Document (Optional)</label>
+                            <input type="file" class="form-control form-control-sm" id="leaveDoc" name="leave_doc" accept=".pdf, image/*">
+                            <div class="form-text small">e.g. Doctor's Note for Sick Leave.</div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-warning text-dark fw-bold" onclick="saveLeave()">Submit Leave</button></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- IRP5 Modal -->
+    <div class="modal fade" id="irp5Modal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white"><h5 class="modal-title">Generate IRP5</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <input type="hidden" id="irp5EmpId">
+                    <div class="mb-3"><label class="small fw-bold">Employee</label><input type="text" class="form-control fw-bold" id="irp5EmpName" readonly></div>
+                    <div class="mb-3">
+                        <label class="small fw-bold text-primary">Tax Year End (e.g. 2026 for Mar 2025 - Feb 2026)</label>
+                        <input type="number" class="form-control border-primary" id="irp5Year" value="2026">
+                    </div>
+                </div>
+                <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary fw-bold" onclick="generateIrp5()">Generate Document</button></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- UI-19 Modal -->
+    <div class="modal fade" id="ui19Modal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white"><h5 class="modal-title">Generate UI-19 Declaration</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <div class="alert alert-info small mb-3">The UI-19 PDF is generated only for the employees selected with the payroll checkboxes. It uses saved payroll ledger records, employee profiles, and booking hours for the selected month.</div>
+                    <div class="row bg-white border rounded p-3 mb-3">
+                        <div class="col-md-4 mb-3"><label class="small fw-bold">Declaration Month</label><input type="month" class="form-control border-dark" id="ui19Month"></div>
+                        <div class="col-md-4 mb-3"><label class="small fw-bold">UIF Employer Reference No</label><input type="text" class="form-control" id="ui19_uif_ref"></div>
+                        <div class="col-md-4 mb-3"><label class="small fw-bold">Branch No</label><input type="text" class="form-control" id="ui19_branch_no"></div>
+                        <div class="col-md-4 mb-3"><label class="small fw-bold">PAYE Reference No</label><input type="text" class="form-control" id="ui19_paye_ref"></div>
+                        <div class="col-md-8 mb-3"><label class="small fw-bold">Trading Name</label><input type="text" class="form-control" id="ui19_trading_name"></div>
+                        <div class="col-md-6 mb-3"><label class="small fw-bold">Physical Address</label><textarea class="form-control" id="ui19_physical_address" rows="2"></textarea></div>
+                        <div class="col-md-6 mb-3"><label class="small fw-bold">Employee Work Address</label><textarea class="form-control" id="ui19_work_address" rows="2"></textarea></div>
+                        <div class="col-md-6 mb-3"><label class="small fw-bold">Postal Address</label><textarea class="form-control" id="ui19_postal_address" rows="2"></textarea></div>
+                        <div class="col-md-6 mb-3">
+                            <div class="row g-2">
+                                <div class="col-md-6"><label class="small fw-bold">Email</label><input type="email" class="form-control" id="ui19_email"></div>
+                                <div class="col-md-6"><label class="small fw-bold">Phone</label><input type="text" class="form-control" id="ui19_phone"></div>
+                                <div class="col-md-6"><label class="small fw-bold">Fax</label><input type="text" class="form-control" id="ui19_fax"></div>
+                                <div class="col-md-6"><label class="small fw-bold">Authorised Person</label><input type="text" class="form-control" id="ui19_authorised_person"></div>
+                                <div class="col-md-12"><label class="small fw-bold">Authorised Person ID No</label><input type="text" class="form-control" id="ui19_authorised_person_id"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="ui19Status" class="small fw-bold text-danger"></div>
+                </div>
+                <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-dark fw-bold" onclick="downloadUi19()">Download UI-19 PDF</button></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="ui19PdfRenderArea" style="position: absolute; left: 0; top: 0; width: 1123px; background: white; z-index: -9999; pointer-events: none;"></div>
+
+    <!-- EMP201 Modal -->
+    <div class="modal fade" id="emp201Modal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white"><h5 class="modal-title">EMP201 Monthly Report</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <div class="mb-3">
+                        <label class="small fw-bold">Target Month</label>
+                        <div class="d-flex">
+                            <input type="month" class="form-control border-dark me-2" id="emp201Month">
+                            <button class="btn btn-dark fw-bold" onclick="generateEmp201()">Run</button>
+                        </div>
+                    </div>
+                    <div id="emp201Result" style="display:none;" class="bg-white p-3 rounded border">
+                        <h6 class="text-center text-primary mb-3 fw-bold border-bottom pb-2">EMP201 Summary <span class="badge bg-secondary">Internal Use</span></h6>
+                        <table class="table table-borderless table-sm fw-bold">
+                            <tr><td class="text-muted">Total Gross Remuneration:</td><td class="text-end" id="e201Gross"></td></tr>
+                            <tr><td class="text-muted">PAYE Withheld:</td><td class="text-end text-danger" id="e201Paye"></td></tr>
+                            <tr><td class="text-muted">UIF Total (Emp + Er):</td><td class="text-end text-danger" id="e201Uif"></td></tr>
+                            <tr class="border-top border-dark fs-5 text-dark"><td class="pt-2">TOTAL PAYABLE TO SARS:</td><td class="text-end pt-2" id="e201Total"></td></tr>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Report Modal -->
+    <div class="modal fade" id="reportModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">Employee Activity Report</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <input type="hidden" id="reportEmpId">
+                    <input type="hidden" id="reportEmpName">
+                    <h5 class="mb-4">Reporting for: <strong id="reportEmpNameDisplay" class="text-primary"></strong></h5>
+                    
+                    <div class="row mb-4">
+                        <div class="col-md-3">
+                            <label class="small fw-bold">Report Type</label>
+                            <select id="reportFilter" class="form-select border-primary">
+                                <option value="all">Full Report</option>
+                                <option value="leave">Leave Only</option>
+                                <option value="bookings">Bookings Only</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="small fw-bold">Start Date</label>
+                            <input type="date" id="reportStart" class="form-control border-primary">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="small fw-bold">End Date</label>
+                            <input type="date" id="reportEnd" class="form-control border-primary">
+                        </div>
+                        <div class="col-md-3 d-flex align-items-end">
+                            <button class="btn btn-primary w-100 fw-bold" onclick="generateReport()">Run</button>
+                        </div>
+                    </div>
+                    
+                    <div id="reportPrintArea">
+                        <div id="reportResults" style="display: none;">
+                            <div class="row">
+                                <div class="col-md-6 border-end" id="bookingsCol">
+                                    <div class="card border-primary mb-3">
+                                        <div class="card-body text-center">
+                                            <h6 class="text-primary text-uppercase fw-bold">Total Hours Worked</h6>
+                                            <h2 id="repTotalHours" class="mb-0 text-primary">0 hrs</h2>
+                                            <small class="text-muted">Total Shifts: <span id="repTotalBookings">0</span></small>
+                                        </div>
+                                    </div>
+                                    <h6 class="text-primary border-bottom pb-2 fw-bold">Dates Worked</h6>
+                                    <ul class="list-group list-group-sm shadow-sm" id="repWorkedList" style="max-height: 250px; overflow-y: auto;"></ul>
+                                </div>
+                                <div class="col-md-6" id="leaveCol">
+                                    <div class="card border-warning mb-3">
+                                        <div class="card-body text-center">
+                                            <h6 class="text-warning text-dark text-uppercase fw-bold">Total Leave Taken</h6>
+                                            <h2 id="repTotalLeave" class="mb-0 text-warning text-dark">0 Days</h2>
+                                            <small class="text-muted">Records Found: <span id="repLeaveCount">0</span></small>
+                                        </div>
+                                    </div>
+                                    <h6 class="text-warning text-dark border-bottom pb-2 fw-bold">Leave Dates</h6>
+                                    <ul class="list-group list-group-sm shadow-sm" id="repLeaveList" style="max-height: 250px; overflow-y: auto;"></ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-4 text-end" id="reportExportBtns" style="display: none;">
+                        <button class="btn btn-success fw-bold" onclick="exportEmpExcel()">⬇️ Download CSV</button> 
+                        <button class="btn btn-danger fw-bold ms-2" onclick="exportEmpPDF()">⬇️ Download PDF</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden Render Area for BULK IRP5 Generation -->
+    <div style="position: absolute; left: -9999px; top: 0; width: 800px; z-index: -1;">
+        <div id="bulkIrp5Content" class="payslip-container bg-white mt-4 border border-dark">
+            <div class="text-center border-bottom pb-3 mb-4"><h2 style="color: #0b5ed7; font-weight: bold; letter-spacing: 2px;">IRP5 / IT3(a) SUMMARY <span style="font-size: 0.45em;" class="badge bg-secondary">Internal Use</span></h2><p class="mb-0">Tax Year: <strong id="biTaxYear"></strong></p><p class="text-muted small">Period: <span id="biPeriod"></span></p></div>
+            <div class="row mb-4"><div class="col-6"><h6 class="text-primary border-bottom pb-1">Employer Details</h6><strong>{{ session.company_name }}</strong><br><small>PAYE Ref: Not Set</small></div><div class="col-6 text-end"><h6 class="text-primary border-bottom pb-1">Employee Details</h6><strong id="biEmpName"></strong><br><small>ID: <span id="biIdNum"></span><br>Tax No: <span id="biTaxNum"></span><br>Emp No: <span id="biEmpNum"></span></small></div></div>
+            <table class="table table-sm table-bordered">
+                <thead class="table-light"><tr><th>SARS Code</th><th>Description</th><th class="amount">Amount (R)</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>3601</strong></td><td>Income (Basic Salary)</td><td class="amount" id="bi3601"></td></tr>
+                    <tr><td><strong>3605</strong></td><td>Overtime</td><td class="amount" id="bi3605"></td></tr>
+                    <tr><td><strong>3702</strong></td><td>Reimbursive Travel Allowance</td><td class="amount" id="bi3702"></td></tr>
+                    <tr class="table-secondary"><td><strong>3699</strong></td><td><strong>Gross Remuneration</strong></td><td class="amount fw-bold" id="bi3699"></td></tr>
+                    <tr><td colspan="3"></td></tr>
+                    <tr><td><strong>4102</strong></td><td>PAYE</td><td class="amount" id="bi4102"></td></tr>
+                    <tr><td><strong>4141</strong></td><td>UIF Contribution</td><td class="amount" id="bi4141"></td></tr>
+                </tbody>
+            </table>
+            <p class="small text-muted mt-3 text-center">This summary is generated for eFiling input and personal records.</p>
+        </div>
+    </div>
+
+
+
+    <!-- ADJUSTMENT PAYSLIP MODAL -->
+    <div class="modal fade" id="adjustmentPayslipModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-warning text-dark">
+                    <h5 class="modal-title fw-bold">Create Adjustment Payslip</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="alert alert-warning small">
+                        Use this only for corrections after a payslip has already been finalised. Enter positive or negative amounts. This creates a separate ledger adjustment and does not change the original finalised payslip.
+                    </div>
+                    <input type="hidden" id="adjEmpId">
+                    <input type="hidden" id="adjDate">
+                    <div class="mb-3">
+                        <label class="small fw-bold">Adjustment Reason</label>
+                        <textarea id="adjReason" class="form-control" rows="2" placeholder="e.g. Correct overtime underpayment for May" required></textarea>
+                    </div>
+                    <div class="row g-2">
+                        <div class="col-md-4"><label class="small fw-bold">Gross Salary Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjGross" value="0" oninput="calculateAdjustmentNet()"></div>
+                        <div class="col-md-4"><label class="small fw-bold">Overtime / Premium Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjOvertime" value="0" oninput="calculateAdjustmentNet()"></div>
+                        <div class="col-md-4"><label class="small fw-bold">Bonus Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjBonus" value="0" oninput="calculateAdjustmentNet()"></div>
+                        <div class="col-md-4"><label class="small fw-bold">Transport Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjTransport" value="0" oninput="calculateAdjustmentNet()"></div>
+                        <div class="col-md-4"><label class="small fw-bold">Reimbursable Expense Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjReimbursable" value="0" oninput="calculateAdjustmentNet()"></div>
+                        <div class="col-md-4"><label class="small fw-bold">Loan Repayment Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjLoan" value="0" oninput="calculateAdjustmentNet()"></div>
+                        <div class="col-md-4"><label class="small fw-bold text-danger">PAYE Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjPaye" value="0" oninput="calculateAdjustmentNet()"></div>
+                        <div class="col-md-4"><label class="small fw-bold text-danger">UIF Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjUif" value="0" oninput="calculateAdjustmentNet()"></div>
+                        <div class="col-md-4"><label class="small fw-bold text-success">Net Adjustment</label><input type="text" class="form-control fw-bold text-success" id="adjNet" value="0,00" readonly></div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-warning fw-bold" onclick="saveAdjustmentPayslip()">Save Adjustment to Ledger</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Modal Initializations
+        const profileModal = new bootstrap.Modal(document.getElementById('profileModal'));
+        const payslipModal = new bootstrap.Modal(document.getElementById('payslipModal'));
+        const bulkFinalizeModal = new bootstrap.Modal(document.getElementById('bulkFinalizeModal'));
+        const leaveModal = new bootstrap.Modal(document.getElementById('leaveModal'));
+        const reportModal = new bootstrap.Modal(document.getElementById('reportModal'));
+        const editLeaveModal = new bootstrap.Modal(document.getElementById('editLeaveModal'));
+        const emp201Modal = new bootstrap.Modal(document.getElementById('emp201Modal'));
+        const ui19Modal = new bootstrap.Modal(document.getElementById('ui19Modal'));
+        const irp5Modal = new bootstrap.Modal(document.getElementById('irp5Modal'));
+        const interviewModal = new bootstrap.Modal(document.getElementById('interviewModal'));
+        const exportModal = new bootstrap.Modal(document.getElementById('exportModal'));
+        const bankExportModal = new bootstrap.Modal(document.getElementById('bankExportModal'));
+        const bulkPayslipModal = new bootstrap.Modal(document.getElementById('bulkPayslipModal'));
+        const bulkIrp5Modal = new bootstrap.Modal(document.getElementById('bulkIrp5Modal'));
+        
+        let currentPayslipData = null;
+
+        // Initialize today's dates
+        const td = new Date().toISOString().split('T')[0];
+        if(document.getElementById('psDate')) document.getElementById('psDate').value = td;
+        if(document.getElementById('bulkPsDate')) document.getElementById('bulkPsDate').value = td;
+        if(document.getElementById('leaveDate')) document.getElementById('leaveDate').value = td;
+        if(document.getElementById('bankExportMonth')) document.getElementById('bankExportMonth').value = td.substring(0, 7);
+        if(document.getElementById('ui19Month')) document.getElementById('ui19Month').value = td.substring(0, 7);
+
+        // --- HIGH QUALITY PDF SETTINGS ---
+        function getPdfOptions(docName) {
+            return {
+                margin: 0.5, 
+                filename: docName + '.pdf', 
+                image: { type: 'jpeg', quality: 1.0 },
+                html2canvas: { scale: 4, useCORS: true }, 
+                jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' } 
+            };
+        }
+
+        function getLocalDateString(dateObj) {
+            const y = dateObj.getFullYear();
+            const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const d = String(dateObj.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        }
+
+        // --- SEARCH FILTERING ---
+        document.querySelectorAll('.column-search').forEach(input => {
+            input.addEventListener('keyup', function() {
+                const term = this.value.toLowerCase();
+                const colIndex = parseInt(this.getAttribute('data-col'));
+                const targetTableId = this.getAttribute('data-target');
+                const table = document.getElementById(targetTableId);
+                const rows = table.querySelectorAll('tbody tr');
+                
+                rows.forEach(row => {
+                    const cell = row.querySelectorAll('td')[colIndex];
+                    if(cell) {
+                        const cellText = cell.textContent.toLowerCase();
+                        if(cellText.indexOf(term) === -1) row.style.display = 'none';
+                        else row.style.display = '';
+                    }
+                });
+            });
+        });
+
+        // --- BULK SELECTION LOGIC ---
+        function toggleAll(source) {
+            let checkboxes = document.querySelectorAll('.emp-cb');
+            for(let i=0, n=checkboxes.length;i<n;i++) {
+                if(checkboxes[i].closest('tr').style.display !== 'none') {
+                    checkboxes[i].checked = source.checked;
+                }
+            }
+            updateSelectionCount();
+        }
+
+        function updateSelectionCount() {
+            const count = document.querySelectorAll('.emp-cb:checked').length;
+            document.getElementById('selectionCount').innerText = `${count} selected`;
+        }
+
+        function getSelectedIds() {
+            const ids = [];
+            document.querySelectorAll('.emp-cb:checked').forEach(cb => ids.push(cb.value));
+            return ids;
+        }
+
+
+        // --- PAYROLL BANK EXPORT LOGIC ---
+        function openBankExportModal() {
+            document.getElementById('bankExportStatus').innerText = '';
+            if(!document.getElementById('bankExportMonth').value) {
+                document.getElementById('bankExportMonth').value = new Date().toISOString().slice(0, 7);
+            }
+            bankExportModal.show();
+        }
+
+        async function downloadPayrollBankFile() {
+            const month = document.getElementById('bankExportMonth').value;
+            const template = document.getElementById('bankExportTemplate').value;
+            const status = document.getElementById('bankExportStatus');
+            status.innerText = '';
+            if(!month) {
+                status.innerText = 'Please select a payroll month.';
+                return;
+            }
+            const url = `/export_payroll_bank_file?month=${encodeURIComponent(month)}&template=${encodeURIComponent(template)}`;
+            const res = await fetch(url);
+            if(!res.ok) {
+                const err = await res.json().catch(() => ({message: 'Unable to export payroll bank file.'}));
+                let msg = err.message || 'Unable to export payroll bank file.';
+                if(err.missing && err.missing.length) msg += '\n' + err.missing.join('\n');
+                status.innerText = msg;
+                return;
+            }
+            const blob = await res.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `Payroll_Bank_Export_${template}_${month}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(a.href);
+            bankExportModal.hide();
+        }
+
+        // --- BULK FINALIZE PAYROLL LOGIC ---
+        function openBulkFinalizeModal() {
+            const ids = getSelectedIds();
+            if(ids.length === 0) return alert("Please select at least one employee from the list.");
+            const dateInput = document.getElementById('bulkFinalizeDate');
+            if(!dateInput.value) dateInput.value = getLocalDateString(new Date());
+            document.getElementById('bulkFinalizeStatus').innerText = `Ready to finalize ${ids.length} selected employee(s).`;
+            document.getElementById('btnRunBulkFinalize').disabled = false;
+            document.getElementById('btnRunBulkFinalize').innerText = 'Finalize Selected Payroll';
+            bulkFinalizeModal.show();
+        }
+
+        async function processBulkFinalizePayroll() {
+            const ids = getSelectedIds();
+            const date = document.getElementById('bulkFinalizeDate').value;
+            const btn = document.getElementById('btnRunBulkFinalize');
+            const status = document.getElementById('bulkFinalizeStatus');
+
+            if(ids.length === 0) return alert("Please select at least one employee from the list.");
+            if(!date) return alert("Select a target payroll date.");
+
+            btn.disabled = true;
+            const successes = [];
+            const failures = [];
+
+            for(let i = 0; i < ids.length; i++) {
+                const id = ids[i];
+                status.innerText = `Finalizing ${i + 1} of ${ids.length}...\nSuccessful: ${successes.length}\nFailed: ${failures.length}`;
+
+                try {
+                    const res = await fetch('/generate_payslip', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({employee_id: id, date: date, bonus: 0, reimbursable_expenses: 0, loan_repayment: 0})
+                    });
+                    const data = await res.json();
+                    if(!res.ok || data.message) {
+                        failures.push(`Employee ID ${id}: ${data.message || 'Unable to generate payslip.'}`);
+                        continue;
+                    }
+
+                    const saveRes = await fetch('/api/save_payslip', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(data.raw)
+                    });
+                    const saveData = await saveRes.json();
+                    if(!saveRes.ok || saveData.message) {
+                        failures.push(`Employee ID ${id}: ${saveData.message || 'Unable to save payslip.'}`);
+                        continue;
+                    }
+
+                    successes.push(data.payslip.name || `Employee ID ${id}`);
+                } catch(err) {
+                    failures.push(`Employee ID ${id}: ${err.message || 'Unexpected error.'}`);
+                }
+            }
+
+            let summary = `✅ Bulk finalize complete for ${date}.\nSuccessful: ${successes.length}\nFailed: ${failures.length}`;
+            if(successes.length) summary += `\n\nFinalized:\n- ${successes.join('\n- ')}`;
+            if(failures.length) summary += `\n\nNeeds attention:\n- ${failures.join('\n- ')}`;
+            status.innerText = summary;
+            btn.innerText = 'Done';
+            btn.disabled = false;
+        }
+
+        // --- BULK PAYSLIPS LOGIC ---
+        function openBulkPayslipModal() {
+            const ids = getSelectedIds();
+            if(ids.length === 0) return alert("Please select at least one employee from the list.");
+            
+            document.getElementById('bulkPsStatus').innerText = '';
+            document.getElementById('btnRunBulkPs').disabled = false;
+            document.getElementById('btnRunBulkPs').innerText = 'Generate Bulk Payslips';
+            bulkPayslipModal.show();
+        }
+
+        async function processBulkPayslips() {
+            const ids = getSelectedIds();
+            const date = document.getElementById('bulkPsDate').value;
+            const sendEmail = document.getElementById('bulkPsEmail').checked;
+            const btn = document.getElementById('btnRunBulkPs');
+            const status = document.getElementById('bulkPsStatus');
+
+            if(!date) return alert("Select a target date.");
+
+            btn.disabled = true;
+            const preparedPayslips = [];
+            const draftPayslips = [];
+
+            // First pass: determine which employees have finalised ledger payslips.
+            for(let i=0; i<ids.length; i++) {
+                const id = ids[i];
+                status.innerText = `Checking ledger status ${i+1} of ${ids.length}...`;
+
+                const ledgerRes = await fetch('/api/payslip_for_distribution', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({employee_id: id, date: date})
+                });
+                const ledgerData = await ledgerRes.json();
+
+                if(ledgerRes.ok && ledgerData.status === 'finalized') {
+                    preparedPayslips.push({ id, data: ledgerData, finalized: true });
+                    continue;
+                }
+
+                // No saved ledger payslip exists. Generate a draft calculation only.
+                const res = await fetch('/generate_payslip', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({employee_id: id, date: date})
+                });
+                const data = await res.json();
+                if(!res.ok || data.message) {
+                    status.innerText = data.message || `Unable to generate draft payslip for employee ID ${id}.`;
+                    btn.disabled = false;
+                    return;
+                }
+                data.payslip.payslip_status = 'Draft Payslip';
+                data.payslip.is_finalized = false;
+                preparedPayslips.push({ id, data, finalized: false });
+                draftPayslips.push(data.payslip.name || `Employee ID ${id}`);
+            }
+
+            if(sendEmail && draftPayslips.length > 0) {
+                const warning = `The following employee(s) do not have finalised payslips saved to ledger for ${date.substring(0, 7)}:\n\n- ${draftPayslips.join('\n- ')}\n\nThese will be emailed as DRAFT PAYSLIPS if you continue.\n\nCancel and finalise payroll first, or press OK to continue emailing draft payslips.`;
+                if(!confirm(warning)) {
+                    status.innerText = 'Bulk payslip process cancelled. Finalise payroll first, then run Bulk Payslips again.';
+                    btn.disabled = false;
+                    return;
+                }
+            } else if(draftPayslips.length > 0) {
+                status.innerText = `⚠️ ${draftPayslips.length} draft payslip(s) will be generated. They are not saved to ledger.`;
+            }
+
+            // Second pass: generate PDFs and optional emails. Do NOT save anything to the ledger.
+            for(let i=0; i<preparedPayslips.length; i++) {
+                const item = preparedPayslips[i];
+                const id = item.id;
+                const data = item.data;
+                const p = data.payslip;
+                status.innerText = `Preparing ${i+1} of ${preparedPayslips.length}: ${p.name || 'Employee'}...`;
+
+                document.getElementById('bpCompName').innerText = p.company_name;
+                if(p.company_logo) {
+                    document.getElementById('bpLogo').src = '/uploads/logos/' + p.company_logo;
+                    document.getElementById('bpLogo').style.display = 'block';
+                } else {
+                    document.getElementById('bpLogo').style.display = 'none';
+                }
+                document.getElementById('bpCompReg').innerText = p.company_reg ? 'Reg No: ' + p.company_reg : '';
+                document.getElementById('bpCompAddr').innerText = p.company_address;
+
+                if(item.finalized) {
+                    document.getElementById('bpDocTitle').innerText = 'PAYSLIP';
+                    document.getElementById('bpDocTitle').className = 'text-success fw-bold';
+                } else {
+                    document.getElementById('bpDocTitle').innerText = 'DRAFT PAYSLIP';
+                    document.getElementById('bpDocTitle').className = 'text-danger fw-bold';
+                }
+
+                document.getElementById('bpDate').innerText = p.date;
+                document.getElementById('bpName').innerText = p.name;
+                document.getElementById('bpEmpNum').innerText = p.emp_num;
+                document.getElementById('bpIdNum').innerText = p.id_num;
+                document.getElementById('bpGross').innerText = p.gross;
+                document.getElementById('bpDaysWorked').innerText = p.days_worked_display || '';
+                document.getElementById('bpOvertime').innerText = p.overtime;
+                document.getElementById('bpSundaysWorked').innerText = p.sundays_display || '';
+                setOptionalPayslipLine('bpReimbursableExpensesRow', 'bpReimbursableExpenses', p.reimbursable_expenses);
+                setOptionalPayslipLine('bpBonusRow', 'bpBonus', p.bonus);
+                setOptionalPayslipLine('bpLoanRepaymentRow', 'bpLoanRepayment', p.loan_repayment);
+                setOptionalPayslipLine('bpTransportRow', 'bpTransport', p.transport);
+                document.getElementById('bpPaye').innerText = p.paye;
+                document.getElementById('bpUif').innerText = p.uif_emp;
+                document.getElementById('bpUifEr').innerText = p.uif_er;
+                document.getElementById('bpNet').innerText = p.net;
+                document.getElementById('bpLeave').innerText = p.leave;
+                document.getElementById('bpSickLeave').innerText = p.sick_leave;
+                document.getElementById('bpSickLeaveExt').innerText = p.sick_leave === 'N/A' ? '' : 'Days left in 36-month cycle';
+                document.getElementById('bpFamilyLeave').innerText = p.family_leave;
+                document.getElementById('bpFamilyLeaveExt').innerText = p.family_leave === 'N/A' ? '' : 'Days left in annual cycle';
+
+                if(sendEmail) {
+                    status.innerText = `Emailing ${i+1} of ${preparedPayslips.length}: ${p.name || 'Employee'}...`;
+                    const element = document.getElementById('bulkPayslipContent');
+                    const nameStr = (p.name || `Employee_${id}`).replace(/\s+/g, '_');
+                    const pdfNamePrefix = item.finalized ? 'Payslip' : 'Draft_Payslip';
+                    const pdfBlob = await html2pdf().set(getPdfOptions(`${pdfNamePrefix}_${nameStr}_${date}`)).from(element).output('blob');
+                    const fd = new FormData();
+                    fd.append('pdf', pdfBlob, `${pdfNamePrefix}_${nameStr}_${date}.pdf`);
+                    fd.append('employee_id', id);
+                    fd.append('date', date);
+                    await fetch('/email_payslip', { method: 'POST', body: fd });
+                }
+            }
+
+            const finalCount = preparedPayslips.filter(p => p.finalized).length;
+            const draftCount = preparedPayslips.length - finalCount;
+            status.innerText = `✅ Bulk payslip process complete. Finalised: ${finalCount}. Draft: ${draftCount}. Nothing was saved to ledger.`;
+            btn.innerText = "Done";
+            setTimeout(() => bulkPayslipModal.hide(), 3000);
+        }
+
+        function openBulkIrp5Modal() {
+            const ids = getSelectedIds();
+            if(ids.length === 0) return alert("Please select at least one employee from the list.");
+            
+            document.getElementById('bulkIrp5Status').innerText = '';
+            document.getElementById('btnRunBulkIrp5').disabled = false;
+            document.getElementById('btnRunBulkIrp5').innerText = 'Download Selected PDFs';
+            bulkIrp5Modal.show();
+        }
+
+        async function processBulkIrp5() {
+            const ids = getSelectedIds();
+            const year = document.getElementById('bulkIrp5Year').value;
+            const btn = document.getElementById('btnRunBulkIrp5');
+            const status = document.getElementById('bulkIrp5Status');
+
+            if(!year) return alert("Enter a tax year.");
+
+            btn.disabled = true;
+            
+            for(let i=0; i<ids.length; i++) {
+                const id = ids[i];
+                status.innerText = `Generating ${i+1} of ${ids.length}...`;
+                
+                const res = await fetch('/generate_irp5', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({employee_id: id, tax_year: year}) });
+                const data = await res.json();
+                
+                const p = data.irp5;
+                document.getElementById('biTaxYear').innerText = p.tax_year;
+                document.getElementById('biPeriod').innerText = p.period;
+                document.getElementById('biEmpName').innerText = p.name;
+                document.getElementById('biIdNum').innerText = p.id_num;
+                document.getElementById('biTaxNum').innerText = p.tax_number;
+                document.getElementById('biEmpNum').innerText = p.emp_num;
+                document.getElementById('bi3601').innerText = p.code_3601;
+                document.getElementById('bi3605').innerText = p.code_3605;
+                document.getElementById('bi3702').innerText = p.code_3702;
+                document.getElementById('bi3699').innerText = p.code_3699;
+                document.getElementById('bi4102').innerText = p.code_4102;
+                document.getElementById('bi4141').innerText = p.code_4141;
+                
+                const nameStr = p.name.replace(/\s+/g, '_');
+                const element = document.getElementById('bulkIrp5Content');
+                
+                await html2pdf().set(getPdfOptions(`IRP5_${nameStr}_${p.tax_year}`)).from(element).save();
+                
+                // 1-second delay to allow browser to trigger the physical download prompt smoothly
+                await new Promise(r => setTimeout(r, 1000));
+            }
+            
+            status.innerText = "✅ All IRP5s generated and downloaded!";
+            btn.innerText = "Done";
+            setTimeout(() => bulkIrp5Modal.hide(), 2000);
+        }
+
+        // --- EMPLOYEE ADMIN LOGIC ---
+        function openExportModal() { exportModal.show(); }
+        
+        function exportEmployeeData() {
+            const selectedFields = [];
+            document.querySelectorAll('.export-cb:checked').forEach(cb => {
+                selectedFields.push(cb.value);
+            });
+            
+            if (selectedFields.length === 0) {
+                alert("Please select at least one field to export.");
+                return;
+            }
+            
+            let csv = selectedFields.join(',') + '\n';
+            alert("Exporting visible columns to CSV functionality triggered! \n(Note: Custom field mapping requires backend route update).");
+            exportModal.hide();
+        }
+
+        function openProfileModal(emp) {
+            document.getElementById('profileModalTitle').innerText = emp ? "Edit Employee" : "New Employee";
+            document.getElementById('empId').value = emp ? emp.id : '';
+            document.getElementById('empName').value = emp ? emp.name : '';
+            document.getElementById('empJobTitle').value = emp ? emp.job_title : '';
+            document.getElementById('empStatus').value = emp ? emp.status : 'Active';
+            document.getElementById('empType').value = emp ? emp.emp_type : 'Full-time (5 Days)';
+            document.getElementById('empStartDate').value = emp ? emp.start_date : '';
+            document.getElementById('empInactiveDate').value = emp ? (emp.inactive_date || '') : '';
+            document.getElementById('empDob').value = emp ? (emp.date_of_birth || '') : '';
+            document.getElementById('empIdPassport').value = emp ? emp.id_passport : '';
+            document.getElementById('empGross').value = emp ? emp.gross_salary : '';
+            document.getElementById('empWorkdayHours').value = emp ? (emp.workday_hours || 7) : 7;
+            document.getElementById('empOvertimePayTreatment').value = emp ? (emp.overtime_pay_treatment || 'irregular') : 'irregular';
+            document.getElementById('empPhone').value = emp ? emp.phone : '';
+            document.getElementById('empEmail').value = emp ? emp.email : '';
+            document.getElementById('empEmergency').value = emp ? emp.emergency_contact : '';
+            document.getElementById('empTaxNum').value = emp ? emp.tax_number : '';
+            document.getElementById('empUifContributor').value = emp ? (emp.uif_contributor || 'Yes') : 'Yes';
+            document.getElementById('empUifNonContributorReason').value = emp ? (emp.uif_non_contributor_reason || '') : '';
+            document.getElementById('empUifTerminationCode').value = emp ? (emp.uif_termination_code || '') : '';
+            document.getElementById('empBankName').value = emp ? (emp.bank_name || '') : '';
+            document.getElementById('empAccountHolder').value = emp ? (emp.account_holder || emp.name || '') : '';
+            document.getElementById('empAccountNumber').value = emp ? (emp.account_number || '') : '';
+            document.getElementById('empBranchCode').value = emp ? (emp.branch_code || '') : '';
+            document.getElementById('empAccountType').value = emp ? (emp.account_type || '') : '';
+            document.getElementById('empPaymentReference').value = emp ? (emp.payment_reference || 'Salary') : 'Salary';
+            document.getElementById('empAddress').value = emp ? emp.address : '';
+            document.getElementById('empAddLeave').value = emp ? (emp.additional_leave || 0) : 0;
+            
+            if(emp && emp.cv_file) document.getElementById('currCv').innerHTML = `<a href="/uploads/cvs/${emp.cv_file}" target="_blank">📄 View Current CV</a>`; else document.getElementById('currCv').innerHTML = '';
+            if(emp && emp.id_file) document.getElementById('currId').innerHTML = `<a href="/uploads/ids/${emp.id_file}" target="_blank">📄 View Current ID</a>`; else document.getElementById('currId').innerHTML = '';
+            if(emp && emp.contract_file) document.getElementById('currContract').innerHTML = `<a href="/uploads/contracts/${emp.contract_file}" target="_blank">📄 View Current Contract</a>`; else document.getElementById('currContract').innerHTML = '';
+
+            document.getElementById('empIdFile').required = !(emp && emp.id_file);
+            document.getElementById('empContractFile').required = !(emp && emp.contract_file);
+
+            profileModal.show();
+        }
+
+        function saveProfile() {
+            const form = document.getElementById('employeeForm');
+            if(!form.checkValidity()) {
+                form.reportValidity();
+                return;
+            }
+            const fd = new FormData(form);
+            fetch('/update_employee', { method: 'POST', body: fd })
+                .then(async response => {
+                    const result = await response.json().catch(() => ({}));
+                    if(!response.ok) throw new Error(result.message || 'Unable to save employee.');
+                    location.reload();
+                })
+                .catch(err => alert(err.message));
+        }
+
+        // --- INTERVIEWS LOGIC ---
+        function openInterviewModal() {
+            document.getElementById('interviewForm').reset();
+            document.getElementById('ivId').value = '';
+            document.getElementById('ivScoreData').value = '{}';
+            document.getElementById('ivTotalDisplay').innerText = '0';
+            document.getElementById('ivTotalInput').value = '0';
+            document.getElementById('ivCurrCv').innerHTML = '';
+            document.getElementById('ivCurrId').innerHTML = '';
+            document.getElementById('ivDecision').value = 'Pending';
+            if(document.getElementById('ivInterviewNotes')) document.getElementById('ivInterviewNotes').value = '';
+            interviewModal.show();
+        }
+
+        function editInterview(iv) {
+            document.getElementById('ivId').value = iv.id;
+            document.getElementById('ivName').value = iv.name;
+            document.getElementById('ivDatetime').value = iv.interview_datetime;
+            document.getElementById('ivPhone').value = iv.phone;
+            document.getElementById('ivEmail').value = iv.email;
+            document.getElementById('ivIdPassport').value = iv.id_passport;
+            document.getElementById('ivAddress').value = iv.address;
+            document.getElementById('ivDecision').value = iv.final_decision;
+            if(document.getElementById('ivInterviewNotes')) document.getElementById('ivInterviewNotes').value = iv.interview_notes || '';
+            
+            if(iv.cv_file) document.getElementById('ivCurrCv').innerHTML = `<a href="/uploads/cvs/${iv.cv_file}" target="_blank">📄 View CV</a>`; else document.getElementById('ivCurrCv').innerHTML = '';
+            if(iv.id_file) document.getElementById('ivCurrId').innerHTML = `<a href="/uploads/ids/${iv.id_file}" target="_blank">📄 View ID</a>`; else document.getElementById('ivCurrId').innerHTML = '';
+
+            document.querySelectorAll('.sc-val').forEach(inp => inp.value = '');
+            if(iv.scorecard_json) {
+                try {
+                    const scores = JSON.parse(iv.scorecard_json);
+                    Object.keys(scores).forEach(k => {
+                        const el = document.querySelector(`.sc-val[data-cat="${k}"]`);
+                        if(el) el.value = scores[k];
+                    });
+                } catch(e) {}
+            }
+            calcInterviewScore();
+            interviewModal.show();
+        }
+
+        function calcInterviewScore() {
+            let total = 0;
+            const scores = {};
+            document.querySelectorAll('.sc-val').forEach(inp => {
+                const rawVal = parseInt(inp.value) || 0;
+                const maxVal = parseInt(inp.getAttribute('max')) || 100;
+                const val = Math.max(0, Math.min(rawVal, maxVal));
+                if(inp.value !== '' && rawVal !== val) inp.value = val;
+                total += val;
+                scores[inp.getAttribute('data-cat')] = val;
+            });
+            document.getElementById('ivTotalDisplay').innerText = total;
+            document.getElementById('ivTotalInput').value = total;
+            document.getElementById('ivScoreData').value = JSON.stringify(scores);
+        }
+
+        document.querySelectorAll('.sc-val').forEach(inp => inp.addEventListener('input', calcInterviewScore));
+
+        function saveInterview() {
+            calcInterviewScore();
+            const form = document.getElementById('interviewForm');
+            if(!document.getElementById('ivName').value) return alert("Candidate Name required.");
+            const fd = new FormData(form);
+            fetch('/save_interview', { method: 'POST', body: fd }).then(() => location.reload());
+        }
+
+        function deleteInterview(id) {
+            if(confirm("Delete candidate record permanently?")) {
+                fetch('/delete_interview', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id: id})}).then(() => location.reload());
+            }
+        }
+
+        // --- EMPLOYEE STATUS BADGE HELPER ---
+        function parseCurrencyAmount(value) {
+            if (typeof value === 'number') return value;
+            if (!value) return 0;
+            let cleaned = String(value).replace(/\u00a0/g, ' ').replace(/[Rr]/g, '').trim();
+            const negative = /^-/.test(cleaned);
+            cleaned = cleaned.replace(/\s+/g, '');
+            if(cleaned.includes(',') && cleaned.includes('.')) {
+                cleaned = cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.') ? cleaned.replace(/\./g, '').replace(',', '.') : cleaned.replace(/,/g, '');
+            } else if(cleaned.includes(',')) cleaned = cleaned.replace(',', '.');
+            cleaned = cleaned.replace(/[^0-9.\-]/g, '');
+            const parsed = parseFloat(cleaned);
+            if(isNaN(parsed)) return 0;
+            return negative ? -Math.abs(parsed) : parsed;
+        }
+
+        function money(value) {
+            if(window.EasyAdminFormat) return window.EasyAdminFormat.money(value);
+            return Number(value || 0).toLocaleString('en-ZA', {minimumFractionDigits:2, maximumFractionDigits:2});
+        }
+
+        function setOptionalPayslipLine(rowId, amountId, value) {
+            const amount = parseCurrencyAmount(value);
+            const row = document.getElementById(rowId);
+            const cell = document.getElementById(amountId);
+            if (!row || !cell) return;
+            if (amount > 0) {
+                row.style.display = '';
+                cell.innerText = value || money(amount);
+            } else {
+                row.style.display = 'none';
+                cell.innerText = '';
+            }
+        }
+
+        function employeeStatusBadgeHtml(status) {
+            const s = (status || 'Active').trim();
+            if (s === 'Active') return '<span class="badge bg-success">Active</span>';
+            if (s === 'Resigned') return '<span class="badge bg-warning text-dark">Resigned</span>';
+            if (s === 'On Leave') return '<span class="badge bg-info text-dark">On Leave</span>';
+            if (s === 'Terminated') return '<span class="badge bg-danger">Terminated</span>';
+            return `<span class="badge bg-secondary">${s || 'Unknown'}</span>`;
+        }
+
+        // --- INDIVIDUAL PAYSLIP LOGIC ---
+        function openPayslipModal(id, name, status='Active') {
+            document.getElementById('psEmpId').value = id;
+            document.getElementById('psEmpName').value = name;
+            document.getElementById('psEmpStatusBadge').innerHTML = employeeStatusBadgeHtml(status);
+            
+            document.getElementById('payslipPreviewArea').style.display = 'none';
+            document.getElementById('psReimbursableExpenses').value = 0;
+            document.getElementById('psBonus').value = 0;
+            document.getElementById('psLoanRepayment').value = 0;
+            ['psReimbursableExpenses','psBonus','psLoanRepayment'].forEach(fieldId => { const el = document.getElementById(fieldId); if(el) el.disabled = false; });
+            document.getElementById('btnRunEngine').innerText = '⚙️ Calculate Statutory Taxes & Deductions';
+            document.getElementById('btnRunEngine').disabled = false;
+            
+            payslipModal.show();
+        }
+
+
+        function moneyToNumber(value) {
+            return parseCurrencyAmount(value);
+        }
+
+        function openAdjustmentPayslipModal() {
+            if(!currentPayslipData || !currentPayslipData.payslip || !currentPayslipData.payslip.is_finalized) {
+                alert('An adjustment can only be created after the payslip has been finalised to ledger.');
+                return;
+            }
+            document.getElementById('adjEmpId').value = currentPayslipData.raw.employee_id;
+            document.getElementById('adjDate').value = document.getElementById('psDate').value;
+            document.getElementById('adjReason').value = '';
+            ['adjGross','adjOvertime','adjBonus','adjTransport','adjReimbursable','adjLoan','adjPaye','adjUif'].forEach(id => document.getElementById(id).value = 0);
+            calculateAdjustmentNet();
+            new bootstrap.Modal(document.getElementById('adjustmentPayslipModal')).show();
+        }
+
+        function calculateAdjustmentNet() {
+            const gross = parseFloat(document.getElementById('adjGross').value || 0);
+            const overtime = parseFloat(document.getElementById('adjOvertime').value || 0);
+            const bonus = parseFloat(document.getElementById('adjBonus').value || 0);
+            const transport = parseFloat(document.getElementById('adjTransport').value || 0);
+            const reimb = parseFloat(document.getElementById('adjReimbursable').value || 0);
+            const loan = parseFloat(document.getElementById('adjLoan').value || 0);
+            const paye = parseFloat(document.getElementById('adjPaye').value || 0);
+            const uif = parseFloat(document.getElementById('adjUif').value || 0);
+            const net = gross + overtime + bonus + transport + reimb - loan - paye - uif;
+            document.getElementById('adjNet').value = money(net);
+        }
+
+        function saveAdjustmentPayslip() {
+            const reason = document.getElementById('adjReason').value.trim();
+            if(!reason) return alert('Please enter an adjustment reason.');
+            const payload = {
+                employee_id: document.getElementById('adjEmpId').value,
+                date: document.getElementById('adjDate').value,
+                adjustment_reason: reason,
+                gross: parseFloat(document.getElementById('adjGross').value || 0),
+                overtime: parseFloat(document.getElementById('adjOvertime').value || 0),
+                bonus: parseFloat(document.getElementById('adjBonus').value || 0),
+                transport: parseFloat(document.getElementById('adjTransport').value || 0),
+                reimbursable_expenses: parseFloat(document.getElementById('adjReimbursable').value || 0),
+                loan_repayment: parseFloat(document.getElementById('adjLoan').value || 0),
+                paye: parseFloat(document.getElementById('adjPaye').value || 0),
+                uif: parseFloat(document.getElementById('adjUif').value || 0)
+            };
+            fetch('/api/save_adjustment_payslip', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })
+            .then(r => r.json().then(data => ({ok:r.ok, data}))).then(({ok, data}) => {
+                if(!ok || data.message) return alert(data.message || 'Unable to save adjustment payslip.');
+                alert('Adjustment payslip saved to ledger. Net adjustment: ' + money(data.net || 0));
+                bootstrap.Modal.getInstance(document.getElementById('adjustmentPayslipModal')).hide();
+                runPayslipEngine();
+            });
+        }
+
+        function runPayslipEngine() {
+            const btn = document.getElementById('btnRunEngine');
+            btn.innerText = 'Calculating...'; btn.disabled = true;
+            const data = {
+                employee_id: document.getElementById('psEmpId').value,
+                date: document.getElementById('psDate').value,
+                reimbursable_expenses: parseFloat(document.getElementById('psReimbursableExpenses').value || 0),
+                bonus: parseFloat(document.getElementById('psBonus').value || 0),
+                loan_repayment: parseFloat(document.getElementById('psLoanRepayment').value || 0)
+            };
+            
+            fetch('/generate_payslip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
+            .then(r => r.json().then(data => ({ok: r.ok, data: data}))).then(({ok, data: res}) => {
+                if(!ok || res.message) {
+                    alert(res.message || 'Unable to generate payslip.');
+                    btn.innerText = '⚙️ Calculate Statutory Taxes & Deductions';
+                    btn.disabled = false;
+                    return;
+                }
+                currentPayslipData = res;
+                const p = res.payslip;
+                
+                // Set Header Details
+                document.getElementById('bpCompName').innerText = p.company_name;
+                if(p.company_logo) {
+                    document.getElementById('bpLogo').src = '/uploads/logos/' + p.company_logo;
+                    document.getElementById('bpLogo').style.display = 'block';
+                } else {
+                    document.getElementById('bpLogo').style.display = 'none';
+                }
+                document.getElementById('bpCompReg').innerText = p.company_reg ? 'Reg No: ' + p.company_reg : '';
+                document.getElementById('bpCompAddr').innerText = p.company_address;
+                
+                // Set document status from backend: finalised ledger payslip or draft calculation
+                const isFinalized = !!p.is_finalized;
+                document.getElementById('bpDocTitle').innerText = isFinalized ? 'PAYSLIP' : 'DRAFT PAYSLIP';
+                document.getElementById('bpDocTitle').className = isFinalized ? 'text-success fw-bold' : 'text-danger fw-bold';
+                
+                document.getElementById('bpDate').innerText = p.date;
+                document.getElementById('bpName').innerText = p.name;
+                document.getElementById('bpEmpNum').innerText = p.emp_num;
+                document.getElementById('bpIdNum').innerText = p.id_num;
+                
+                document.getElementById('bpGross').innerText = p.gross;
+                document.getElementById('bpDaysWorked').innerText = p.days_worked_display;
+                document.getElementById('bpOvertime').innerText = p.overtime;
+                document.getElementById('bpSundaysWorked').innerText = p.sundays_display;
+                setOptionalPayslipLine('bpReimbursableExpensesRow', 'bpReimbursableExpenses', p.reimbursable_expenses);
+                setOptionalPayslipLine('bpBonusRow', 'bpBonus', p.bonus);
+                setOptionalPayslipLine('bpLoanRepaymentRow', 'bpLoanRepayment', p.loan_repayment);
+                setOptionalPayslipLine('bpTransportRow', 'bpTransport', p.transport);
+                
+                document.getElementById('bpPaye').innerText = p.paye;
+                document.getElementById('bpUif').innerText = p.uif_emp;
+                document.getElementById('bpUifEr').innerText = p.uif_er;
+                document.getElementById('bpNet').innerText = p.net;
+                
+                document.getElementById('bpLeave').innerText = p.leave;
+                document.getElementById('bpSickLeave').innerText = p.sick_leave;
+                document.getElementById('bpSickLeaveExt').innerText = p.sick_leave === 'N/A' ? '' : 'Days left in 36-month cycle';
+                document.getElementById('bpFamilyLeave').innerText = p.family_leave;
+                document.getElementById('bpFamilyLeaveExt').innerText = p.family_leave === 'N/A' ? '' : 'Days left in annual cycle';
+
+                btn.innerText = '✅ Calculated Successfully';
+                
+                // Show the UI and configure buttons
+                document.getElementById('payslipPreviewArea').style.display = 'block';
+                ['psReimbursableExpenses','psBonus','psLoanRepayment'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if(el) el.disabled = !!p.is_finalized;
+                });
+                if(p.is_finalized) {
+                    document.getElementById('btnSaveLedger').style.display = 'none';
+                    document.getElementById('btnAdjustmentPayslip').style.display = 'inline-block';
+                    document.getElementById('btnEmailSingle').innerText = '📧 Email Payslip';
+                } else {
+                    document.getElementById('btnSaveLedger').style.display = 'inline-block';
+                    document.getElementById('btnAdjustmentPayslip').style.display = 'none';
+                    document.getElementById('btnEmailSingle').innerText = '📧 Email Draft';
+                    document.getElementById('btnSaveLedger').disabled = false;
+                    document.getElementById('btnSaveLedger').innerText = '💾 Save to Ledger & Lock';
+                }
+            });
+        }
+
+        function savePayslipToLedger() {
+            if(!currentPayslipData) return;
+            const btn = document.getElementById('btnSaveLedger');
+            btn.innerText = "Saving & Locking..."; btn.disabled = true;
+            fetch('/api/save_payslip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(currentPayslipData.raw) })
+            .then(r => r.json().then(data => ({ok: r.ok, data: data}))).then(({ok, data}) => {
+                if(!ok || data.message) {
+                    alert(data.message || 'Unable to save payslip.');
+                    btn.innerText = '💾 Save to Ledger & Lock';
+                    btn.disabled = false;
+                    return;
+                }
+                // Mark Official
+                document.getElementById('bpDocTitle').innerText = 'PAYSLIP';
+                document.getElementById('bpDocTitle').className = 'text-success fw-bold';
+                document.getElementById('btnEmailSingle').innerText = '📧 Email Payslip';
+                
+                // Hide the save button to signify it is locked and enable adjustments
+                btn.style.display = 'none';
+                document.getElementById('btnAdjustmentPayslip').style.display = 'inline-block';
+                if(currentPayslipData && currentPayslipData.payslip) currentPayslipData.payslip.is_finalized = true;
+                ['psReimbursableExpenses','psBonus','psLoanRepayment'].forEach(id => { const el = document.getElementById(id); if(el) el.disabled = true; });
+            });
+        }
+
+        function downloadSinglePayslip() {
+            const name = document.getElementById('bpName').innerText.replace(/\s+/g, '_');
+            const date = document.getElementById('bpDate').innerText;
+            html2pdf().set(getPdfOptions(`Payslip_${name}_${date}`)).from(document.getElementById('bulkPayslipContent')).save();
+        }
+
+        function emailSinglePayslip() {
+            if(!currentPayslipData) return;
+            const btn = document.getElementById('btnEmailSingle');
+            const originalText = btn.innerText;
+            btn.innerText = "Generating & Sending..."; btn.disabled = true;
+            
+            const name = document.getElementById('bpName').innerText.replace(/\s+/g, '_');
+            const date = document.getElementById('bpDate').innerText;
+            const element = document.getElementById('bulkPayslipContent');
+            
+            html2pdf().set(getPdfOptions(`Payslip_${name}_${date}`)).from(element).output('blob').then(function(pdfBlob) {
+                const fd = new FormData();
+                fd.append('pdf', pdfBlob, `Payslip_${name}_${date}.pdf`);
+                fd.append('employee_id', currentPayslipData.raw.employee_id);
+                fd.append('date', date);
+                
+                fetch('/email_payslip', { method: 'POST', body: fd }).then(res => res.json()).then(data => {
+                    alert(data.message);
+                    btn.innerText = originalText; btn.disabled = false;
+                }).catch(err => {
+                    alert("A server error occurred while sending the email.");
+                    btn.innerText = originalText; btn.disabled = false;
+                });
+            });
+        }
+
+        // --- LEAVE LOGIC ---
+        function openLeaveModal(id, name, status='Active') {
+            document.getElementById('leaveForm').reset();
+            document.getElementById('leaveEmpId').value = id;
+            document.getElementById('leaveEmpName').value = name;
+            document.getElementById('leaveEmpStatusBadge').innerHTML = employeeStatusBadgeHtml(status);
+            document.getElementById('leaveDate').value = new Date().toISOString().split('T')[0];
+            leaveModal.show();
+        }
+
+        function saveLeave() {
+            const fd = new FormData(document.getElementById('leaveForm'));
+            if(!fd.get('date') || !fd.get('days')) return alert("Date and Days are required.");
+            fetch('/record_leave', { method: 'POST', body: fd }).then(() => location.reload());
+        }
+
+        // --- UI-19 LOGIC ---
+        const ui19SettingKeys = ['ui19_uif_ref','ui19_branch_no','ui19_paye_ref','ui19_trading_name','ui19_physical_address','ui19_work_address','ui19_postal_address','ui19_email','ui19_fax','ui19_phone','ui19_authorised_person','ui19_authorised_person_id'];
+
+        async function openUi19Modal() {
+            const selectedIds = getSelectedIds();
+            if(selectedIds.length === 0) return alert('Please select at least one employee from the list.');
+            document.getElementById('ui19Status').className = 'small fw-bold text-primary';
+            document.getElementById('ui19Status').innerText = `${selectedIds.length} selected employee(s) will be used for this UI-19 declaration.`;
+            if(!document.getElementById('ui19Month').value) document.getElementById('ui19Month').value = new Date().toISOString().slice(0, 7);
+            try {
+                const res = await fetch('/api/ui19_settings');
+                const data = await res.json();
+                ui19SettingKeys.forEach(key => {
+                    const el = document.getElementById(key);
+                    if(el) el.value = data[key] || '';
+                });
+            } catch(err) {
+                document.getElementById('ui19Status').className = 'small fw-bold text-danger';
+                document.getElementById('ui19Status').innerText = 'Could not load saved UI-19 employer details.';
+            }
+            ui19Modal.show();
+        }
+
+        function ui19Escape(value) {
+            return String(value || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+        }
+
+        function ui19Money(value) {
+            const amount = parseFloat(value || 0);
+            return isNaN(amount) ? '0,00' : money(amount);
+        }
+
+        function buildUi19Html(data) {
+            const employer = data.employer || {};
+            const rows = data.employees || [];
+            const bodyRows = [];
+            const maxRows = Math.max(8, rows.length);
+            for(let i = 0; i < maxRows; i++) {
+                const r = rows[i] || {};
+                bodyRows.push(`<tr>
+                    <td>${ui19Escape(r.surname)}</td>
+                    <td>${ui19Escape(r.initials)}</td>
+                    <td>${ui19Escape(r.id_number)}</td>
+                    <td class="num">${r.gross !== undefined ? ui19Money(r.gross) : ''}</td>
+                    <td class="num">${r.hours !== undefined ? ui19Money(r.hours) : ''}</td>
+                    <td>${ui19Escape(r.commencement)}</td>
+                    <td>${ui19Escape(r.termination)}</td>
+                    <td>${ui19Escape(r.termination_code)}</td>
+                    <td>${ui19Escape(r.contributor)}</td>
+                    <td>${ui19Escape(r.non_contributor_reason)}</td>
+                </tr>`);
+            }
+            return `<div class="ui19-page">
+                <style>
+                    .ui19-page { width: 1050px; min-height: 735px; padding: 18px; background:#fff; color:#000; font-family: Arial, sans-serif; font-size: 11px; box-sizing: border-box; }
+                    .ui19-page h3, .ui19-page h4 { margin: 0; text-align:center; }
+                    .ui19-top { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px; }
+                    .ui19-month { border:2px solid #000; padding:4px 16px; min-width:190px; font-size:16px; text-align:left; }
+                    .ui19-small { font-size:9px; line-height:1.2; }
+                    .ui19-section-title { font-weight:bold; margin-top:5px; border-bottom:1px solid #000; }
+                    .ui19-employer { width:100%; border-collapse:collapse; margin-top:2px; table-layout:fixed; }
+                    .ui19-employer td { border:1px solid #000; padding:3px 5px; height:20px; vertical-align:top; }
+                    .ui19-label { font-weight:bold; display:inline-block; min-width:145px; }
+                    .ui19-emps { width:100%; border-collapse:collapse; margin-top:3px; table-layout:fixed; }
+                    .ui19-emps th, .ui19-emps td { border:2px solid #000; padding:2px 4px; height:18px; vertical-align:top; }
+                    .ui19-emps th { text-align:center; font-weight:bold; font-size:9px; height:62px; }
+                    .ui19-emps td { font-size:11px; border-width:1px 2px; }
+                    .ui19-emps .num { text-align:right; }
+                    .ui19-declare { margin-top:8px; font-size:10px; }
+                    .ui19-line { display:inline-block; border-bottom:1px solid #000; min-width:180px; padding:0 8px; }
+                    .ui19-footer-grid { display:grid; grid-template-columns: 1fr 1fr 230px; gap:6px; margin-top:8px; font-size:8px; }
+                    .ui19-box { border:1px solid #000; padding:5px; min-height:58px; }
+                    .ui19-codes { font-size:8px; text-align:center; border:1px solid #000; padding:4px; margin-top:5px; }
+                </style>
+                <div class="ui19-top">
+                    <div style="flex:1;"><h3>UNEMPLOYMENT INSURANCE ACT 63 OF 2001 AS AMENDED</h3><h4>Employers Declaration of Employees for the month of</h4></div>
+                    <div style="font-weight:bold;">UI-19</div>
+                </div>
+                <div style="text-align:right; margin-top:-25px; margin-bottom:5px;"><span class="ui19-month">${ui19Escape(data.month_label)}</span></div>
+                <div class="ui19-small" style="text-align:center; font-weight:bold;">Information to be supplied in terms of Section 56(1&amp;3) read with Regulation 13(1&amp;2)</div>
+                <div class="ui19-small">An employer must by the seventh day of each month inform the Commissioner of employee remuneration details, new appointments and termination of service.</div>
+                <div class="ui19-section-title">1. EMPLOYER DETAILS</div>
+                <table class="ui19-employer">
+                    <tr><td><span class="ui19-label">1.1 UIF Employer Ref / Branch</span>${ui19Escape(employer.uif_ref)} / ${ui19Escape(employer.branch_no)}</td><td><span class="ui19-label">1.2 PAYE Reference No</span>${ui19Escape(employer.paye_ref)}</td></tr>
+                    <tr><td><span class="ui19-label">1.3 Trading name</span>${ui19Escape(employer.trading_name)}</td><td><span class="ui19-label">1.4 Physical Address</span>${ui19Escape(employer.physical_address)}</td></tr>
+                    <tr><td><span class="ui19-label">1.5 Employee Work Address</span>${ui19Escape(employer.work_address)}</td><td><span class="ui19-label">1.6 Postal Address</span>${ui19Escape(employer.postal_address)}</td></tr>
+                    <tr><td><span class="ui19-label">1.7 Co. Reg.No</span>${ui19Escape(employer.company_reg)}</td><td><span class="ui19-label">1.8 Email / 1.9 Fax / 1.10 Phone</span>${ui19Escape(employer.email)} | ${ui19Escape(employer.fax)} | ${ui19Escape(employer.phone)}</td></tr>
+                    <tr><td colspan="2"><span class="ui19-label">1.11 Authorised person</span>${ui19Escape(employer.authorised_person)} &nbsp;&nbsp; <strong>ID No:</strong> ${ui19Escape(employer.authorised_person_id)}</td></tr>
+                </table>
+                <div class="ui19-section-title">2. EMPLOYEE DETAILS</div>
+                <table class="ui19-emps">
+                    <thead><tr>
+                        <th style="width:130px;">A<br>Surname</th><th style="width:45px;">B<br>Initials</th><th style="width:190px;">C<br>Identity Document Number</th><th style="width:95px;">D*<br>Total Gross Remuneration paid per Month<br>R c</th><th style="width:70px;">E*<br>Total Hours Worked</th><th style="width:90px;">F<br>Commencement Date<br>DDMMYY</th><th style="width:90px;">G<br>Termination Date<br>DDMMYY</th><th style="width:70px;">H<br>Reason Code</th><th style="width:70px;">I<br>Contributor<br>YES/NO</th><th style="width:70px;">J***<br>Reason</th>
+                    </tr></thead>
+                    <tbody>${bodyRows.join('')}</tbody>
+                </table>
+                <div class="ui19-declare">I, <span class="ui19-line">${ui19Escape(employer.authorised_person)}</span> (Name of Employer), ID No <span class="ui19-line">${ui19Escape(employer.authorised_person_id)}</span>, declare that the above information is true and correct. I understand that it is an offence to make a false statement.</div>
+                <div class="ui19-declare"><strong>EMPLOYER SIGNATURE</strong> <span class="ui19-line" style="min-width:360px;"></span> <strong>DATE</strong> <span class="ui19-line" style="min-width:180px;"></span></div>
+                <div class="ui19-footer-grid">
+                    <div class="ui19-box"><strong>DESCRIPTIONS</strong><br>D* Remuneration means actual basic salary plus payment in kind. If paid weekly, convert weekly wages x 52/12.<br>E* Total hours worked means actual hours worked during the month.</div>
+                    <div class="ui19-box"><strong>Reason for Non-Contribution</strong><br>1 Temporary employees less than 24 hours per month<br>2 Employees who earn commission only<br>3 No income paid for the payroll period</div>
+                    <div class="ui19-box"><strong>Employer Stamp</strong><br>(if available)</div>
+                </div>
+                <div class="ui19-codes"><strong>REASON FOR TERMINATION CODES</strong><br>2 Deceased &nbsp; 3 Retired &nbsp; 4 Dismissed &nbsp; 5 Contract Expired &nbsp; 6 Resigned &nbsp; 7 Constructive Dismissal &nbsp; 8 Insolvency/Liquidation &nbsp; 9 Maternity/Adoption &nbsp; 10 Illness/Medically Boarded &nbsp; 11 Retrenched/Staff Reduction &nbsp; 12 Transfer to another Branch &nbsp; 13 Absconded &nbsp; 14 Business Closed &nbsp; 15 Death of Domestic Employer &nbsp; 16 Voluntary Severance Package &nbsp; 17 Reduced Work Time &nbsp; 18 Commissioning Parental &nbsp; 19 Parental Leave</div>
+            </div>`;
+        }
+
+        async function downloadUi19() {
+            const month = document.getElementById('ui19Month').value;
+            const selectedIds = getSelectedIds();
+            const status = document.getElementById('ui19Status');
+            status.className = 'small fw-bold text-danger';
+            status.innerText = '';
+            if(selectedIds.length === 0) { status.innerText = 'Please select at least one employee from the payroll list.'; return; }
+            if(!month) { status.innerText = 'Please select a declaration month.'; return; }
+            const payload = {};
+            ui19SettingKeys.forEach(key => {
+                const el = document.getElementById(key);
+                payload[key] = el ? el.value : '';
+            });
+            try {
+                status.className = 'small fw-bold text-primary';
+                status.innerText = 'Saving UI-19 employer details and preparing PDF for selected employees...';
+                const saveRes = await fetch('/api/ui19_settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+                if(!saveRes.ok) throw new Error('Could not save UI-19 employer details.');
+                status.innerText = 'Downloading UI-19 PDF...';
+                window.location.href = `/export_ui19?month=${encodeURIComponent(month)}&employee_ids=${encodeURIComponent(selectedIds.join(','))}`;
+                setTimeout(() => { status.innerText = ''; }, 2500);
+            } catch(err) {
+                status.className = 'small fw-bold text-danger';
+                status.innerText = err.message || 'Could not generate UI-19 form.';
+            }
+        }
+
+        // --- EMP201 LOGIC ---
+        function openEmp201Modal() { document.getElementById('emp201Result').style.display = 'none'; emp201Modal.show(); }
+        function generateEmp201() {
+            const m = document.getElementById('emp201Month').value;
+            if(!m) return alert("Select a month");
+            fetch('/generate_emp201', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({month: m})})
+            .then(r => r.json()).then(res => {
+                document.getElementById('e201Gross').innerText = money(res.gross);
+                document.getElementById('e201Paye').innerText = money(res.paye);
+                document.getElementById('e201Uif').innerText = money(res.uif);
+                document.getElementById('e201Total').innerText = money(res.total);
+                document.getElementById('emp201Result').style.display = 'block';
+            });
+        }
+
+        // --- INDIVIDUAL IRP5 LOGIC ---
+        function openIrp5Modal(id, name) {
+            document.getElementById('irp5EmpId').value = id;
+            document.getElementById('irp5EmpName').value = name;
+            irp5Modal.show();
+        }
+        function generateIrp5() {
+            const year = document.getElementById('irp5Year').value;
+            fetch('/generate_irp5', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({employee_id: document.getElementById('irp5EmpId').value, tax_year: year})})
+            .then(r => r.json()).then(data => {
+                irp5Modal.hide();
+                const p = data.irp5;
+                document.getElementById('biTaxYear').innerText = p.tax_year;
+                document.getElementById('biPeriod').innerText = p.period;
+                document.getElementById('biEmpName').innerText = p.name;
+                document.getElementById('biIdNum').innerText = p.id_num;
+                document.getElementById('biTaxNum').innerText = p.tax_number;
+                document.getElementById('biEmpNum').innerText = p.emp_num;
+                document.getElementById('bi3601').innerText = p.code_3601;
+                document.getElementById('bi3605').innerText = p.code_3605;
+                document.getElementById('bi3702').innerText = p.code_3702;
+                document.getElementById('bi3699').innerText = p.code_3699;
+                document.getElementById('bi4102').innerText = p.code_4102;
+                document.getElementById('bi4141').innerText = p.code_4141;
+                
+                const nameStr = p.name.replace(/\s+/g, '_');
+                html2pdf().set(getPdfOptions(`IRP5_${nameStr}_${p.tax_year}`)).from(document.getElementById('bulkIrp5Content')).save();
+            });
+        }
+
+        function openEmp501Modal() {
+            const year = prompt("Enter the Tax Year End to export (e.g. 2026):", new Date().getFullYear());
+            if(year) window.location.href = `/export_emp501/${year}`;
+        }
+
+        // --- OLD REPORT UI & LOGIC (RESTORED) ---
+        let currentEmpReportData = null;
+        
+        function openReportModal(id, name) { 
+            document.getElementById('reportEmpId').value = id; 
+            document.getElementById('reportEmpName').value = name; 
+            document.getElementById('reportEmpNameDisplay').innerText = name; 
+            document.getElementById('reportResults').style.display = 'none'; 
+            document.getElementById('reportExportBtns').style.display = 'none'; 
+            document.getElementById('reportFilter').value = 'all'; 
+            
+            const date = new Date();
+            const firstDay = new Date(date.getFullYear(), date.getMonth(), 1);
+            document.getElementById('reportStart').value = firstDay.toISOString().split('T')[0];
+            document.getElementById('reportEnd').value = date.toISOString().split('T')[0];
+            
+            reportModal.show(); 
+        }
+        
+        function generateReport() { 
+            const id = document.getElementById('reportEmpId').value; 
+            const name = document.getElementById('reportEmpName').value; 
+            const start = document.getElementById('reportStart').value; 
+            const end = document.getElementById('reportEnd').value; 
+            const filterType = document.getElementById('reportFilter').value; 
+            
+            if (!start || !end) return alert("Select dates."); 
+            
+            const bookingsCol = document.getElementById('bookingsCol'); 
+            const leaveCol = document.getElementById('leaveCol'); 
+            
+            if(filterType === 'leave') { 
+                bookingsCol.style.display = 'none'; 
+                leaveCol.className = 'col-md-12'; 
+                leaveCol.style.display = 'block'; 
+            } else if(filterType === 'bookings') { 
+                leaveCol.style.display = 'none'; 
+                bookingsCol.className = 'col-md-12'; 
+                bookingsCol.style.display = 'block'; 
+            } else { 
+                bookingsCol.style.display = 'block'; 
+                bookingsCol.className = 'col-md-6 border-end'; 
+                leaveCol.style.display = 'block'; 
+                leaveCol.className = 'col-md-6'; 
+            } 
+            
+            fetch('/generate_report', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ employee_id: id, employee_name: name, start_date: start, end_date: end }) 
+            }).then(res => res.json()).then(data => { 
+                currentEmpReportData = data; 
+                document.getElementById('repTotalHours').innerText = data.total_hours + " hrs"; 
+                document.getElementById('repTotalBookings').innerText = data.dates_worked.length; 
+                document.getElementById('repTotalLeave').innerText = data.total_leave + " Days"; 
+                document.getElementById('repLeaveCount').innerText = data.leave_records.length; 
+                
+                const workedList = document.getElementById('repWorkedList'); 
+                workedList.innerHTML = ''; 
+                if(data.dates_worked.length === 0) {
+                    workedList.innerHTML = '<li class="list-group-item text-muted">No shifts found.</li>'; 
+                } else {
+                    data.dates_worked.forEach(d => { 
+                        const dayLabel = d.day ? ` <span class="text-muted small">(${d.day})</span>` : '';
+                        workedList.innerHTML += `<li class="list-group-item py-2"><div class="d-flex justify-content-between align-items-center"><span>📅 ${d.date}${dayLabel}</span><span class="badge bg-primary rounded-pill">${d.client}</span></div>${d.notes ? `<div class="small text-muted mt-1"><strong>Notes:</strong> ${d.notes}</div>` : ''}</li>`; 
+                    }); 
+                }
+                
+                const leaveList = document.getElementById('repLeaveList'); 
+                leaveList.innerHTML = ''; 
+                if(data.leave_records.length === 0) {
+                    leaveList.innerHTML = '<li class="list-group-item text-muted">No leave found.</li>'; 
+                } else {
+                    data.leave_records.forEach(l => { 
+                        let attachmentHTML = ''; 
+                        if (l.doc) attachmentHTML = `<br><a href="/uploads/leave/${l.doc}" target="_blank" class="small text-primary text-decoration-none fw-bold">📎 View Document</a>`; 
+                        const actionsHTML = `<button class="btn btn-sm btn-outline-secondary ms-2" onclick="openEditLeave(${l.id}, '${l.date}', ${l.days}, '${l.type}')">✏️ Edit</button> <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteLeave(${l.id})">🗑️</button>`; 
+                        leaveList.innerHTML += `<li class="list-group-item py-2"><div class="d-flex justify-content-between align-items-center"><div>🏖️ ${l.date} <span class="badge bg-warning text-dark ms-1">${l.days} days (${l.type})</span>${attachmentHTML}</div><div>${actionsHTML}</div></div></li>`; 
+                    }); 
+                }
+                document.getElementById('reportResults').style.display = 'block'; 
+                document.getElementById('reportExportBtns').style.display = 'block'; 
+            }); 
+        }
+        
+        function exportEmpExcel() { 
+            let csv = 'SECTION: BOOKINGS WORKED\nDate,Day of Week,Client Name,Booking Notes\n'; 
+            currentEmpReportData.dates_worked.forEach(r => { csv += `"${r.date}","${r.day || ''}","${r.client}"\n`; }); 
+            csv += `\nTotal Hours,${currentEmpReportData.total_hours}\n\nSECTION: LEAVE TAKEN\nDate,Days,Leave Type\n`; 
+            currentEmpReportData.leave_records.forEach(l => { csv += `"${l.date}","${l.days}","${l.type}"\n`; }); 
+            csv += `\nTotal Leave Days,${currentEmpReportData.total_leave}\n`; 
+            let blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' }); 
+            let link = document.createElement("a"); 
+            link.href = URL.createObjectURL(blob); 
+            link.download = `Activity_Report_${document.getElementById('reportEmpNameDisplay').innerText}.csv`; 
+            document.body.appendChild(link); 
+            link.click(); 
+            document.body.removeChild(link); 
+        }
+        
+        function exportEmpPDF() { 
+            const el = document.getElementById('reportPrintArea'); 
+            html2pdf().set({ margin: 0.5, filename: `Activity_Report_${document.getElementById('reportEmpNameDisplay').innerText}.pdf`, jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' } }).from(el).save(); 
+        }
+        
+        function openEditLeave(id, date, days, type) { 
+            reportModal.hide(); 
+            document.getElementById('editLeaveRecordId').value = id; 
+            document.getElementById('editLeaveDate').value = date; 
+            document.getElementById('editLeaveDays').value = days; 
+            document.getElementById('editLeaveType').value = type; 
+            document.getElementById('editLeaveDocUpload').value = ''; 
+            editLeaveModal.show(); 
+        }
+        
+        function submitEditLeave() { 
+            const fd = new FormData(); 
+            fd.append('leave_id', document.getElementById('editLeaveRecordId').value); 
+            fd.append('date', document.getElementById('editLeaveDate').value); 
+            fd.append('days', document.getElementById('editLeaveDays').value); 
+            fd.append('leave_type', document.getElementById('editLeaveType').value); 
+            const docFile = document.getElementById('editLeaveDocUpload').files[0]; 
+            if(docFile) fd.append('leave_doc', docFile); 
+            fetch('/update_leave', {method:'POST', body: fd}).then(() => location.reload()); 
+        }
+        
+        function deleteLeave(id) { 
+            if(confirm('Delete this record?')) { 
+                fetch('/delete_leave', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({leave_id: id})}).then(() => generateReport()); 
+            } 
+        }
+    </script>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

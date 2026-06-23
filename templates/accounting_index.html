@@ -1,0 +1,1601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accounting | {{ session.get('company_name', 'Easy Admin') }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: #f4f6f9; font-family: Arial, sans-serif; }
+        .topbar { background: linear-gradient(135deg, #111827, #374151); color: white; padding: 22px 0; border-bottom: 5px solid #0d6efd; }
+        .main-card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.06); margin-bottom: 18px; }
+        .nav-pills .nav-link { font-weight: 700; color: #111827; }
+        .nav-pills .nav-link.active { background: #111827; color: white; }
+        .money { text-align: right; font-variant-numeric: tabular-nums; }
+        .small-muted { color: #6b7280; font-size: .86rem; }
+        .table th { white-space: nowrap; }
+        .report-section-title { background: #f8fafc; font-weight: 800; color: #111827; }
+        .report-total { border-top: 2px solid #111827; font-weight: 800; }
+        .sticky-actions { position: sticky; bottom: 0; background: white; border-top: 1px solid #e5e7eb; padding-top: 12px; }
+        .record-banner { border: 1px solid #dbeafe; background: #eff6ff; border-radius: 12px; padding: 14px; }
+        .cashbook-table select { min-width: 230px; }
+        .cashbook-table input { min-width: 150px; }
+        .mapping-panel { border: 1px dashed #93c5fd; background: #eff6ff; border-radius: 12px; padding: 12px; }
+        .doc-preview-frame { width: 100%; height: 72vh; border: 1px solid #e5e7eb; border-radius: 8px; background: #f8fafc; }
+    </style>
+</head>
+<body>
+    <div class="topbar shadow-sm">
+        <div class="container-fluid px-4 d-flex justify-content-between align-items-center">
+            <div>
+                <h2 class="fw-bold mb-0">📘 Accounting</h2>
+                <div class="opacity-75">{{ session.get('company_name') }} · IFRS for SMEs reporting foundation</div>
+            </div>
+            <div>
+                <button class="btn btn-outline-light me-2 fw-bold" onclick="loadAll()">Refresh</button>
+                <a href="/hub" class="btn btn-light fw-bold text-dark">Back to Hub</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="container-fluid px-4 mt-4">
+        <div class="alert alert-info shadow-sm">
+            <strong>Framework:</strong> This module uses a double-entry general ledger and an IFRS for SMEs-style chart of accounts/report structure. Accounting records must post balanced debit and credit entries. Reports are based on posted records only.
+        </div>
+
+        <ul class="nav nav-pills mb-3" id="accountingTabs">
+            <li class="nav-item"><button class="nav-link active" onclick="showTab('reports', this); ensureReportLoaded();">Financial Statements</button></li>
+            <li class="nav-item"><button class="nav-link" onclick="showTab('accounting-reports', this); ensureManagementReportLoaded();">Reports</button></li>
+            <li class="nav-item"><button class="nav-link" onclick="showTab('ledger', this); loadGeneralLedger();">General Ledger</button></li>
+            <li class="nav-item"><button class="nav-link" onclick="showTab('records', this)">Accounting Entries</button></li>
+            <li class="nav-item"><button class="nav-link" onclick="showTab('accounts', this)">Chart of Accounts</button></li>
+        </ul>
+
+        <section id="tab-accounts" class="d-none">
+            <div class="main-card">
+                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                    <div>
+                        <h4 class="fw-bold mb-0">Accounting Settings</h4>
+                        <div class="small-muted">Default accounts used when automated Accounting Entries are posted.</div>
+                    </div>
+                    <button class="btn btn-outline-dark fw-bold" onclick="saveAccountingSettings()">Save Accounting Settings</button>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6 col-lg-4">
+                        <label class="form-label small fw-bold">VAT Control Account</label>
+                        <select id="settingVatControlAccount" class="form-select"></select>
+                        <div class="small-muted mt-1">Used when Cash Book transactions include a specified VAT amount.</div>
+                    </div>
+                </div>
+            </div>
+            <div class="main-card">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div>
+                        <h4 class="fw-bold mb-0">Chart of Accounts</h4>
+                        <div class="small-muted">Company-specific accounts classified for Trial Balance, Income Statement, Balance Sheet and Cash Flow.</div>
+                    </div>
+                    <button class="btn btn-dark fw-bold" onclick="openAccountForm(null)">+ Add Account</button>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover table-sm align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Code</th><th>Account</th><th>Type</th><th>IFRS for SMEs Section</th><th>Normal</th><th>Cash Flow</th><th>Cash/Bank</th><th>Status</th><th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="accountsBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <section id="tab-records" class="d-none">
+            <div class="main-card record-banner">
+                <div class="row g-3 align-items-end">
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">Accounting Record Type</label>
+                        <select id="recordTypeSelect" class="form-select" onchange="switchAccountingRecordType()">
+                            <option value="manual_journal">Manual Journal Entry</option>
+                            <option value="cash_book">Cash Book</option>
+                        </select>
+                    </div>
+                    <div class="col-md-8">
+                        <div class="small-muted" id="recordTypeHelp">
+                            Manual Journal Entries are used for corrections, non-cash items, reallocations, accruals and other accountant-created adjusting entries.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="manualJournalPanel">
+                <div class="row g-3">
+                    <div id="manualJournalMainCol" class="col-lg-7">
+                        <div class="main-card">
+                            <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
+                                <div>
+                                    <h4 class="fw-bold mb-0">Manual Journal Entry</h4>
+                                    <div class="small-muted">Create balanced debit and credit accounting entries. Cash Flow is taken from the selected Chart of Account. VAT Amount uses the VAT Control Account from Accounting Settings.</div>
+                                </div>
+                                <button id="journalToggleRecentBtn" class="btn btn-outline-secondary fw-bold btn-sm" onclick="toggleRecentAccountingEntries()">Hide Recent Accounting Entries</button>
+                            </div>
+                            <div class="row g-2 mb-3">
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-bold">Date</label>
+                                    <input type="date" id="journalDate" class="form-control">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-bold">Reference</label>
+                                    <input type="text" id="journalRef" class="form-control" placeholder="MJ-001">
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small fw-bold">Description</label>
+                                    <input type="text" id="journalDesc" class="form-control" placeholder="Journal memo">
+                                </div>
+                            </div>
+
+                            <div class="table-responsive">
+                                <table class="table table-bordered table-sm align-middle">
+                                    <thead class="table-light"><tr><th style="min-width:220px;">Account</th><th>Description</th><th style="width:130px;">Debit</th><th style="width:130px;">Credit</th><th style="width:130px;">VAT Amount</th><th style="min-width:180px;">Supporting File</th><th style="width:60px;"></th></tr></thead>
+                                    <tbody id="journalLinesBody"></tbody>
+                                    <tfoot>
+                                        <tr class="fw-bold"><td colspan="2" class="text-end">Totals</td><td class="money" id="journalDebitTotal">0.00</td><td class="money" id="journalCreditTotal">0.00</td><td class="money" id="journalVatTotal">0.00</td><td colspan="2" id="journalBalanceStatus"></td></tr>
+                                    </tfoot>
+                                </table>
+                            </div>
+                            <div class="sticky-actions d-flex justify-content-between">
+                                <button class="btn btn-outline-dark fw-bold" onclick="addJournalLine()">+ Add Line</button>
+                                <div>
+                                    <button class="btn btn-outline-secondary fw-bold me-2" onclick="saveJournal(false)">Save Draft</button>
+                                    <button class="btn btn-success fw-bold" onclick="saveJournal(true)">Post Journal</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="recentAccountingEntriesCol" class="col-lg-5">
+                        <div class="main-card">
+                            <h4 class="fw-bold">Recent Accounting Entries</h4>
+                            <div class="table-responsive" style="max-height:520px; overflow-y:auto;">
+                                <table class="table table-sm table-hover align-middle">
+                                    <thead class="table-light"><tr><th>Date</th><th>Ref</th><th>Type</th><th>Status</th><th class="money">Debit</th><th></th></tr></thead>
+                                    <tbody id="journalsBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="cashBookPanel" class="d-none">
+                <div class="row g-3">
+                    <div id="cashbookMainCol" class="col-xl-9">
+                        <div class="main-card">
+                            <div class="d-flex justify-content-between align-items-start mb-3">
+                                <div>
+                                    <h4 class="fw-bold mb-0">Cash Book</h4>
+                                    <div class="small-muted">Upload a bank statement CSV, review the imported bank lines, then allocate each line to a Chart of Account before posting. Debit means money out of the bank; Credit means money into the bank. Cash Flow is taken from the selected Chart of Account.</div>
+                                </div>
+                                <span class="badge bg-primary">Double-entry posting</span>
+                            </div>
+                            <div class="row g-2 align-items-end mb-3">
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-bold">Bank Account</label>
+                                    <select id="cashbookBankAccount" class="form-select"></select>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small fw-bold">Bank Format</label>
+                                    <select id="cashbookBankFormat" class="form-select" onchange="cashbookFormatChanged()">
+                                        <option value="auto">Auto-detect</option>
+                                        <option value="fnb">FNB / RMB</option>
+                                        <option value="standard_bank">Standard Bank</option>
+                                        <option value="absa">Absa</option>
+                                        <option value="nedbank">Nedbank</option>
+                                        <option value="capitec">Capitec</option>
+                                        <option value="investec">Investec</option>
+                                        <option value="tymebank">TymeBank / GoTyme</option>
+                                        <option value="generic">Generic CSV</option>
+                                        <option value="custom">Custom Mapping</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small fw-bold">Bank CSV File</label>
+                                    <input type="file" id="cashbookFile" class="form-control" accept=".csv,text/csv" onchange="cashbookFileChanged()">
+                                </div>
+                                <div class="col-md-2 d-grid gap-1">
+                                    <button id="cashbookToggleRecentBtn" class="btn btn-outline-secondary fw-bold btn-sm" onclick="toggleCashbookRecentImports()">Hide Recent Imports</button>
+                                    <button class="btn btn-outline-dark fw-bold btn-sm" onclick="inspectCashbookCsv(true)">Map Columns</button>
+                                    <button class="btn btn-dark fw-bold btn-sm" onclick="uploadCashbookCsv()">Upload CSV</button>
+                                </div>
+                            </div>
+                            <div id="cashbookMappingPanel" class="mapping-panel d-none mb-3">
+                                <div class="d-flex justify-content-between align-items-start mb-2">
+                                    <div>
+                                        <div class="fw-bold">Column Mapping Fallback</div>
+                                        <div class="small-muted">Map your bank CSV columns when the app cannot detect the format automatically. Debit is treated as Money Out; Credit is treated as Money In. Balance is optional and ignored for posting.</div>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="hideCashbookMappingPanel()">Hide</button>
+                                </div>
+                                <div class="row g-2">
+                                    <div class="col-md-2"><label class="form-label small fw-bold">Date</label><select id="mapDate" class="form-select form-select-sm"></select></div>
+                                    <div class="col-md-3"><label class="form-label small fw-bold">Description</label><select id="mapDescription" class="form-select form-select-sm"></select></div>
+                                    <div class="col-md-2"><label class="form-label small fw-bold">Debit / Money Out</label><select id="mapDebit" class="form-select form-select-sm"></select></div>
+                                    <div class="col-md-2"><label class="form-label small fw-bold">Credit / Money In</label><select id="mapCredit" class="form-select form-select-sm"></select></div>
+                                    <div class="col-md-2"><label class="form-label small fw-bold">Amount</label><select id="mapAmount" class="form-select form-select-sm"></select></div>
+                                    <div class="col-md-1"><label class="form-label small fw-bold">Balance</label><select id="mapBalance" class="form-select form-select-sm"></select></div>
+                                </div>
+                                <div id="cashbookMappingStatus" class="small-muted mt-2"></div>
+                                <div id="cashbookMappingPreview" class="table-responsive mt-2 d-none"></div>
+                            </div>
+                            <div id="cashbookActiveBatch" class="alert alert-light border d-none"></div>
+                            <div class="table-responsive" style="max-height:560px; overflow:auto;">
+                                <table class="table table-bordered table-sm align-middle cashbook-table">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th style="width:95px;">Date</th>
+                                            <th style="min-width:260px;">Description</th>
+                                            <th class="money">Debit<br><span class="small-muted fw-normal">Money Out</span></th>
+                                            <th class="money">Credit<br><span class="small-muted fw-normal">Money In</span></th>
+                                            <th class="money" style="min-width:130px;">VAT Amount</th>
+                                            <th style="min-width:240px;">Allocate to Chart of Account</th>
+                                            <th style="min-width:180px;">Supporting File</th>
+                                            <th style="min-width:160px;">Notes</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="cashbookLinesBody">
+                                        <tr><td colspan="9" class="text-center text-muted py-4">Upload a bank CSV or open a draft batch.</td></tr>
+                                    </tbody>
+                                    <tfoot class="table-light">
+                                        <tr class="fw-bold">
+                                            <td colspan="2" class="text-end">Totals</td>
+                                            <td class="money" id="cashbookDebitTotal">0.00</td>
+                                            <td class="money" id="cashbookCreditTotal">0.00</td>
+                                            <td colspan="5"></td>
+                                        </tr>
+                                    </tfoot>
+                                </table>
+                            </div>
+                            <div class="sticky-actions d-flex justify-content-between align-items-center">
+                                <div id="cashbookAllocationStatus" class="small-muted">No cash book batch loaded.</div>
+                                <div>
+                                    <button class="btn btn-outline-primary fw-bold me-2" onclick="insertCashbookRow()">Insert Row</button>
+                                    <button class="btn btn-outline-secondary fw-bold me-2" onclick="saveCashbookAllocations()">Save Allocations</button>
+                                    <button class="btn btn-success fw-bold" onclick="postCashbookBatch()">Post Cash Book</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="cashbookRecentImportsCol" class="col-xl-3">
+                        <div class="main-card">
+                            <h5 class="fw-bold">Recent Cash Book Imports</h5>
+                            <div id="cashbookBatches" class="list-group small" style="max-height:650px; overflow:auto;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="tab-accounting-reports" class="d-none">
+            <div class="main-card">
+                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                    <div>
+                        <h4 class="fw-bold mb-0">Reports</h4>
+                        <div class="small-muted">Operational accounting reports for sales, Chart of Accounts and VAT return support.</div>
+                    </div>
+                    <span class="badge bg-dark">Posted accounting data</span>
+                </div>
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                        <label class="form-label small fw-bold">Report Type</label>
+                        <select id="managementReportType" class="form-select" onchange="loadAccountingManagementReport()">
+                            <option value="sales">Sales Report</option>
+                            <option value="chart_of_accounts">Chart of Accounts Report</option>
+                            <option value="vat">VAT Report</option>
+                            <option value="bank_reconciliation">Bank Reconciliation</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small fw-bold">Start Date</label>
+                        <input type="date" id="managementReportStart" class="form-control">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small fw-bold">End Date</label>
+                        <input type="date" id="managementReportEnd" class="form-control">
+                    </div>
+                    <div class="col-md-3 d-grid gap-1">
+                        <button class="btn btn-dark fw-bold" onclick="loadAccountingManagementReport()">View Report</button>
+                        <div class="dropdown">
+                            <button class="btn btn-outline-dark fw-bold dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" aria-expanded="false" id="managementReportDownloadLabel">Download</button>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                                <li><button class="dropdown-item" type="button" onclick="downloadAccountingManagementReport('pdf')">Current report as PDF</button></li>
+                                <li><button class="dropdown-item" type="button" onclick="downloadAccountingManagementReport('excel')">Current report as Excel</button></li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="small-muted mt-2" id="managementReportHelp">Sales Report shows invoices and credit notes posted to Accounting for the selected period.</div>
+            </div>
+            <div class="main-card">
+                <div id="managementReportOutput" class="table-responsive">
+                    <div class="text-muted text-center py-5">Select View Report to display an accounting report.</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="tab-ledger" class="d-none">
+            <div class="main-card">
+                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                    <div>
+                        <h4 class="fw-bold mb-0">General Ledger</h4>
+                        <div class="small-muted">Detailed posted accounting record lines by Chart of Account, including opening balance, debit, credit and running balance.</div>
+                    </div>
+                    <span class="badge bg-dark">Posted records only</span>
+                </div>
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                        <label class="form-label small fw-bold">Start Date</label>
+                        <input type="date" id="ledgerStart" class="form-control">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small fw-bold">End Date</label>
+                        <input type="date" id="ledgerEnd" class="form-control">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small fw-bold">Account</label>
+                        <select id="ledgerAccountFilter" class="form-select"></select>
+                    </div>
+                    <div class="col-md-2 d-grid gap-1">
+                        <button class="btn btn-dark fw-bold" onclick="loadGeneralLedger()">View Ledger</button>
+                        <div class="dropdown">
+                            <button class="btn btn-outline-dark fw-bold dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" aria-expanded="false">Download</button>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                                <li><button class="dropdown-item" type="button" onclick="downloadAccountingPdf('general_ledger')">General Ledger PDF</button></li>
+                                <li><button class="dropdown-item" type="button" onclick="downloadAccountingExcel('general_ledger')">General Ledger Excel</button></li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="main-card">
+                <div id="ledgerOutput" class="table-responsive">
+                    <div class="text-muted text-center py-5">Select View Ledger to display posted general ledger transactions.</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="tab-reports">
+            <div class="main-card">
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                        <label class="form-label small fw-bold">Start Date</label>
+                        <input type="date" id="reportStart" class="form-control">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small fw-bold">End / As-at Date</label>
+                        <input type="date" id="reportEnd" class="form-control">
+                    </div>
+                    <div class="col-md-6 d-flex gap-2 flex-wrap align-items-end">
+                        <button class="btn btn-outline-dark fw-bold" onclick="loadTrialBalance()">Trial Balance</button>
+                        <button class="btn btn-outline-primary fw-bold" onclick="loadIncomeStatement()">Income Statement</button>
+                        <button class="btn btn-outline-success fw-bold" onclick="loadBalanceSheet()">Balance Sheet</button>
+                        <button class="btn btn-outline-info fw-bold" onclick="loadCashFlow()">Cash Flow</button>
+                        <div class="dropdown ms-auto">
+                            <button class="btn btn-dark fw-bold dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" id="reportDownloadDropdownLabel">Download</button>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                                <li><button class="dropdown-item" type="button" onclick="downloadCurrentAccountingReport('pdf')">Current report as PDF</button></li>
+                                <li><button class="dropdown-item" type="button" onclick="downloadCurrentAccountingReport('excel')">Current report as Excel</button></li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="main-card">
+                <div id="reportOutput" class="table-responsive">
+                    <div class="text-muted text-center py-5">Select a report above.</div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <div class="modal fade" id="accountFormModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title" id="accountFormTitle">Account</h5>
+                    <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="accountId">
+                    <div class="row g-3">
+                        <div class="col-md-3"><label class="form-label small fw-bold">Code</label><input id="accountCode" class="form-control"></div>
+                        <div class="col-md-9"><label class="form-label small fw-bold">Account Name</label><input id="accountName" class="form-control"></div>
+                        <div class="col-md-4"><label class="form-label small fw-bold">Type</label><select id="accountType" class="form-select" onchange="suggestAccountSettings()"></select></div>
+                        <div class="col-md-4"><label class="form-label small fw-bold">Report Section</label><select id="accountSection" class="form-select"></select></div>
+                        <div class="col-md-4"><label class="form-label small fw-bold">Normal Balance</label><select id="accountNormal" class="form-select"><option value="debit">Debit</option><option value="credit">Credit</option></select></div>
+                        <div class="col-md-4"><label class="form-label small fw-bold">Cash Flow Category</label><select id="accountCashFlow" class="form-select"><option value="operating">Operating</option><option value="investing">Investing</option><option value="financing">Financing</option><option value="non_cash">Non-cash</option></select></div>
+                        <div class="col-md-4 d-flex align-items-end"><div class="form-check"><input class="form-check-input" type="checkbox" id="accountIsCash"><label class="form-check-label fw-bold" for="accountIsCash">Cash / Bank account</label></div></div>
+                        <div class="col-md-4 d-flex align-items-end"><div class="form-check"><input class="form-check-input" type="checkbox" id="accountActive" checked><label class="form-check-label fw-bold" for="accountActive">Active</label></div></div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button class="btn btn-dark fw-bold" onclick="saveAccount()">Save Account</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="accountingDocPreviewModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title" id="accountingDocPreviewTitle">Supporting Document</h5>
+                    <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-secondary small mb-2">Preview opens inside Easy Admin. If the document type cannot be previewed by your browser, use the download button.</div>
+                    <iframe id="accountingDocPreviewFrame" class="doc-preview-frame" title="Supporting document preview"></iframe>
+                </div>
+                <div class="modal-footer">
+                    <a id="accountingDocDownloadBtn" class="btn btn-dark fw-bold" href="#" download>Download Document</a>
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let accounts = [];
+let sectionLabels = {};
+let accountingSettings = {};
+let cashbookBatchId = null;
+let cashbookBatchStatus = null;
+let cashbookLines = [];
+let cashbookNewLineCounter = 0;
+let cashbookCsvHeaders = [];
+let cashbookDetectedMapping = {};
+let cashbookMappingRequired = false;
+const accountFormModal = new bootstrap.Modal(document.getElementById('accountFormModal'));
+const accountingDocPreviewModal = new bootstrap.Modal(document.getElementById('accountingDocPreviewModal'));
+const accountTypes = { asset: 'Assets', liability: 'Liabilities', equity: 'Equity', income: 'Income', cost_of_sales: 'Cost of Sales', expense: 'Expenses' };
+const sectionsByType = { asset: ['current_asset','non_current_asset'], liability: ['current_liability','non_current_liability'], equity: ['equity'], income: ['revenue','other_income'], cost_of_sales: ['cost_of_sales'], expense: ['operating_expense','finance_cost','income_tax_expense'] };
+
+function today() { return new Date().toISOString().slice(0,10); }
+function money(v) { return Number(v || 0).toLocaleString('en-ZA', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+function fmtDate(v) { if(!v) return ''; const s = String(v); const iso = s.match(/^(\d{4})[-\/](\d{2})[-\/](\d{2})/); if(iso) return `${iso[1]}-${iso[2]}-${iso[3]}`; const sa = s.match(/^(\d{1,2})[\/](\d{1,2})[\/](\d{4})$/); if(sa) return `${sa[3]}-${String(sa[2]).padStart(2,'0')}-${String(sa[1]).padStart(2,'0')}`; return s; }
+function esc(v) { return String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function accountById(id) { return accounts.find(a => String(a.id) === String(id)); }
+
+function showTab(name, btn) {
+    ['accounts','records','ledger','reports','accounting-reports'].forEach(t => document.getElementById('tab-' + t).classList.toggle('d-none', t !== name));
+    document.querySelectorAll('#accountingTabs .nav-link').forEach(item => item.classList.remove('active'));
+    if(btn) btn.classList.add('active');
+}
+
+function switchAccountingRecordType() {
+    const type = document.getElementById('recordTypeSelect').value;
+    document.getElementById('manualJournalPanel').classList.toggle('d-none', type !== 'manual_journal');
+    document.getElementById('cashBookPanel').classList.toggle('d-none', type !== 'cash_book');
+    document.getElementById('recordTypeHelp').innerText = type === 'cash_book'
+        ? 'Cash Book is used to import bank statement CSV files, then allocate each bank line to a Chart of Account before posting to the ledger.'
+        : 'Manual Journal Entries are used for corrections, non-cash items, reallocations, accruals and other accountant-created adjusting entries.';
+    if(type === 'cash_book') loadCashbookBatches();
+    if(type === 'manual_journal') restoreRecentAccountingEntriesPreference();
+}
+
+function loadAll() {
+    return loadAccounts().then(() => {
+        loadAccountingSettings();
+        loadJournals();
+        loadCashbookBatches();
+    });
+}
+
+function loadAccounts() {
+    return fetch('/api/accounting/accounts').then(r => r.json()).then(data => {
+        accounts = data.accounts || [];
+        sectionLabels = data.sections || {};
+        renderAccounts();
+        renderAccountSelects();
+        renderBankAccountSelect();
+        renderLedgerAccountSelect();
+        renderAccountingSettingsControls();
+        renderCashbookLines(cashbookLines);
+    });
+}
+
+function renderAccounts() {
+    const body = document.getElementById('accountsBody');
+    body.innerHTML = accounts.map(a => `<tr>
+        <td><strong>${esc(a.account_code)}</strong></td>
+        <td>${esc(a.account_name)}</td>
+        <td>${accountTypes[a.account_type] || esc(a.account_type)}</td>
+        <td>${sectionLabels[a.report_section] || esc(a.report_section)}</td>
+        <td><span class="badge bg-${a.normal_balance === 'credit' ? 'secondary' : 'primary'}">${esc(a.normal_balance)}</span></td>
+        <td>${esc(a.cash_flow_category || '')}</td>
+        <td>${Number(a.is_cash_equivalent) ? '✅' : ''}</td>
+        <td>${Number(a.active) ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Inactive</span>'}</td>
+        <td><button class="btn btn-sm btn-outline-dark" onclick='openAccountForm(${JSON.stringify(a).replace(/'/g, "&#39;")})'>Edit</button></td>
+    </tr>`).join('') || '<tr><td colspan="9" class="text-center text-muted py-4">No accounts yet.</td></tr>';
+}
+
+function renderAccountSelects() {
+    document.querySelectorAll('.journal-account-select').forEach(sel => {
+        const current = sel.value;
+        sel.innerHTML = accountOptionsHtml(current);
+    });
+}
+
+function accountOptionsHtml(selected='') {
+    return '<option value="">Select account...</option>' + accounts.filter(a => Number(a.active)).map(a => `<option value="${a.id}" ${String(a.id) === String(selected) ? 'selected' : ''}>${esc(a.account_code)} - ${esc(a.account_name)}</option>`).join('');
+}
+
+function cashFlowOptionsHtml(selected='operating') {
+    const opts = {operating:'Operating', investing:'Investing', financing:'Financing', non_cash:'Non-cash'};
+    return Object.entries(opts).map(([k,v]) => `<option value="${k}" ${String(selected || 'operating') === k ? 'selected' : ''}>${v}</option>`).join('');
+}
+
+function renderBankAccountSelect() {
+    const sel = document.getElementById('cashbookBankAccount');
+    const current = sel.value;
+    const banks = accounts.filter(a => Number(a.active) && Number(a.is_cash_equivalent));
+    sel.innerHTML = banks.length
+        ? banks.map(a => `<option value="${a.id}" ${String(a.id) === String(current) ? 'selected' : ''}>${esc(a.account_code)} - ${esc(a.account_name)}</option>`).join('')
+        : '<option value="">No active Cash / Bank accounts found</option>';
+}
+
+function renderLedgerAccountSelect() {
+    const sel = document.getElementById('ledgerAccountFilter');
+    if(!sel) return;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">All accounts</option>' + accounts.map(a => `<option value="${a.id}" ${String(a.id) === String(current) ? 'selected' : ''}>${esc(a.account_code)} - ${esc(a.account_name)}</option>`).join('');
+}
+
+function renderAccountingSettingsControls() {
+    const vatSel = document.getElementById('settingVatControlAccount');
+    if(!vatSel) return;
+    const current = accountingSettings.vat_control_account_id || accountingSettings.vat_output_account_id || vatSel.value || '';
+    const validTypes = ['liability', 'asset'];
+    const vatAccounts = accounts.filter(a => Number(a.active) && (String(a.account_name || '').toLowerCase().includes('vat') || validTypes.includes(a.account_type)));
+    const list = vatAccounts.length ? vatAccounts : accounts.filter(a => Number(a.active));
+    vatSel.innerHTML = '<option value="">Select VAT Control account...</option>' + list.map(a => `<option value="${a.id}" ${String(a.id) === String(current) ? 'selected' : ''}>${esc(a.account_code)} - ${esc(a.account_name)}</option>`).join('');
+}
+
+function loadAccountingSettings() {
+    return fetch('/api/accounting/settings').then(r => r.json()).then(data => {
+        if(data.status === 'error') { console.warn(data.message); return; }
+        accountingSettings = data.settings || {};
+        renderAccountingSettingsControls();
+    });
+}
+
+function saveAccountingSettings() {
+    const payload = {
+        vat_control_account_id: document.getElementById('settingVatControlAccount')?.value || ''
+    };
+    fetch('/api/accounting/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})
+        .then(r => r.json()).then(data => {
+            if(data.status === 'error') return alert(data.message || 'Could not save accounting settings.');
+            accountingSettings = data.settings || {};
+            renderAccountingSettingsControls();
+            alert('Accounting settings saved.');
+        });
+}
+
+function openAccountForm(account) {
+    document.getElementById('accountFormTitle').innerText = account ? 'Edit Account' : 'Add Account';
+    document.getElementById('accountId').value = account ? account.id : '';
+    document.getElementById('accountCode').value = account ? account.account_code : '';
+    document.getElementById('accountName').value = account ? account.account_name : '';
+    document.getElementById('accountType').innerHTML = Object.entries(accountTypes).map(([k,v]) => `<option value="${k}">${v}</option>`).join('');
+    document.getElementById('accountType').value = account ? account.account_type : 'expense';
+    populateSections(account ? account.report_section : null);
+    document.getElementById('accountNormal').value = account ? account.normal_balance : 'debit';
+    document.getElementById('accountCashFlow').value = account ? (account.cash_flow_category || 'operating') : 'operating';
+    document.getElementById('accountIsCash').checked = account ? Number(account.is_cash_equivalent) === 1 : false;
+    document.getElementById('accountActive').checked = account ? Number(account.active) === 1 : true;
+    accountFormModal.show();
+}
+
+function populateSections(selected=null) {
+    const type = document.getElementById('accountType').value;
+    const opts = sectionsByType[type] || ['operating_expense'];
+    document.getElementById('accountSection').innerHTML = opts.map(s => `<option value="${s}" ${selected === s ? 'selected' : ''}>${sectionLabels[s] || s}</option>`).join('');
+}
+
+function suggestAccountSettings() {
+    populateSections();
+    const type = document.getElementById('accountType').value;
+    document.getElementById('accountNormal').value = ['liability','equity','income'].includes(type) ? 'credit' : 'debit';
+}
+
+function saveAccount() {
+    const payload = {
+        id: document.getElementById('accountId').value,
+        account_code: document.getElementById('accountCode').value,
+        account_name: document.getElementById('accountName').value,
+        account_type: document.getElementById('accountType').value,
+        report_section: document.getElementById('accountSection').value,
+        normal_balance: document.getElementById('accountNormal').value,
+        cash_flow_category: document.getElementById('accountCashFlow').value,
+        is_cash_equivalent: document.getElementById('accountIsCash').checked,
+        active: document.getElementById('accountActive').checked
+    };
+    fetch('/api/accounting/accounts', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})
+        .then(r => r.json()).then(res => { if(res.status === 'error') return alert(res.message); accountFormModal.hide(); loadAccounts(); });
+}
+
+function accountingDocumentButton(fileObj, label='View Document', linkClass='btn btn-sm btn-outline-primary') {
+    if(!fileObj || !(fileObj.view_url || fileObj.download_url)) return '';
+    return `<button type="button" class="${linkClass}" data-view-url="${esc(fileObj.view_url || fileObj.download_url)}" data-download-url="${esc(fileObj.download_url || fileObj.view_url)}" data-filename="${esc(fileObj.original_filename || 'Supporting document')}" onclick="openAccountingDocumentFromButton(this)">${esc(label)}</button>`;
+}
+
+function accountingFileCell(fileObj, inputClass, disabled=false) {
+    const link = fileObj && (fileObj.view_url || fileObj.download_url) ? `<div class="small mt-1">${accountingDocumentButton(fileObj, fileObj.original_filename || 'View file', 'btn btn-link btn-sm p-0')}</div>` : '<div class="small-muted mt-1">No file attached</div>';
+    if(disabled) return link;
+    return `<input type="file" class="form-control form-control-sm ${inputClass}" accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.jpg,.jpeg,.png,.gif,.webp,.heic">${link}`;
+}
+
+function openAccountingDocumentFromButton(btn) {
+    if(!btn) return;
+    openAccountingDocument(btn.dataset.viewUrl || '', btn.dataset.downloadUrl || '', btn.dataset.filename || 'Supporting document');
+}
+
+function openAccountingDocument(viewUrl, downloadUrl, filename) {
+    if(!viewUrl && !downloadUrl) return;
+    const title = document.getElementById('accountingDocPreviewTitle');
+    const frame = document.getElementById('accountingDocPreviewFrame');
+    const download = document.getElementById('accountingDocDownloadBtn');
+    title.textContent = filename || 'Supporting Document';
+    frame.src = viewUrl || downloadUrl;
+    download.href = downloadUrl || viewUrl;
+    download.setAttribute('download', filename || 'supporting-document');
+    accountingDocPreviewModal.show();
+}
+
+const docPreviewEl = document.getElementById('accountingDocPreviewModal');
+if(docPreviewEl) {
+    docPreviewEl.addEventListener('hidden.bs.modal', () => {
+        const frame = document.getElementById('accountingDocPreviewFrame');
+        if(frame) frame.src = 'about:blank';
+    });
+}
+
+function ledgerDocumentCell(fileObj) {
+    if(!fileObj || !(fileObj.view_url || fileObj.download_url)) return '<span class="text-muted">-</span>';
+    return accountingDocumentButton(fileObj, 'View Document', 'btn btn-sm btn-outline-primary');
+}
+
+function addJournalLine(line={}) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><select class="form-select form-select-sm journal-account-select">${accountOptionsHtml(line.account_id || '')}</select></td>
+        <td><input class="form-control form-control-sm journal-line-desc" value="${esc(line.description || '')}"></td>
+        <td><input type="number" step="0.01" min="0" class="form-control form-control-sm money journal-debit" value="${line.debit || ''}" oninput="updateJournalTotals()"></td>
+        <td><input type="number" step="0.01" min="0" class="form-control form-control-sm money journal-credit" value="${line.credit || ''}" oninput="updateJournalTotals()"></td>
+        <td><input type="number" step="0.01" min="0" class="form-control form-control-sm money journal-vat-amount" value="${Number(line.vat_amount || 0) ? Number(line.vat_amount || 0).toFixed(2) : ''}" oninput="updateJournalTotals()" placeholder="0.00"></td>
+        <td>${accountingFileCell(line.transaction_file, 'journal-file')}</td>
+        <td><button class="btn btn-sm btn-outline-danger" onclick="this.closest('tr').remove(); updateJournalTotals();">×</button></td>`;
+    document.getElementById('journalLinesBody').appendChild(tr);
+    updateJournalTotals();
+}
+
+function journalRows() {
+    return [...document.querySelectorAll('#journalLinesBody tr')];
+}
+
+function journalLines() {
+    return journalRows().map((tr, idx) => ({
+        client_index: idx,
+        account_id: tr.querySelector('.journal-account-select').value,
+        description: tr.querySelector('.journal-line-desc').value,
+        debit: tr.querySelector('.journal-debit').value,
+        credit: tr.querySelector('.journal-credit').value,
+        vat_amount: tr.querySelector('.journal-vat-amount')?.value || '0'
+    }));
+}
+
+function updateJournalTotals() {
+    let d = 0, c = 0, v = 0;
+    document.querySelectorAll('.journal-debit').forEach(i => d += Number(i.value || 0));
+    document.querySelectorAll('.journal-credit').forEach(i => c += Number(i.value || 0));
+    document.querySelectorAll('.journal-vat-amount').forEach(i => v += Number(i.value || 0));
+    document.getElementById('journalDebitTotal').innerText = money(d);
+    document.getElementById('journalCreditTotal').innerText = money(c);
+    const vatTotal = document.getElementById('journalVatTotal');
+    if(vatTotal) vatTotal.innerText = money(v);
+    const status = document.getElementById('journalBalanceStatus');
+    const diff = Math.round((d-c)*100)/100;
+    status.innerHTML = diff === 0 ? '<span class="badge bg-success">Balanced</span>' : `<span class="badge bg-danger">Difference ${money(diff)}</span>`;
+}
+
+function clearJournalForm() {
+    document.getElementById('journalDate').value = today();
+    document.getElementById('journalRef').value = '';
+    document.getElementById('journalDesc').value = '';
+    document.getElementById('journalLinesBody').innerHTML = '';
+    addJournalLine(); addJournalLine();
+}
+
+function saveJournal(postNow) {
+    const payload = { journal_date: document.getElementById('journalDate').value, reference: document.getElementById('journalRef').value, description: document.getElementById('journalDesc').value, post_now: postNow, lines: journalLines() };
+    const fd = new FormData();
+    fd.append('payload', JSON.stringify(payload));
+    journalRows().forEach((tr, idx) => {
+        const file = tr.querySelector('.journal-file')?.files?.[0];
+        if(file) fd.append(`journal_file_${idx}`, file);
+    });
+    fetch('/api/accounting/journals', {method:'POST', body:fd})
+        .then(r => r.json()).then(res => { if(res.status === 'error') return alert(res.message); clearJournalForm(); loadJournals(); if(postNow) loadTrialBalance(); });
+}
+
+function loadJournals() {
+    return fetch('/api/accounting/journals').then(r => r.json()).then(data => {
+        const body = document.getElementById('journalsBody');
+        body.innerHTML = (data.journals || []).map(j => `<tr><td>${esc(j.journal_date)}</td><td>${esc(j.reference || j.id)}</td><td>${esc((j.source_module || 'manual').replace('_',' '))}</td><td><span class="badge bg-${j.status === 'posted' ? 'success' : 'secondary'}">${esc(j.status)}</span></td><td class="money">${money(j.debit_total)}</td><td>${j.status !== 'posted' ? `<button class="btn btn-sm btn-success" onclick="postJournal(${j.id})">Post</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted">No accounting entries yet.</td></tr>';
+    });
+}
+
+function postJournal(id) {
+    if(!confirm('Post this journal? Posted journals are used in reports.')) return;
+    fetch(`/api/accounting/journals/${id}/post`, {method:'POST'}).then(r => r.json()).then(res => { if(res.status === 'error') return alert(res.message); loadJournals(); });
+}
+
+function cashbookFormatChanged() {
+    const format = document.getElementById('cashbookBankFormat')?.value || 'auto';
+    if(format === 'custom') {
+        cashbookMappingRequired = true;
+        document.getElementById('cashbookMappingPanel')?.classList.remove('d-none');
+        document.getElementById('cashbookMappingStatus').innerText = 'Custom Mapping selected. Use Map Columns to load the CSV headers, then map the fields before uploading.';
+    }
+}
+
+function cashbookFileChanged() {
+    cashbookCsvHeaders = [];
+    cashbookDetectedMapping = {};
+    cashbookMappingRequired = false;
+    document.getElementById('cashbookMappingPreview')?.classList.add('d-none');
+    document.getElementById('cashbookMappingStatus').innerText = '';
+}
+
+function cashbookMappingOptionHtml(selected='', includeBlank=true) {
+    let html = includeBlank ? '<option value="">Not used</option>' : '';
+    cashbookCsvHeaders.forEach(h => html += `<option value="${esc(h)}" ${String(selected || '') === String(h) ? 'selected' : ''}>${esc(h)}</option>`);
+    return html;
+}
+
+function renderCashbookMappingControls(mapping={}, preview=[]) {
+    const panel = document.getElementById('cashbookMappingPanel');
+    panel.classList.remove('d-none');
+    document.getElementById('mapDate').innerHTML = cashbookMappingOptionHtml(mapping.transaction_date || mapping.date || '', false);
+    document.getElementById('mapDescription').innerHTML = cashbookMappingOptionHtml(mapping.description || '', false);
+    document.getElementById('mapDebit').innerHTML = cashbookMappingOptionHtml(mapping.debit || '');
+    document.getElementById('mapCredit').innerHTML = cashbookMappingOptionHtml(mapping.credit || '');
+    document.getElementById('mapAmount').innerHTML = cashbookMappingOptionHtml(mapping.amount || '');
+    document.getElementById('mapBalance').innerHTML = cashbookMappingOptionHtml(mapping.balance || '');
+    document.getElementById('cashbookMappingStatus').innerText = cashbookMappingRequired
+        ? 'Please confirm the required mappings: Date, Description and either Debit/Credit or Amount.'
+        : 'The app detected the columns below. You can adjust them before uploading.';
+    if(preview && preview.length) {
+        const headers = cashbookCsvHeaders.slice(0, 8);
+        let html = '<table class="table table-sm table-bordered mb-0"><thead><tr>' + headers.map(h => `<th>${esc(h)}</th>`).join('') + '</tr></thead><tbody>';
+        preview.forEach(row => { html += '<tr>' + headers.map(h => `<td>${esc(row[h] || '')}</td>`).join('') + '</tr>'; });
+        html += '</tbody></table>';
+        const previewBox = document.getElementById('cashbookMappingPreview');
+        previewBox.innerHTML = html;
+        previewBox.classList.remove('d-none');
+    }
+}
+
+function hideCashbookMappingPanel() {
+    document.getElementById('cashbookMappingPanel')?.classList.add('d-none');
+}
+
+function cashbookCurrentMapping() {
+    return {
+        transaction_date: document.getElementById('mapDate')?.value || '',
+        description: document.getElementById('mapDescription')?.value || '',
+        debit: document.getElementById('mapDebit')?.value || '',
+        credit: document.getElementById('mapCredit')?.value || '',
+        amount: document.getElementById('mapAmount')?.value || '',
+        balance: document.getElementById('mapBalance')?.value || ''
+    };
+}
+
+function mappingPanelVisible() {
+    return !document.getElementById('cashbookMappingPanel')?.classList.contains('d-none');
+}
+
+function inspectCashbookCsv(showAlert=false) {
+    const file = document.getElementById('cashbookFile').files[0];
+    if(!file) { alert('Please select a CSV file first.'); return Promise.resolve(false); }
+    const fd = new FormData();
+    fd.append('bank_format', document.getElementById('cashbookBankFormat')?.value || 'auto');
+    fd.append('bank_statement', file);
+    if(mappingPanelVisible()) fd.append('column_mapping', JSON.stringify(cashbookCurrentMapping()));
+    return fetch('/api/accounting/cashbook/inspect', {method:'POST', body: fd})
+        .then(r => r.json()).then(data => {
+            if(data.status === 'error') { alert(data.message); return false; }
+            cashbookCsvHeaders = data.headers || [];
+            cashbookDetectedMapping = data.detected_mapping || {};
+            cashbookMappingRequired = !!data.mapping_required;
+            renderCashbookMappingControls(cashbookDetectedMapping, data.preview || []);
+            if(showAlert && !cashbookMappingRequired) alert('Columns detected. Review the mapping, then upload the CSV.');
+            return true;
+        });
+}
+
+function uploadCashbookCsv() {
+    const bankAccountId = document.getElementById('cashbookBankAccount').value;
+    const file = document.getElementById('cashbookFile').files[0];
+    if(!bankAccountId) return alert('Please select the bank account for this statement.');
+    if(!file) return alert('Please select a CSV file to upload.');
+    const fd = new FormData();
+    fd.append('bank_account_id', bankAccountId);
+    fd.append('bank_format', document.getElementById('cashbookBankFormat')?.value || 'auto');
+    fd.append('bank_statement', file);
+    if(mappingPanelVisible() || (document.getElementById('cashbookBankFormat')?.value === 'custom')) {
+        fd.append('column_mapping', JSON.stringify(cashbookCurrentMapping()));
+    }
+    fetch('/api/accounting/cashbook/upload', {method:'POST', body: fd})
+        .then(r => r.json()).then(data => {
+            if(data.status === 'error') {
+                if(data.mapping_required) {
+                    cashbookCsvHeaders = data.headers || [];
+                    cashbookDetectedMapping = data.detected_mapping || {};
+                    cashbookMappingRequired = true;
+                    renderCashbookMappingControls(cashbookDetectedMapping, []);
+                }
+                return alert(data.message);
+            }
+            cashbookBatchId = data.batch.id;
+            cashbookLines = data.lines || [];
+            renderCashbookBatch(data.batch, cashbookLines);
+            loadCashbookBatches();
+            alert('Cash book CSV uploaded. Allocate each line before posting.');
+        });
+}
+
+
+function setRecentAccountingEntriesVisible(show) {
+    const recentCol = document.getElementById('recentAccountingEntriesCol');
+    const mainCol = document.getElementById('manualJournalMainCol');
+    const btn = document.getElementById('journalToggleRecentBtn');
+    if(!recentCol || !mainCol || !btn) return;
+    if(show) {
+        recentCol.classList.remove('d-none');
+        mainCol.classList.remove('col-lg-12');
+        mainCol.classList.add('col-lg-7');
+        btn.innerText = 'Hide Recent Accounting Entries';
+        btn.classList.remove('btn-outline-primary');
+        btn.classList.add('btn-outline-secondary');
+    } else {
+        recentCol.classList.add('d-none');
+        mainCol.classList.remove('col-lg-7');
+        mainCol.classList.add('col-lg-12');
+        btn.innerText = 'Show Recent Accounting Entries';
+        btn.classList.remove('btn-outline-secondary');
+        btn.classList.add('btn-outline-primary');
+    }
+    try { localStorage.setItem('easyAdminRecentAccountingEntriesVisible', show ? '1' : '0'); } catch(e) {}
+}
+
+function toggleRecentAccountingEntries() {
+    const recentCol = document.getElementById('recentAccountingEntriesCol');
+    const currentlyVisible = recentCol && !recentCol.classList.contains('d-none');
+    setRecentAccountingEntriesVisible(!currentlyVisible);
+}
+
+function restoreRecentAccountingEntriesPreference() {
+    let stored = null;
+    try { stored = localStorage.getItem('easyAdminRecentAccountingEntriesVisible'); } catch(e) {}
+    if(stored === '0') setRecentAccountingEntriesVisible(false);
+    else setRecentAccountingEntriesVisible(true);
+}
+
+function setCashbookRecentImportsVisible(show) {
+    const recentCol = document.getElementById('cashbookRecentImportsCol');
+    const mainCol = document.getElementById('cashbookMainCol');
+    const btn = document.getElementById('cashbookToggleRecentBtn');
+    if(!recentCol || !mainCol || !btn) return;
+    if(show) {
+        recentCol.classList.remove('d-none');
+        mainCol.classList.remove('col-xl-12');
+        mainCol.classList.add('col-xl-9');
+        btn.innerText = 'Hide Recent Imports';
+        btn.classList.remove('btn-outline-primary');
+        btn.classList.add('btn-outline-secondary');
+    } else {
+        recentCol.classList.add('d-none');
+        mainCol.classList.remove('col-xl-9');
+        mainCol.classList.add('col-xl-12');
+        btn.innerText = 'Show Recent Imports';
+        btn.classList.remove('btn-outline-secondary');
+        btn.classList.add('btn-outline-primary');
+    }
+    try { localStorage.setItem('easyAdminCashbookRecentImportsVisible', show ? '1' : '0'); } catch(e) {}
+}
+
+function toggleCashbookRecentImports() {
+    const recentCol = document.getElementById('cashbookRecentImportsCol');
+    const currentlyVisible = recentCol && !recentCol.classList.contains('d-none');
+    setCashbookRecentImportsVisible(!currentlyVisible);
+}
+
+function restoreCashbookRecentImportsPreference() {
+    let stored = null;
+    try { stored = localStorage.getItem('easyAdminCashbookRecentImportsVisible'); } catch(e) {}
+    if(stored === '0') setCashbookRecentImportsVisible(false);
+    else setCashbookRecentImportsVisible(true);
+}
+
+function loadCashbookBatches() {
+    return fetch('/api/accounting/cashbook/batches').then(r => r.json()).then(data => {
+        const wrap = document.getElementById('cashbookBatches');
+        const batches = data.batches || [];
+        wrap.innerHTML = batches.map(b => `<button class="list-group-item list-group-item-action text-start" onclick="openCashbookBatch(${b.id})">
+            <div class="d-flex justify-content-between"><strong>#${b.id}</strong><span class="badge bg-${b.status === 'posted' ? 'success' : 'secondary'}">${esc(b.status)}</span></div>
+            <div>${esc(b.original_filename || 'Bank CSV')}</div>
+            <div class="text-muted">${esc(b.bank_account_code || '')} ${esc(b.bank_account_name || '')}</div>
+            <div class="text-muted">${esc((b.bank_format || 'auto').replace('_',' '))} · ${Number(b.line_count || 0)} lines · In ${money(b.credit_total)} / Out ${money(b.debit_total)}</div>
+        </button>`).join('') || '<div class="text-muted py-3">No cash book imports yet.</div>';
+    });
+}
+
+function openCashbookBatch(id) {
+    fetch(`/api/accounting/cashbook/batches/${id}`).then(r => r.json()).then(data => {
+        if(data.status === 'error') return alert(data.message);
+        cashbookBatchId = data.batch.id;
+        cashbookLines = data.lines || [];
+        renderCashbookBatch(data.batch, cashbookLines);
+    });
+}
+
+function renderCashbookBatch(batch, lines) {
+    const box = document.getElementById('cashbookActiveBatch');
+    cashbookBatchStatus = batch ? (batch.status || 'draft') : null;
+    if(batch) {
+        box.classList.remove('d-none');
+        box.innerHTML = `<strong>Active Batch #${batch.id}</strong> · ${esc(batch.original_filename || 'Bank CSV')} · ${esc((batch.bank_format || 'auto').replace('_',' '))} · ${esc(batch.bank_account_code || '')} ${esc(batch.bank_account_name || '')} · <span class="badge bg-${batch.status === 'posted' ? 'success' : 'secondary'}">${esc(batch.status)}</span>`;
+        document.getElementById('cashbookBankAccount').value = batch.bank_account_id || '';
+        if(document.getElementById('cashbookBankFormat')) document.getElementById('cashbookBankFormat').value = batch.bank_format || 'auto';
+    }
+    renderCashbookLines(lines || []);
+}
+
+function cashbookNumberInputValue(v) {
+    const n = Number(v || 0);
+    return n ? n.toFixed(2) : '';
+}
+
+function cashbookLineRowHtml(line={}) {
+    const posted = line.status === 'posted';
+    const lineId = line.id || `new_${++cashbookNewLineCounter}`;
+    const statusText = posted ? 'posted' : (line.allocated_account_id ? 'allocated' : 'draft');
+    const statusClass = posted ? 'success' : (line.allocated_account_id ? 'primary' : 'warning text-dark');
+    return `<tr data-line-id="${esc(lineId)}">
+        <td><input type="date" class="form-control form-control-sm cashbook-date" value="${esc(line.transaction_date || '')}" ${posted ? 'disabled' : ''} oninput="updateCashbookAllocationStatus()"></td>
+        <td><input class="form-control form-control-sm cashbook-description" value="${esc(line.description || '')}" ${posted ? 'disabled' : ''}></td>
+        <td><input type="number" step="0.01" min="0" class="form-control form-control-sm money cashbook-debit" value="${cashbookNumberInputValue(line.debit)}" ${posted ? 'disabled' : ''} oninput="cashbookAmountChanged(this)" placeholder="0.00"></td>
+        <td><input type="number" step="0.01" min="0" class="form-control form-control-sm money cashbook-credit" value="${cashbookNumberInputValue(line.credit)}" ${posted ? 'disabled' : ''} oninput="cashbookAmountChanged(this)" placeholder="0.00"></td>
+        <td><input type="number" step="0.01" min="0" class="form-control form-control-sm money cashbook-vat-amount" value="${Number(line.vat_amount || 0) ? Number(line.vat_amount || 0).toFixed(2) : ''}" ${posted ? 'disabled' : ''} oninput="updateCashbookAllocationStatus()" placeholder="0.00"></td>
+        <td><select class="form-select form-select-sm cashbook-account" ${posted ? 'disabled' : ''} onchange="cashbookAccountChanged(this)">${accountOptionsHtml(line.allocated_account_id || '')}</select></td>
+        <td>${accountingFileCell(line.transaction_file, 'cashbook-line-file', posted)}</td>
+        <td><input class="form-control form-control-sm cashbook-notes" value="${esc(line.notes || '')}" ${posted ? 'disabled' : ''}></td>
+        <td><span class="badge bg-${statusClass}">${statusText}</span></td>
+    </tr>`;
+}
+
+function renderCashbookLines(lines=[]) {
+    const body = document.getElementById('cashbookLinesBody');
+    if(!lines.length) {
+        body.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">Upload a bank CSV or open a draft batch.</td></tr>';
+        updateCashbookAllocationStatus();
+        return;
+    }
+    body.innerHTML = lines.map(line => cashbookLineRowHtml(line)).join('');
+    updateCashbookAllocationStatus();
+}
+
+function insertCashbookRow() {
+    if(!cashbookBatchId) return alert('Upload or open a cash book batch first.');
+    if(cashbookBatchStatus === 'posted') return alert('Posted cash book batches cannot be edited.');
+    const body = document.getElementById('cashbookLinesBody');
+    const placeholder = body.querySelector('tr:not([data-line-id])');
+    if(placeholder) placeholder.remove();
+    body.insertAdjacentHTML('beforeend', cashbookLineRowHtml({transaction_date: today(), status: 'draft'}));
+    updateCashbookAllocationStatus();
+}
+
+function cashbookAccountChanged(sel) {
+    const tr = sel.closest('tr');
+    if(tr) updateCashbookRowBadge(tr);
+    updateCashbookAllocationStatus();
+}
+
+function cashbookRows() {
+    return [...document.querySelectorAll('#cashbookLinesBody tr[data-line-id]')];
+}
+
+function updateCashbookRowBadge(tr) {
+    const status = tr.querySelector('td:last-child .badge');
+    if(!status || status.innerText === 'posted') return;
+    const debit = Number(tr.querySelector('.cashbook-debit')?.value || 0) || 0;
+    const credit = Number(tr.querySelector('.cashbook-credit')?.value || 0) || 0;
+    const accountId = tr.querySelector('.cashbook-account')?.value || '';
+    if(debit > 0 && credit > 0) {
+        status.className = 'badge bg-danger';
+        status.innerText = 'invalid';
+    } else if(accountId) {
+        status.className = 'badge bg-primary';
+        status.innerText = 'allocated';
+    } else {
+        status.className = 'badge bg-warning text-dark';
+        status.innerText = 'draft';
+    }
+}
+
+function cashbookAmountChanged(input) {
+    const tr = input.closest('tr');
+    updateCashbookRowBadge(tr);
+    updateCashbookAllocationStatus();
+}
+
+function cashbookPayloadLines() {
+    return cashbookRows().map((tr, idx) => ({
+        id: tr.dataset.lineId,
+        line_no: idx + 1,
+        transaction_date: tr.querySelector('.cashbook-date')?.value || '',
+        description: tr.querySelector('.cashbook-description')?.value || '',
+        debit: tr.querySelector('.cashbook-debit')?.value || '0',
+        credit: tr.querySelector('.cashbook-credit')?.value || '0',
+        allocated_account_id: tr.querySelector('.cashbook-account')?.value || '',
+        vat_amount: tr.querySelector('.cashbook-vat-amount')?.value || '0',
+        notes: tr.querySelector('.cashbook-notes')?.value || ''
+    }));
+}
+
+function cashbookSaveFormData() {
+    const fd = new FormData();
+    fd.append('payload', JSON.stringify({lines: cashbookPayloadLines()}));
+    cashbookRows().forEach(tr => {
+        const file = tr.querySelector('.cashbook-line-file')?.files?.[0];
+        if(file) fd.append(`cashbook_file_${tr.dataset.lineId}`, file);
+    });
+    return fd;
+}
+
+function updateCashbookTotals() {
+    let debitTotal = 0;
+    let creditTotal = 0;
+    cashbookRows().forEach(tr => {
+        debitTotal += Number(tr.querySelector('.cashbook-debit')?.value || 0) || 0;
+        creditTotal += Number(tr.querySelector('.cashbook-credit')?.value || 0) || 0;
+    });
+    const debitEl = document.getElementById('cashbookDebitTotal');
+    const creditEl = document.getElementById('cashbookCreditTotal');
+    if(debitEl) debitEl.innerText = money(debitTotal);
+    if(creditEl) creditEl.innerText = money(creditTotal);
+}
+
+function updateCashbookAllocationStatus() {
+    const rows = cashbookRows();
+    rows.forEach(updateCashbookRowBadge);
+    updateCashbookTotals();
+    if(!rows.length) {
+        document.getElementById('cashbookAllocationStatus').innerText = 'No cash book batch loaded.';
+        return;
+    }
+    const unallocated = rows.filter(tr => !(tr.querySelector('.cashbook-account')?.value)).length;
+    const bothDebitCredit = rows.filter(tr => (Number(tr.querySelector('.cashbook-debit')?.value || 0) || 0) > 0 && (Number(tr.querySelector('.cashbook-credit')?.value || 0) || 0) > 0).length;
+    const noAmount = rows.filter(tr => (Number(tr.querySelector('.cashbook-debit')?.value || 0) || 0) <= 0 && (Number(tr.querySelector('.cashbook-credit')?.value || 0) || 0) <= 0).length;
+    const invalidVat = rows.filter(tr => {
+        const vat = Number(tr.querySelector('.cashbook-vat-amount')?.value || 0);
+        const debit = Number(tr.querySelector('.cashbook-debit')?.value || 0) || 0;
+        const credit = Number(tr.querySelector('.cashbook-credit')?.value || 0) || 0;
+        return vat < 0 || vat > Math.max(debit, credit);
+    }).length;
+    if(bothDebitCredit) document.getElementById('cashbookAllocationStatus').innerText = `${bothDebitCredit} line(s) have both Debit and Credit amounts.`;
+    else if(invalidVat) document.getElementById('cashbookAllocationStatus').innerText = `${invalidVat} line(s) have invalid VAT amounts.`;
+    else if(noAmount) document.getElementById('cashbookAllocationStatus').innerText = `${noAmount} line(s) have no Debit or Credit amount.`;
+    else document.getElementById('cashbookAllocationStatus').innerText = unallocated ? `${unallocated} line(s) still need allocation.` : 'All lines allocated.';
+}
+
+function saveCashbookAllocations() {
+    if(!cashbookBatchId) return alert('Upload or open a cash book batch first.');
+    fetch(`/api/accounting/cashbook/batches/${cashbookBatchId}/save`, {method:'POST', body:cashbookSaveFormData()})
+        .then(r => r.json()).then(data => {
+            if(data.status === 'error') return alert(data.message);
+            cashbookLines = data.lines || [];
+            renderCashbookBatch(data.batch, cashbookLines);
+            loadCashbookBatches();
+            alert('Cash book allocations saved.');
+        });
+}
+
+function postCashbookBatch() {
+    if(!cashbookBatchId) return alert('Upload or open a cash book batch first.');
+    if(!confirm('Post this cash book batch? Bank statement Debit lines will credit the bank account and debit the allocated account. Credit lines will debit the bank account and credit the allocated account. Any VAT amount entered will be posted to the VAT Control account and only the net balance will be posted to the selected account.')) return;
+    fetch(`/api/accounting/cashbook/batches/${cashbookBatchId}/save`, {method:'POST', body:cashbookSaveFormData()})
+        .then(r => r.json()).then(data => {
+            if(data.status === 'error') throw new Error(data.message);
+            return fetch(`/api/accounting/cashbook/batches/${cashbookBatchId}/post`, {method:'POST'});
+        })
+        .then(r => r.json()).then(data => {
+            if(data.status === 'error') return alert(data.message);
+            cashbookLines = data.lines || [];
+            renderCashbookBatch(data.batch, cashbookLines);
+            loadCashbookBatches();
+            loadJournals();
+
+            const postedDates = (data.lines || [])
+                .map(l => String(l.transaction_date || '').slice(0, 10))
+                .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d));
+            if(postedDates.length) {
+                postedDates.sort();
+                const startEl = document.getElementById('ledgerStart');
+                const endEl = document.getElementById('ledgerEnd');
+                if(startEl) startEl.value = postedDates[0];
+                if(endEl) endEl.value = postedDates[postedDates.length - 1];
+            }
+            showTab('ledger', document.querySelector('#accountingTabs .nav-link[onclick*=\"ledger\"]'));
+            loadGeneralLedger();
+            alert(`Cash book posted to the General Ledger. ${data.created_journals?.length || 0} accounting entries created.`);
+        }).catch(err => alert(err.message));
+}
+
+function ledgerDates() {
+    return {
+        start: document.getElementById('ledgerStart')?.value || today(),
+        end: document.getElementById('ledgerEnd')?.value || today(),
+        account_id: document.getElementById('ledgerAccountFilter')?.value || ''
+    };
+}
+
+function loadGeneralLedger() {
+    const {start, end, account_id} = ledgerDates();
+    let url = `/api/accounting/reports/general_ledger?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`;
+    if(account_id) url += `&account_id=${encodeURIComponent(account_id)}`;
+    const out = document.getElementById('ledgerOutput');
+    if(out) out.innerHTML = '<div class="text-muted text-center py-4">Loading general ledger...</div>';
+    fetch(url).then(r => r.json()).then(data => {
+        if(data.status === 'error') {
+            out.innerHTML = `<div class="alert alert-danger">${esc(data.message || 'Could not load General Ledger.')}</div>`;
+            return;
+        }
+        const ledgerAccounts = data.accounts || [];
+        if(!ledgerAccounts.length) {
+            out.innerHTML = `<h4 class="fw-bold">General Ledger</h4><p class="text-muted">${esc(data.framework || 'IFRS for SMEs')} · ${esc(fmtDate(data.start_date))} to ${esc(fmtDate(data.end_date))}</p><div class="text-muted text-center py-5">No posted accounting entries found for this period.</div>`;
+            return;
+        }
+        let totalDebit = 0;
+        let totalCredit = 0;
+        let html = `<h4 class="fw-bold">General Ledger</h4><p class="text-muted">${esc(data.framework || 'IFRS for SMEs')} · ${esc(fmtDate(data.start_date))} to ${esc(fmtDate(data.end_date))}</p>`;
+        ledgerAccounts.forEach(acc => {
+            totalDebit += Number(acc.debit_total || 0);
+            totalCredit += Number(acc.credit_total || 0);
+            html += `<div class="border rounded mb-4 overflow-hidden">
+                <div class="p-2 bg-light d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <div><strong>${esc(acc.account_code)} - ${esc(acc.account_name)}</strong> <span class="text-muted small">${esc(accountTypes[acc.account_type] || acc.account_type || '')}</span></div>
+                    <div class="small-muted">Opening: ${money(acc.opening_balance)} ${esc(acc.opening_side)} · Closing: <strong>${money(acc.closing_balance)} ${esc(acc.closing_side)}</strong></div>
+                </div>
+                <table class="table table-sm mb-0 align-middle">
+                    <thead class="table-light"><tr><th style="width:95px;">Date</th><th style="width:130px;">Reference</th><th style="width:120px;">Source</th><th>Description</th><th style="width:150px;">Supporting Document</th><th class="money" style="width:120px;">Debit</th><th class="money" style="width:120px;">Credit</th><th class="money" style="width:150px;">Running Balance</th></tr></thead>
+                    <tbody>`;
+            if(!acc.lines || !acc.lines.length) {
+                html += `<tr><td colspan="8" class="text-muted text-center">Opening balance only.</td></tr>`;
+            } else {
+                acc.lines.forEach(line => {
+                    html += `<tr><td>${esc(fmtDate(line.journal_date))}</td><td>${esc(line.reference || '')}</td><td>${esc((line.source_module || '').replace('_',' '))}</td><td>${esc(line.description || line.journal_description || '')}</td><td>${ledgerDocumentCell(line.transaction_file)}</td><td class="money">${Number(line.debit || 0) ? money(line.debit) : ''}</td><td class="money">${Number(line.credit || 0) ? money(line.credit) : ''}</td><td class="money">${money(line.running_balance)} ${esc(line.balance_side)}</td></tr>`;
+                });
+            }
+            html += `</tbody><tfoot><tr class="fw-bold"><td colspan="5" class="text-end">Account movement</td><td class="money">${money(acc.debit_total)}</td><td class="money">${money(acc.credit_total)}</td><td></td></tr></tfoot></table></div>`;
+        });
+        html += `<div class="alert alert-light border fw-bold d-flex justify-content-end gap-4"><span>Total Debits: ${money(totalDebit)}</span><span>Total Credits: ${money(totalCredit)}</span></div>`;
+        out.innerHTML = html;
+    }).catch(err => {
+        out.innerHTML = `<div class="alert alert-danger">Could not load General Ledger: ${esc(err.message || err)}</div>`;
+    });
+}
+
+let currentAccountingReportType = 'trial_balance';
+let currentAccountingReportLabel = 'Trial Balance';
+let currentReportHasLoaded = false;
+
+function setCurrentAccountingReport(type, label) {
+    currentAccountingReportType = type;
+    currentAccountingReportLabel = label;
+    currentReportHasLoaded = true;
+    const btn = document.getElementById('reportDownloadDropdownLabel');
+    if(btn) btn.innerText = `Download ${label}`;
+}
+
+function ensureReportLoaded() {
+    if(!currentReportHasLoaded) loadTrialBalance();
+}
+
+function reportDates() { return {start: document.getElementById('reportStart').value, end: document.getElementById('reportEnd').value}; }
+function sectionRows(title, rows, totalLabel='Total') {
+    let html = `<tr class="report-section-title"><td colspan="2">${esc(title)}</td><td></td></tr>`;
+    rows.forEach(r => html += `<tr><td style="width:110px;">${esc(r.account_code || '')}</td><td>${esc(r.account_name)}</td><td class="money">${money(r.amount)}</td></tr>`);
+    const total = rows.reduce((a,r) => a + Number(r.amount || 0), 0);
+    html += `<tr class="report-total"><td></td><td>${esc(totalLabel)} ${esc(title)}</td><td class="money">${money(total)}</td></tr>`;
+    return html;
+}
+
+function loadTrialBalance() {
+    setCurrentAccountingReport('trial_balance', 'Trial Balance');
+    const {end} = reportDates();
+    fetch(`/api/accounting/reports/trial_balance?as_at=${encodeURIComponent(end)}`).then(r => r.json()).then(data => {
+        let html = `<h4 class="fw-bold">Trial Balance</h4><p class="text-muted">As at ${esc(fmtDate(data.as_at))}</p><table class="table table-sm"><thead class="table-light"><tr><th>Code</th><th>Account</th><th class="money">Debit</th><th class="money">Credit</th></tr></thead><tbody>`;
+        data.rows.filter(r => Number(r.debit) || Number(r.credit)).forEach(r => html += `<tr><td>${esc(r.account_code)}</td><td>${esc(r.account_name)}</td><td class="money">${money(r.debit)}</td><td class="money">${money(r.credit)}</td></tr>`);
+        html += `<tr class="report-total"><td colspan="2">Totals</td><td class="money">${money(data.debit_total)}</td><td class="money">${money(data.credit_total)}</td></tr></tbody></table>`;
+        document.getElementById('reportOutput').innerHTML = html;
+    });
+}
+
+function loadIncomeStatement() {
+    setCurrentAccountingReport('income_statement', 'Income Statement');
+    const {start,end} = reportDates();
+    fetch(`/api/accounting/reports/income_statement?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`).then(r => r.json()).then(data => {
+        let html = `<h4 class="fw-bold">Income Statement</h4><p class="text-muted">${esc(data.framework)} · ${esc(fmtDate(data.start_date))} to ${esc(fmtDate(data.end_date))}</p><table class="table table-sm"><tbody>`;
+        html += sectionRows('Revenue', data.sections.revenue || [], 'Total');
+        html += sectionRows('Other Income', data.sections.other_income || [], 'Total');
+        html += sectionRows('Cost of Sales', data.sections.cost_of_sales || [], 'Total');
+        html += `<tr class="report-total"><td></td><td>Gross Profit</td><td class="money">${money(data.gross_profit)}</td></tr>`;
+        html += sectionRows('Operating Expenses', data.sections.operating_expense || [], 'Total');
+        html += sectionRows('Finance Costs', data.sections.finance_cost || [], 'Total');
+        html += sectionRows('Income Tax Expense', data.sections.income_tax_expense || [], 'Total');
+        html += `<tr class="table-dark fw-bold"><td></td><td>Profit / (Loss)</td><td class="money">${money(data.profit_loss)}</td></tr></tbody></table>`;
+        document.getElementById('reportOutput').innerHTML = html;
+    });
+}
+
+function loadBalanceSheet() {
+    setCurrentAccountingReport('balance_sheet', 'Balance Sheet');
+    const {end} = reportDates();
+    fetch(`/api/accounting/reports/balance_sheet?as_at=${encodeURIComponent(end)}`).then(r => r.json()).then(data => {
+        let html = `<h4 class="fw-bold">Balance Sheet / Statement of Financial Position</h4><p class="text-muted">${esc(data.framework)} · As at ${esc(fmtDate(data.as_at))}</p><table class="table table-sm"><tbody>`;
+        html += sectionRows('Current Assets', data.sections.current_asset || [], 'Total');
+        html += sectionRows('Non-current Assets', data.sections.non_current_asset || [], 'Total');
+        html += `<tr class="table-primary fw-bold"><td></td><td>Total Assets</td><td class="money">${money(data.total_assets)}</td></tr>`;
+        html += sectionRows('Current Liabilities', data.sections.current_liability || [], 'Total');
+        html += sectionRows('Non-current Liabilities', data.sections.non_current_liability || [], 'Total');
+        html += sectionRows('Equity', data.sections.equity || [], 'Total');
+        html += `<tr class="table-success fw-bold"><td></td><td>Total Liabilities and Equity</td><td class="money">${money(data.liabilities_equity_total)}</td></tr>`;
+        html += `<tr><td></td><td>Balance Check</td><td class="money">${money(data.balance_check)}</td></tr></tbody></table>`;
+        document.getElementById('reportOutput').innerHTML = html;
+    });
+}
+
+function loadCashFlow() {
+    setCurrentAccountingReport('cash_flow', 'Cash Flow');
+    const {start,end} = reportDates();
+    fetch(`/api/accounting/reports/cash_flow?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`).then(r => r.json()).then(data => {
+        let s = data.sections || {};
+        document.getElementById('reportOutput').innerHTML = `<h4 class="fw-bold">Cash Flow Statement</h4><p class="text-muted">${esc(data.framework)} · ${esc(fmtDate(data.start_date))} to ${esc(fmtDate(data.end_date))}</p><table class="table table-sm"><tbody>
+            <tr><td>Opening Cash / Bank</td><td class="money">${money(data.opening_cash)}</td></tr>
+            <tr><td>Net cash from Operating Activities</td><td class="money">${money(s.operating)}</td></tr>
+            <tr><td>Net cash from Investing Activities</td><td class="money">${money(s.investing)}</td></tr>
+            <tr><td>Net cash from Financing Activities</td><td class="money">${money(s.financing)}</td></tr>
+            <tr class="report-total"><td>Net Cash Movement</td><td class="money">${money(data.net_movement)}</td></tr>
+            <tr class="table-dark fw-bold"><td>Closing Cash / Bank</td><td class="money">${money(data.closing_cash)}</td></tr>
+        </tbody></table>`;
+    });
+}
+
+
+let currentManagementReportType = 'sales';
+let currentManagementReportLabel = 'Sales Report';
+let currentManagementReportHasLoaded = false;
+let currentBankReconciliationId = null;
+let currentBankReconciliationData = null;
+
+function managementReportDates() {
+    return {
+        start: document.getElementById('managementReportStart')?.value || new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0,10),
+        end: document.getElementById('managementReportEnd')?.value || today(),
+        type: document.getElementById('managementReportType')?.value || 'sales'
+    };
+}
+
+function setCurrentManagementReport(type, label) {
+    currentManagementReportType = type;
+    currentManagementReportLabel = label;
+    currentManagementReportHasLoaded = true;
+    const btn = document.getElementById('managementReportDownloadLabel');
+    if(btn) btn.innerText = `Download ${label}`;
+}
+
+function ensureManagementReportLoaded() {
+    if(!currentManagementReportHasLoaded) loadAccountingManagementReport();
+}
+
+function managementReportLabel(type) {
+    if(type === 'vat') return 'VAT Report';
+    if(type === 'chart_of_accounts') return 'Chart of Accounts Report';
+    if(type === 'bank_reconciliation') return 'Bank Reconciliation';
+    return 'Sales Report';
+}
+
+function loadAccountingManagementReport() {
+    const {start, end, type} = managementReportDates();
+    const label = managementReportLabel(type);
+    setCurrentManagementReport(type, label);
+    const help = document.getElementById('managementReportHelp');
+    if(help) {
+        help.innerText = type === 'vat'
+            ? 'VAT Report shows SARS-friendly gross VAT-applicable transactions, net amounts and VAT amounts for the selected period.'
+            : type === 'chart_of_accounts'
+                ? 'Chart of Accounts Report lists all company accounts and ignores the selected date range.'
+                : type === 'bank_reconciliation'
+                    ? 'Bank Reconciliation compares the selected bank account General Ledger balance directly to the bank statement closing balance.'
+                    : 'Sales Report shows invoices and credit notes posted to Accounting for the selected period.';
+    }
+    const out = document.getElementById('managementReportOutput');
+    out.innerHTML = `<div class="text-muted text-center py-4">Loading ${esc(label)}...</div>`;
+    let url = '';
+    if(type === 'vat') url = `/api/accounting/reports/vat?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`;
+    else if(type === 'chart_of_accounts') url = '/api/accounting/reports/chart_of_accounts';
+    else if(type === 'bank_reconciliation') {
+        currentBankReconciliationId = null;
+        url = `/api/accounting/reports/bank_reconciliation?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`;
+    }
+    else url = `/api/accounting/reports/sales?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`;
+    fetch(url).then(r => r.json()).then(data => {
+        if(data.status === 'error') {
+            out.innerHTML = `<div class="alert alert-danger">${esc(data.message || 'Could not load report.')}</div>`;
+            return;
+        }
+        if(type === 'vat') renderVatReport(data);
+        else if(type === 'chart_of_accounts') renderChartOfAccountsReport(data);
+        else if(type === 'bank_reconciliation') renderBankReconciliationReport(data);
+        else renderSalesReport(data);
+    }).catch(err => {
+        out.innerHTML = `<div class="alert alert-danger">Could not load report: ${esc(err.message || err)}</div>`;
+    });
+}
+
+function renderSalesReport(data) {
+    const rows = data.rows || [];
+    let html = `<h4 class="fw-bold">Sales Report</h4><p class="text-muted">${esc(fmtDate(data.start_date))} to ${esc(fmtDate(data.end_date))} · Posted invoices and credit notes</p>`;
+    html += `<div class="row g-2 mb-3">
+        <div class="col-md-4"><div class="alert alert-light border mb-0"><strong>Sales excl. VAT</strong><br>${money(data.sales_excl_vat)}</div></div>
+        <div class="col-md-4"><div class="alert alert-light border mb-0"><strong>VAT Output</strong><br>${money(data.vat_amount)}</div></div>
+        <div class="col-md-4"><div class="alert alert-light border mb-0"><strong>Total incl. VAT</strong><br>${money(data.total_incl_vat)}</div></div>
+    </div>`;
+    html += `<table class="table table-sm table-hover align-middle"><thead class="table-light"><tr><th>Date</th><th>Type</th><th>Reference</th><th>Client</th><th class="money">Excl. VAT</th><th class="money">VAT</th><th class="money">Incl. VAT</th><th>Journal</th></tr></thead><tbody>`;
+    if(!rows.length) html += `<tr><td colspan="8" class="text-center text-muted py-4">No posted sales found for this period.</td></tr>`;
+    rows.forEach(r => html += `<tr><td>${esc(fmtDate(r.date))}</td><td>${esc(r.document_type)}</td><td>${esc(r.reference)}</td><td>${esc(r.client)}</td><td class="money">${money(r.excl_vat)}</td><td class="money">${money(r.vat_amount)}</td><td class="money">${money(r.total_incl_vat)}</td><td>${esc(r.journal_reference || '')}</td></tr>`);
+    html += `</tbody></table>`;
+    document.getElementById('managementReportOutput').innerHTML = html;
+}
+
+function renderChartOfAccountsReport(data) {
+    const rows = data.rows || [];
+    let html = `<h4 class="fw-bold">Chart of Accounts Report</h4><p class="text-muted">${esc(data.framework || 'IFRS for SMEs')} · ${rows.length} accounts</p>`;
+    html += `<table class="table table-sm table-hover align-middle"><thead class="table-light"><tr><th>Code</th><th>Account</th><th>Type</th><th>Report Section</th><th>Normal</th><th>Cash Flow</th><th>Cash/Bank</th><th>Status</th></tr></thead><tbody>`;
+    if(!rows.length) html += `<tr><td colspan="8" class="text-center text-muted py-4">No accounts found.</td></tr>`;
+    rows.forEach(r => html += `<tr><td><strong>${esc(r.account_code)}</strong></td><td>${esc(r.account_name)}</td><td>${esc(r.account_type_label || r.account_type)}</td><td>${esc(r.report_section_label || r.report_section)}</td><td>${esc(r.normal_balance)}</td><td>${esc(r.cash_flow_category || '')}</td><td>${Number(r.is_cash_equivalent) ? 'Yes' : 'No'}</td><td>${Number(r.active) ? 'Active' : 'Inactive'}</td></tr>`);
+    html += `</tbody></table>`;
+    document.getElementById('managementReportOutput').innerHTML = html;
+}
+
+function renderVatReport(data) {
+    const rows = data.rows || [];
+    let html = `<h4 class="fw-bold">VAT Report</h4><p class="text-muted">${esc(fmtDate(data.start_date))} to ${esc(fmtDate(data.end_date))} · VAT Control Account: ${esc(data.vat_account || 'Not configured')}</p>`;
+    const net = Number(data.net_vat || 0);
+    const netLabel = net >= 0 ? 'VAT Payable' : 'VAT Refundable';
+    html += `<div class="row g-2 mb-3">
+        <div class="col-md-3"><div class="alert alert-light border mb-0"><strong>Output Gross</strong><br>${money(data.output_gross)}</div></div>
+        <div class="col-md-3"><div class="alert alert-light border mb-0"><strong>Output VAT</strong><br>${money(data.output_vat)}</div></div>
+        <div class="col-md-3"><div class="alert alert-light border mb-0"><strong>Input Gross</strong><br>${money(data.input_gross)}</div></div>
+        <div class="col-md-3"><div class="alert alert-light border mb-0"><strong>Input VAT</strong><br>${money(data.input_vat)}</div></div>
+    </div>`;
+    html += `<div class="row g-2 mb-3">
+        <div class="col-md-4"><div class="alert alert-light border mb-0"><strong>Output Net excl. VAT</strong><br>${money(data.output_net)}</div></div>
+        <div class="col-md-4"><div class="alert alert-light border mb-0"><strong>Input Net excl. VAT</strong><br>${money(data.input_net)}</div></div>
+        <div class="col-md-4"><div class="alert ${net >= 0 ? 'alert-warning' : 'alert-success'} border mb-0"><strong>${esc(netLabel)}</strong><br>${money(Math.abs(net))}</div></div>
+    </div>`;
+    if(Number(data.vat_adjustments || 0)) {
+        html += `<div class="alert alert-info small"><strong>VAT Adjustments:</strong> ${money(data.vat_adjustments)}. These are VAT Control journal entries where the original gross transaction value is not available.</div>`;
+    }
+    html += `<div class="alert alert-secondary small">SARS-friendly gross totals are shown for VAT-applicable output and input transactions. Credit notes reduce the output gross and output VAT totals.</div>`;
+    html += `<table class="table table-sm table-hover align-middle"><thead class="table-light"><tr><th>Date</th><th>Reference</th><th>Source</th><th>VAT Type</th><th>Description</th><th class="money">Gross Amount</th><th class="money">Net Amount</th><th class="money">VAT Amount</th></tr></thead><tbody>`;
+    if(!rows.length) html += `<tr><td colspan="8" class="text-center text-muted py-4">No VAT-applicable posted transactions found for this period.</td></tr>`;
+    rows.forEach(r => html += `<tr><td>${esc(fmtDate(r.date))}</td><td>${esc(r.reference || '')}</td><td>${esc(r.source || '')}</td><td>${esc(r.vat_type || '')}</td><td>${esc(r.description || '')}</td><td class="money">${Number(r.gross_amount || 0) ? money(r.gross_amount) : ''}</td><td class="money">${Number(r.net_amount || 0) ? money(r.net_amount) : ''}</td><td class="money">${Number(r.vat_amount || 0) ? money(r.vat_amount) : ''}</td></tr>`);
+    html += `<tr class="table-light fw-bold"><td colspan="5">Totals</td><td class="money">${money(Number(data.output_gross || 0) + Number(data.input_gross || 0))}</td><td class="money">${money(Number(data.output_net || 0) + Number(data.input_net || 0))}</td><td class="money">${money(data.net_vat)}</td></tr>`;
+    html += `</tbody></table>`;
+    document.getElementById('managementReportOutput').innerHTML = html;
+}
+
+function renderBankReconciliationReport(data) {
+    currentBankReconciliationData = data;
+    currentBankReconciliationId = data.reconciliation_id || null;
+    const accounts = data.accounts || [];
+    const rows = data.rows || [];
+    const recent = data.recent || [];
+    const accountOptions = accounts.map(a => `<option value="${esc(a.id)}" ${String(a.id) === String(data.bank_account_id || '') ? 'selected' : ''}>${esc(a.account_code)} - ${esc(a.account_name)}</option>`).join('');
+    let recentHtml = '';
+    if(recent.length) {
+        recentHtml = `<div class="mt-3"><div class="small fw-bold mb-1">Recent reconciliations</div><div class="list-group small">` +
+            recent.slice(0, 8).map(r => `<button type="button" class="list-group-item list-group-item-action" onclick="loadSavedBankReconciliation(${Number(r.id)})">
+                <strong>${esc(r.recon_date || '')}</strong> · ${esc(r.account_code || '')} ${esc(r.account_name || '')}<br>
+                Statement: ${money(r.statement_balance)} · Difference: ${money(r.difference_amount)}
+            </button>`).join('') + `</div></div>`;
+    }
+    let html = `<h4 class="fw-bold">Bank Reconciliation</h4>
+        <p class="text-muted">${esc(fmtDate(data.start_date))} to ${esc(fmtDate(data.end_date))} · ${esc(data.bank_account || 'Select bank account')}</p>
+        <div class="row g-2 mb-3 align-items-end">
+            <div class="col-lg-4 col-md-6"><label class="form-label small fw-bold">Bank Account</label><select id="bankReconAccount" class="form-select">${accountOptions}</select></div>
+            <div class="col-lg-3 col-md-6"><label class="form-label small fw-bold">Statement Closing Balance</label><input type="number" step="0.01" id="bankReconStatementBalance" class="form-control" value="${Number(data.statement_balance || 0).toFixed(2)}"></div>
+            <div class="col-lg-5 col-md-12 d-flex gap-2 flex-wrap">
+                <button class="btn btn-dark fw-bold" onclick="loadBankReconciliationFromControls()">Load / Recalculate</button>
+                <button class="btn btn-success fw-bold" onclick="saveBankReconciliation()">Save Reconciliation</button>
+            </div>
+        </div>
+        <div class="row g-2 mb-3" id="bankReconSummaryCards">
+            ${bankReconSummaryCards(data)}
+        </div>
+        <div class="alert alert-secondary small">Bank Reconciliation compares the selected bank account General Ledger balance directly to the bank statement closing balance.</div>
+        <div class="table-responsive"><table class="table table-sm table-hover align-middle"><thead class="table-light"><tr>
+            <th>Date</th><th>Reference</th><th>Source</th><th>Description</th><th class="money">Debit / Deposit</th><th class="money">Credit / Payment</th><th class="money">Movement</th>
+        </tr></thead><tbody>`;
+    if(!rows.length) html += `<tr><td colspan="7" class="text-center text-muted py-4">No posted bank transactions found for this selected period.</td></tr>`;
+    rows.forEach(r => {
+        html += `<tr>
+            <td>${esc(fmtDate(r.date || ''))}</td><td>${esc(r.reference || '')}</td><td>${esc(r.source || '')}</td><td>${esc(r.description || '')}</td>
+            <td class="money">${Number(r.debit || 0) ? money(r.debit) : ''}</td>
+            <td class="money">${Number(r.credit || 0) ? money(r.credit) : ''}</td>
+            <td class="money">${money(r.movement)}</td>
+        </tr>`;
+    });
+    html += `</tbody></table></div>${recentHtml}`;
+    document.getElementById('managementReportOutput').innerHTML = html;
+    recalculateBankReconFromScreen();
+}
+
+function bankReconSummaryCards(data) {
+    const diff = Number(data.difference_amount || 0);
+    return `<div class="col-md-4"><div class="alert alert-light border mb-0"><strong>Statement Balance</strong><br><span id="bankReconStatementCard">${money(data.statement_balance)}</span></div></div>
+        <div class="col-md-4"><div class="alert alert-light border mb-0"><strong>GL Bank Balance</strong><br><span id="bankReconGLCard">${money(data.gl_balance)}</span></div></div>
+        <div class="col-md-4"><div class="alert ${Math.abs(diff) < 0.01 ? 'alert-success' : 'alert-warning'} border mb-0"><strong>Difference</strong><br><span id="bankReconDifferenceCard">${money(diff)}</span></div></div>`;
+}
+
+function recalculateBankReconFromScreen() {
+    if(!currentBankReconciliationData) return;
+    const statement = Number(document.getElementById('bankReconStatementBalance')?.value || 0);
+    const gl = Number(currentBankReconciliationData.gl_balance || 0);
+    const diff = gl - statement;
+    const set = (id, val) => { const el = document.getElementById(id); if(el) el.innerText = money(val); };
+    set('bankReconStatementCard', statement);
+    set('bankReconGLCard', gl);
+    set('bankReconDifferenceCard', diff);
+}
+
+
+function loadBankReconciliationFromControls() {
+    const {start, end} = managementReportDates();
+    const accountId = document.getElementById('bankReconAccount')?.value || '';
+    const statement = document.getElementById('bankReconStatementBalance')?.value || 0;
+    const out = document.getElementById('managementReportOutput');
+    out.innerHTML = `<div class="text-muted text-center py-4">Loading Bank Reconciliation...</div>`;
+    currentBankReconciliationId = null;
+    fetch(`/api/accounting/reports/bank_reconciliation?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}&bank_account_id=${encodeURIComponent(accountId)}&statement_balance=${encodeURIComponent(statement)}`)
+        .then(r => r.json()).then(data => {
+            if(data.status === 'error') out.innerHTML = `<div class="alert alert-danger">${esc(data.message || 'Could not load bank reconciliation.')}</div>`;
+            else renderBankReconciliationReport(data);
+        }).catch(err => out.innerHTML = `<div class="alert alert-danger">Could not load bank reconciliation: ${esc(err.message || err)}</div>`);
+}
+
+function loadSavedBankReconciliation(id) {
+    const {start, end} = managementReportDates();
+    const out = document.getElementById('managementReportOutput');
+    out.innerHTML = `<div class="text-muted text-center py-4">Loading saved reconciliation...</div>`;
+    fetch(`/api/accounting/reports/bank_reconciliation?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}&reconciliation_id=${encodeURIComponent(id)}`)
+        .then(r => r.json()).then(data => {
+            if(data.status === 'error') out.innerHTML = `<div class="alert alert-danger">${esc(data.message || 'Could not load saved reconciliation.')}</div>`;
+            else renderBankReconciliationReport(data);
+        }).catch(err => out.innerHTML = `<div class="alert alert-danger">Could not load saved reconciliation: ${esc(err.message || err)}</div>`);
+}
+
+function saveBankReconciliation() {
+    if(!currentBankReconciliationData) return;
+    const {start, end} = managementReportDates();
+    const payload = {
+        start_date: start,
+        end_date: end,
+        bank_account_id: document.getElementById('bankReconAccount')?.value || currentBankReconciliationData.bank_account_id,
+        statement_balance: document.getElementById('bankReconStatementBalance')?.value || 0
+    };
+    fetch('/api/accounting/reports/bank_reconciliation/save', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    }).then(r => r.json()).then(data => {
+        if(data.status === 'error') alert(data.message || 'Could not save reconciliation.');
+        else {
+            currentBankReconciliationId = data.reconciliation_id;
+            renderBankReconciliationReport(data);
+            alert(data.message || 'Bank reconciliation saved.');
+        }
+    }).catch(err => alert('Could not save reconciliation: ' + (err.message || err)));
+}
+
+
+function downloadAccountingManagementReport(format) {
+    const {start, end, type} = managementReportDates();
+    const ext = format === 'excel' ? 'xlsx' : 'pdf';
+    let url = '';
+    if(type === 'vat') url = `/download/accounting/reports/vat.${ext}?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`;
+    else if(type === 'chart_of_accounts') url = `/download/accounting/reports/chart_of_accounts.${ext}`;
+    else if(type === 'bank_reconciliation') {
+        const accountId = document.getElementById('bankReconAccount')?.value || currentBankReconciliationData?.bank_account_id || '';
+        const statement = document.getElementById('bankReconStatementBalance')?.value || currentBankReconciliationData?.statement_balance || 0;
+        url = `/download/accounting/reports/bank_reconciliation.${ext}?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}&bank_account_id=${encodeURIComponent(accountId)}&statement_balance=${encodeURIComponent(statement)}`;
+        if(currentBankReconciliationId) url += `&reconciliation_id=${encodeURIComponent(currentBankReconciliationId)}`;
+    }
+    else url = `/download/accounting/reports/sales.${ext}?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`;
+    if(url) window.open(url, '_blank');
+}
+
+
+function downloadCurrentAccountingReport(format) {
+    if(format === 'excel') downloadAccountingExcel(currentAccountingReportType);
+    else downloadAccountingPdf(currentAccountingReportType);
+}
+
+function downloadAccountingPdf(type) {
+    const report = reportDates();
+    const ledger = ledgerDates();
+    let url = '';
+    if(type === 'trial_balance') {
+        url = `/download/accounting/reports/trial_balance.pdf?as_at=${encodeURIComponent(report.end)}`;
+    } else if(type === 'income_statement') {
+        url = `/download/accounting/reports/income_statement.pdf?start_date=${encodeURIComponent(report.start)}&end_date=${encodeURIComponent(report.end)}`;
+    } else if(type === 'balance_sheet') {
+        url = `/download/accounting/reports/balance_sheet.pdf?as_at=${encodeURIComponent(report.end)}`;
+    } else if(type === 'cash_flow') {
+        url = `/download/accounting/reports/cash_flow.pdf?start_date=${encodeURIComponent(report.start)}&end_date=${encodeURIComponent(report.end)}`;
+    } else if(type === 'general_ledger') {
+        url = `/download/accounting/reports/general_ledger.pdf?start_date=${encodeURIComponent(ledger.start)}&end_date=${encodeURIComponent(ledger.end)}`;
+        if(ledger.account_id) url += `&account_id=${encodeURIComponent(ledger.account_id)}`;
+    }
+    if(url) window.open(url, '_blank');
+}
+
+function downloadAccountingExcel(type) {
+    const report = reportDates();
+    const ledger = ledgerDates();
+    let url = '';
+    if(type === 'trial_balance') {
+        url = `/download/accounting/reports/trial_balance.xlsx?as_at=${encodeURIComponent(report.end)}`;
+    } else if(type === 'income_statement') {
+        url = `/download/accounting/reports/income_statement.xlsx?start_date=${encodeURIComponent(report.start)}&end_date=${encodeURIComponent(report.end)}`;
+    } else if(type === 'balance_sheet') {
+        url = `/download/accounting/reports/balance_sheet.xlsx?as_at=${encodeURIComponent(report.end)}`;
+    } else if(type === 'cash_flow') {
+        url = `/download/accounting/reports/cash_flow.xlsx?start_date=${encodeURIComponent(report.start)}&end_date=${encodeURIComponent(report.end)}`;
+    } else if(type === 'general_ledger') {
+        url = `/download/accounting/reports/general_ledger.xlsx?start_date=${encodeURIComponent(ledger.start)}&end_date=${encodeURIComponent(ledger.end)}`;
+        if(ledger.account_id) url += `&account_id=${encodeURIComponent(ledger.account_id)}`;
+    }
+    if(url) window.open(url, '_blank');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('journalDate').value = today();
+    document.getElementById('reportEnd').value = today();
+    document.getElementById('reportStart').value = new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0,10);
+    document.getElementById('ledgerEnd').value = today();
+    document.getElementById('ledgerStart').value = new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0,10);
+    document.getElementById('managementReportEnd').value = today();
+    document.getElementById('managementReportStart').value = new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0,10);
+    restoreCashbookRecentImportsPreference();
+    restoreRecentAccountingEntriesPreference();
+    loadAll().then(() => {
+        clearJournalForm();
+        loadTrialBalance();
+    });
+});
+</script>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>

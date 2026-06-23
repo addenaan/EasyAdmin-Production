@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Easy Admin | Easy Company Administration</title>
+  <meta name="description" content="Easy Admin by AFY Cloud Solutions is an all-in-one company administration platform for operations, clients, invoicing, HR, payroll, BCEA leave rules and SARS PAYE calculations." />
+  <style>
+
+    :root{
+      --blue:#136ef6;
+      --blue2:#0b4fd6;
+      --teal:#18c5d9;
+      --green:#16875a;
+      --yellow:#ffc107;
+      --dark:#07162f;
+      --muted:#5c6a7e;
+      --light:#f5f8ff;
+      --card:#ffffff;
+      --border:#dfe7f3;
+      --shadow:0 24px 70px rgba(11,31,66,.12);
+      --soft-shadow:0 14px 38px rgba(11,31,66,.08);
+      --radius:24px;
+      --container:min(1180px,92vw);
+    }
+
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    body{
+      margin:0;
+      font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;
+      color:#12213b;
+      background:#fff;
+      line-height:1.55;
+      overflow-x:hidden;
+      text-rendering:optimizeLegibility;
+      -webkit-font-smoothing:antialiased;
+    }
+    a{text-decoration:none;color:inherit}
+    img{max-width:100%;display:block}
+    .container{width:var(--container);margin:0 auto}
+
+    .topbar{
+      position:sticky;
+      top:0;
+      z-index:99;
+      background:rgba(255,255,255,.88);
+      backdrop-filter:blur(16px);
+      -webkit-backdrop-filter:blur(16px);
+      border-bottom:1px solid rgba(223,231,243,.75);
+    }
+    .nav{
+      min-height:76px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:22px;
+      padding:10px 0;
+    }
+    .brand{display:flex;align-items:center;gap:12px;font-weight:900;color:var(--dark);min-width:0}
+    .brand-logo{
+      width:58px;
+      height:58px;
+      object-fit:contain;
+      border-radius:14px;
+      background:#fff;
+      box-shadow:0 10px 26px rgba(8,30,66,.12);
+      padding:4px;
+      flex:0 0 auto;
+    }
+    .brand-text{line-height:1.05;min-width:0}
+    .brand-text small{display:block;font-weight:700;color:var(--muted);margin-top:3px}
+    .brand-text em{
+      display:block;
+      font-style:normal;
+      font-size:12px;
+      font-weight:800;
+      color:var(--blue);
+      letter-spacing:.2px;
+      margin-top:4px;
+    }
+    .brand-mark{width:46px;height:46px;border-radius:14px;background:linear-gradient(135deg,var(--blue),var(--teal));display:grid;place-items:center;color:#fff;font-size:24px;box-shadow:0 12px 28px rgba(19,110,246,.22)}
+    .brand small{display:block;font-weight:600;color:var(--muted);margin-top:-3px}
+    .nav-links{display:flex;align-items:center;gap:clamp(14px,2vw,28px);color:#263b5e;font-weight:700;font-size:14px}
+    .nav-links a{padding:10px 0}
+    .nav-cta{flex:0 0 auto}
+
+    .btn{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:9px;
+      padding:13px 18px;
+      border-radius:12px;
+      border:1px solid transparent;
+      font-weight:800;
+      cursor:pointer;
+      transition:.25s ease;
+      white-space:nowrap;
+      min-height:48px;
+    }
+    .btn-primary{background:linear-gradient(135deg,var(--blue),var(--blue2));color:#fff;box-shadow:0 16px 32px rgba(19,110,246,.28)}
+    .btn-primary:hover{transform:translateY(-2px);box-shadow:0 22px 44px rgba(19,110,246,.34)}
+    .btn-soft{background:#fff;color:var(--green);border-color:#bfe9d6;box-shadow:0 12px 30px rgba(11,31,66,.08)}
+    .btn-dark{background:#0b1832;color:#fff;border-color:#203659}
+
+    .hero{
+      position:relative;
+      padding:clamp(54px,8vw,88px) 0 clamp(48px,7vw,72px);
+      background:
+        radial-gradient(circle at 77% 24%,rgba(19,110,246,.14),transparent 31%),
+        radial-gradient(circle at 15% 10%,rgba(24,197,217,.12),transparent 28%),
+        linear-gradient(180deg,#fff 0%,#f8fbff 100%);
+    }
+    .hero-grid{
+      display:grid;
+      grid-template-columns:minmax(0,1fr) minmax(420px,1.12fr);
+      gap:clamp(30px,5vw,48px);
+      align-items:center;
+    }
+    .eyebrow{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      color:#0b62e5;
+      background:#eaf3ff;
+      border:1px solid #d7e8ff;
+      border-radius:999px;
+      padding:8px 13px;
+      font-weight:900;
+      font-size:13px;
+      margin-bottom:20px;
+    }
+    h1{
+      font-size:clamp(40px,6vw,76px);
+      line-height:.98;
+      margin:0 0 24px;
+      color:#091833;
+      letter-spacing:-2.4px;
+      max-width:850px;
+    }
+    .accent{color:var(--blue)}
+    .hero p{font-size:clamp(16px,1.7vw,18px);color:#42536e;max-width:600px;margin:0 0 28px}
+    .hero-actions{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:28px}
+    .trust-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;max-width:660px}
+    .trust-item{display:flex;gap:10px;align-items:flex-start;font-size:12px;color:var(--muted);font-weight:700}
+    .trust-icon{width:32px;height:32px;border-radius:10px;background:#eef7ff;color:var(--blue);display:grid;place-items:center;flex:0 0 auto}
+
+    .browser-stack{position:relative;min-height:488px}
+    .browser{border-radius:22px;background:#fff;border:1px solid #dce7f5;box-shadow:var(--shadow);overflow:hidden;position:absolute}
+    .browser.big{width:92%;right:0;top:12px}
+    .browser.small-a{width:45%;left:0;bottom:28px;z-index:2}
+    .browser.small-b{width:52%;right:0;bottom:0;z-index:3}
+    .browser-head{height:38px;background:#17233a;display:flex;align-items:center;gap:7px;padding:0 16px}
+    .dot{width:9px;height:9px;border-radius:50%;background:#aeb9c9}.dot:nth-child(2){background:#d4dbe7}.dot:nth-child(3){background:#f2f5fa}
+    .browser img{width:100%;height:auto}
+
+    .section{padding:clamp(58px,8vw,82px) 0}
+    .center{text-align:center}
+    .center p{margin-left:auto;margin-right:auto}
+    .section-title{font-size:clamp(30px,4vw,48px);line-height:1.08;margin:0 0 15px;letter-spacing:-1.2px;color:#0c1932}
+    .section-copy{max-width:760px;color:#58677d;font-size:clamp(15px,1.6vw,17px);margin:0 0 34px}
+
+    .module-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-top:34px}
+    .module-pill{background:#fff;border:1px solid var(--border);border-radius:20px;padding:22px 14px;text-align:center;box-shadow:0 12px 32px rgba(11,31,66,.06);transition:.25s}
+    .module-pill:hover{transform:translateY(-5px);border-color:#bfd9ff}
+    .module-icon{width:54px;height:54px;margin:0 auto 12px;border-radius:17px;display:grid;place-items:center;font-size:25px;background:#eef5ff;color:var(--blue)}
+    .module-pill h3{font-size:15px;margin:0;color:#14213d}
+    .module-pill span{font-size:12px;color:var(--muted);font-weight:700}
+
+    .cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px;margin-top:36px}
+    .feature-card{background:#fff;border:1px solid var(--border);border-radius:22px;box-shadow:var(--soft-shadow);padding:22px;overflow:hidden;position:relative}
+    .feature-card:before{content:"";position:absolute;inset:0 0 auto 0;height:5px;background:linear-gradient(90deg,var(--blue),var(--teal),var(--green))}
+    .feature-top{display:flex;gap:12px;align-items:flex-start;margin-bottom:14px}
+    .feature-top .mini{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;color:#fff;background:linear-gradient(135deg,var(--blue),var(--teal));font-size:20px;flex:0 0 auto}
+    .feature-card h3{margin:0 0 4px;color:#0c1d3c}
+    .feature-card p{margin:0;color:#5b6b80;font-size:14px}
+    .shot{margin-top:17px;border:1px solid #e1e9f4;border-radius:16px;overflow:hidden;background:#f8fbff;box-shadow:inset 0 1px 0 rgba(255,255,255,.8)}
+    .shot img{width:100%;height:220px;object-fit:cover;object-position:top}
+
+    .compliance{background:linear-gradient(180deg,#f7fbff 0%,#fff 100%)}
+    .compliance-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;align-items:stretch;margin-top:34px}
+    .compliance-card{border-radius:28px;padding:32px;background:#fff;border:1px solid var(--border);box-shadow:0 20px 55px rgba(8,30,66,.08);position:relative;overflow:hidden}
+    .compliance-card:after{content:"";position:absolute;width:180px;height:180px;border-radius:50%;right:-70px;top:-70px;background:rgba(19,110,246,.08)}
+    .compliance-card h3{font-size:clamp(22px,2.6vw,25px);margin:0 0 14px;color:#071a38}
+    .compliance-card p{color:#57667d;margin:0 0 18px}
+    .check-list{display:grid;gap:12px;margin:0;padding:0;list-style:none}
+    .check-list li{display:flex;gap:10px;align-items:flex-start;color:#263a5b;font-weight:700;font-size:15px}
+    .check{color:var(--green);font-weight:900}
+
+    .workflow{background:#09172e;color:#fff;position:relative;overflow:hidden}
+    .workflow:before{content:"";position:absolute;inset:-120px -120px auto auto;width:420px;height:420px;background:radial-gradient(circle,rgba(24,197,217,.25),transparent 63%);border-radius:50%}
+    .workflow .section-title,.workflow .section-copy{color:#fff}
+    .workflow .section-copy{color:#b9c7df}
+    .steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-top:34px;position:relative;z-index:1}
+    .step{padding:24px;border-radius:22px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(12px)}
+    .step-num{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(135deg,var(--blue),var(--teal));font-weight:900;margin-bottom:14px}
+    .step h3{margin:0 0 8px}
+    .step p{margin:0;color:#c7d3e6;font-size:14px}
+
+    .admin-panel{background:linear-gradient(135deg,#0c1d3c,#102a5e);border-radius:30px;padding:38px;color:#fff;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:28px;align-items:center;box-shadow:0 28px 70px rgba(7,22,47,.25)}
+    .admin-panel p{color:#c8d6ea}
+    .admin-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .admin-list div{background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.15);border-radius:16px;padding:14px;font-weight:800}
+
+    .gallery{background:#f7faff}
+    .wide-shot{border-radius:28px;background:#fff;border:1px solid var(--border);box-shadow:var(--shadow);overflow:hidden;margin-top:34px}
+    .wide-shot img{width:100%;height:auto}
+
+    .cta{padding:clamp(64px,8vw,90px) 0;background:radial-gradient(circle at 20% 20%,rgba(24,197,217,.18),transparent 28%),linear-gradient(135deg,#07162f,#0d3a88);color:#fff;text-align:center}
+    .cta h2{font-size:clamp(32px,4vw,56px);line-height:1.05;margin:0 0 16px}
+    .cta p{color:#d8e4f6;font-size:clamp(16px,1.8vw,18px);max-width:720px;margin:0 auto 28px}
+
+    footer{padding:28px 0;color:#6c7a91;background:#fff;border-top:1px solid var(--border);font-size:14px}
+    .footer-row{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+
+    /* Desktop refinements */
+    @media(min-width:981px){
+      .feature-card{min-width:0}
+      .feature-card:nth-child(1), .feature-card:nth-child(6){grid-column:auto}
+      .nav .btn{padding-left:20px;padding-right:20px}
+    }
+
+    /* Tablet layout */
+    @media(max-width:1100px){
+      .nav-links{gap:16px}
+      .hero-grid{grid-template-columns:1fr;gap:34px}
+      .browser-stack{min-height:430px;max-width:760px;width:100%;margin:0 auto}
+      .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .module-strip{grid-template-columns:repeat(3,minmax(0,1fr))}
+      .steps{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .admin-panel{grid-template-columns:1fr}
+    }
+
+    /* Mobile and small tablet layout */
+    @media(max-width:760px){
+      :root{--container:min(100% - 32px,1180px)}
+      .topbar{position:relative}
+      .nav{align-items:flex-start;gap:14px}
+      .nav-links{display:none}
+      .nav-cta{display:none}
+      .brand-logo{width:52px;height:52px}
+      .brand{max-width:100%}
+      .brand-text{font-size:17px}
+      .brand-text small{font-size:12px}
+      .brand-text em{font-size:11px}
+      .hero{text-align:left}
+      h1{letter-spacing:-1.4px}
+      .hero-actions{display:grid;grid-template-columns:1fr;max-width:420px}
+      .btn{width:100%;white-space:normal;text-align:center}
+      .trust-row{grid-template-columns:1fr;max-width:420px}
+      .browser-stack{min-height:auto;display:grid;gap:14px}
+      .browser{position:relative!important;width:100%!important;margin:0;left:auto!important;right:auto!important;top:auto!important;bottom:auto!important;border-radius:18px}
+      .browser.small-a,.browser.small-b{display:none}
+      .browser-head{height:32px}
+      .module-strip{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+      .module-pill{padding:18px 10px;border-radius:18px}
+      .cards{grid-template-columns:1fr}
+      .feature-card{padding:18px;border-radius:20px}
+      .feature-top{align-items:flex-start}
+      .shot img{height:auto;max-height:300px;object-fit:contain;background:#f8fbff}
+      .compliance-grid{grid-template-columns:1fr}
+      .compliance-card{padding:24px;border-radius:22px}
+      .steps{grid-template-columns:1fr}
+      .admin-panel{padding:24px;border-radius:22px}
+      .admin-list{grid-template-columns:1fr}
+      .wide-shot{border-radius:20px}
+      .footer-row{display:grid;gap:10px}
+    }
+
+    /* Narrow phones */
+    @media(max-width:430px){
+      :root{--container:min(100% - 22px,1180px)}
+      .nav{min-height:auto}
+      .brand-logo{width:46px;height:46px}
+      .brand-text{font-size:15px}
+      .brand-text small{font-size:11px}
+      .brand-text em{display:none}
+      .hero{padding-top:38px}
+      .eyebrow{font-size:12px;line-height:1.3;border-radius:16px}
+      .module-strip{grid-template-columns:1fr}
+      .module-pill{display:flex;align-items:center;text-align:left;gap:12px}
+      .module-icon{margin:0;flex:0 0 46px;width:46px;height:46px}
+      .feature-top .mini{width:38px;height:38px}
+      .check-list li{font-size:14px}
+      .cta .hero-actions{max-width:100%}
+    }
+
+    @media(prefers-reduced-motion:reduce){
+      *{scroll-behavior:auto!important;transition:none!important}
+    }
+
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="container nav">
+      <a class="brand" href="#top" aria-label="Easy Admin home"><img class="brand-logo" src="/static/afy_cloud_solutions_logo.png" alt="AFY Cloud Solutions logo"><div>Easy Admin<small>Easy Company Administration</small></div></a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#modules">Modules</a><a href="#compliance">Compliance</a><a href="#payroll">Payroll</a><a href="#admin">Company Admin</a><a href="#demo">Demo</a>
+      </nav>
+      <div class="nav-cta" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><a class="btn btn-primary" href="#demo">Request a Demo</a><a class="btn btn-primary" href="/login">Log into Easy Admin</a></div>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="container hero-grid">
+        <div>
+          <div class="eyebrow">✨ Easy Company Administration by AFY Cloud Solutions</div>
+          <h1>Make company administration <span class="accent">easy.</span></h1>
+          <p>Easy Admin helps businesses manage bookings, projects, clients, invoices, finance, employees, payroll, leave and compliance-focused reporting from one secure platform.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#demo">📅 Request a Demo</a>
+            <a class="btn btn-primary" href="/login">🔐 Log into Easy Admin</a>
+            <a class="btn btn-soft" href="#modules">🚀 Explore Features</a>
+          </div>
+          <div class="trust-row">
+            <div class="trust-item"><span class="trust-icon">🔒</span><span><strong>Tenant-safe</strong><br>Company data isolation</span></div>
+            <div class="trust-item"><span class="trust-icon">📊</span><span><strong>Operational control</strong><br>Bookings, finance and reports</span></div>
+            <div class="trust-item"><span class="trust-icon">🇿🇦</span><span><strong>SA payroll logic</strong><br>BCEA and SARS-focused rules</span></div>
+          </div>
+        </div>
+        <div class="browser-stack" aria-label="Product screenshots">
+          <div class="browser big"><div class="browser-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div><img src="/static/payroll.jpg" alt="HR and payroll portal screenshot" loading="eager"></div>
+          <div class="browser small-a"><div class="browser-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div><img src="/static/audit_trail.jpg" alt="System audit trail screenshot" loading="lazy"></div>
+          <div class="browser small-b"><div class="browser-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div><img src="/static/new_employee.jpg" alt="Employee administration form screenshot" loading="lazy"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="modules" class="section">
+      <div class="container center">
+        <h2 class="section-title">Everything you need. <span class="accent">All in one place.</span></h2>
+        <p class="section-copy">A modular company administration platform built for service teams, operations managers, finance administrators and payroll teams.</p>
+        <div class="module-strip">
+          <div class="module-pill"><div class="module-icon">🗓️</div><h3>Booking & Ops</h3><span>Jobs, routes and staff</span></div>
+          <div class="module-pill"><div class="module-icon">👥</div><h3>HR & Payroll</h3><span>Employees and payslips</span></div>
+          <div class="module-pill"><div class="module-icon">🧾</div><h3>Invoicing</h3><span>Quotes, receipts and VAT</span></div>
+          <div class="module-pill"><div class="module-icon">💰</div><h3>Finance</h3><span>Margins and expenses</span></div>
+          <div class="module-pill"><div class="module-icon">📁</div><h3>Clients</h3><span>Directory and records</span></div>
+          <div class="module-pill"><div class="module-icon">📈</div><h3>Reports</h3><span>Exports and insights</span></div>
+        </div>
+      </div>
+      <div class="container cards">
+        <article class="feature-card"><div class="feature-top"><div class="mini">🗺️</div><div><h3>Operations / Projects & Sites</h3><p>Schedule jobs, assign staff, plan daily routes and view upcoming work from one dashboard.</p></div></div><div class="shot"><img src="/static/bookings.jpg" alt="Projects and sites dashboard screenshot" loading="lazy"></div></article>
+        <article id="payroll" class="feature-card"><div class="feature-top"><div class="mini">✅</div><div><h3>HR & Payroll</h3><p>Process individual or bulk payroll, generate payslips, manage leave and export payroll bank files.</p></div></div><div class="shot"><img src="/static/payroll.jpg" alt="Payroll processing screenshot" loading="lazy"></div></article>
+        <article class="feature-card"><div class="feature-top"><div class="mini">🪪</div><div><h3>Employee Administration</h3><p>Capture employment details, working hours, contract type, tax information, bank details and documents.</p></div></div><div class="shot"><img src="/static/new_employee.jpg" alt="New employee form screenshot" loading="lazy"></div></article>
+        <article class="feature-card"><div class="feature-top"><div class="mini">🏢</div><div><h3>Client Management</h3><p>Store client contact details, addresses, company registration numbers, VAT numbers and discounts.</p></div></div><div class="shot"><img src="/static/add_client.jpg" alt="Add new client form screenshot" loading="lazy"></div></article>
+        <article class="feature-card"><div class="feature-top"><div class="mini">🛡️</div><div><h3>Company Admin Controls</h3><p>Manage staff accounts, custom field settings, audit visibility, company imports and company exports.</p></div></div><div class="shot"><img src="/static/hub_page.jpg" alt="Company admin controls screenshot" loading="lazy"></div></article>
+        <article class="feature-card"><div class="feature-top"><div class="mini">📅</div><div><h3>Calendar & Reporting</h3><p>Visualise monthly schedules, filter bookings, export job data and manage project/site visits.</p></div></div><div class="shot"><img src="/static/booking_calendar_view.jpg" alt="Full month calendar screenshot" loading="lazy"></div></article>
+      </div>
+    </section>
+
+    <section id="compliance" class="section compliance">
+      <div class="container center">
+        <h2 class="section-title">Designed around South African workforce compliance.</h2>
+        <p class="section-copy">The system helps business users follow consistent rules for working time, leave, payroll finalisation and SARS PAYE calculations. Statutory outputs remain internal-use unless certified for official SARS filing specifications.</p>
+      </div>
+      <div class="container compliance-grid">
+        <div class="compliance-card">
+          <h3>BCEA-focused workforce rules</h3>
+          <p>Support operational discipline with configurable work patterns and rules aligned to common Basic Conditions of Employment Act requirements.</p>
+          <ul class="check-list">
+            <li><span class="check">✓</span> Contract types for 5-day, 6-day, contract and shift-worker schedules</li>
+            <li><span class="check">✓</span> Weekly hours grouped Monday to Sunday with warning indicators</li>
+            <li><span class="check">✓</span> Sunday and public-holiday premium pay logic by contract type</li>
+            <li><span class="check">✓</span> Annual leave accrual with 18-month expiry handling</li>
+            <li><span class="check">✓</span> Sick leave tracked in 36-month employee cycles</li>
+          </ul>
+        </div>
+        <div class="compliance-card">
+          <h3>SARS PAYE calculation support</h3>
+          <p>Payroll calculations use the target payroll date to determine the tax year and apply saved tax table logic.</p>
+          <ul class="check-list">
+            <li><span class="check">✓</span> Payroll blocks when the correct SARS tax year table is missing</li>
+            <li><span class="check">✓</span> PAYE age bands: under 65, 65–74 and 75+</li>
+            <li><span class="check">✓</span> Regular income annualisation and irregular income comparison method</li>
+            <li><span class="check">✓</span> UIF at 1% with contribution limit handling</li>
+            <li><span class="check">✓</span> EMP201, IRP5 and EMP501 draw from finalised ledger payslips only</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section workflow">
+      <div class="container center">
+        <h2 class="section-title">From daily scheduling to monthly payroll.</h2>
+        <p class="section-copy">A practical workflow that connects operational data to payroll and finance outcomes.</p>
+      </div>
+      <div class="container steps">
+        <div class="step"><div class="step-num">1</div><h3>Capture work</h3><p>Log bookings, projects, sites, custom fields, staff allocation, overtime and notes.</p></div>
+        <div class="step"><div class="step-num">2</div><h3>Manage people</h3><p>Maintain employee profiles, contract types, working hours, leave and document uploads.</p></div>
+        <div class="step"><div class="step-num">3</div><h3>Finalise payroll</h3><p>Process payslips, review calculations and save finalised records to the payroll ledger.</p></div>
+        <div class="step"><div class="step-num">4</div><h3>Export reports</h3><p>Generate bank payment files, EMP201 summaries, internal IRP5 and EMP501 outputs.</p></div>
+      </div>
+    </section>
+
+    <section id="admin" class="section">
+      <div class="container admin-panel">
+        <div>
+          <div class="eyebrow" style="background:rgba(255,255,255,.1);color:#bfe9ff;border-color:rgba(255,255,255,.18)">🔐 Company Admin focused</div>
+          <h2 class="section-title" style="color:#fff">Admin controls without unnecessary complexity.</h2>
+          <p>Company Admin users can manage their own company settings and staff accounts without accessing any super-admin-only features.</p>
+          <a class="btn btn-soft" href="#demo">Request a walkthrough</a>
+        </div>
+        <div class="admin-list">
+          <div>📧 Email & Calendar Settings</div>
+          <div>⬇️ Export Company Data</div>
+          <div>⬆️ Import Company Data</div>
+          <div>🧩 Custom Field Settings</div>
+          <div>📜 View Audit Trail</div>
+          <div>👥 Manage Staff Accounts</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section gallery">
+      <div class="container center">
+        <h2 class="section-title">Easy Admin is built for real company operations.</h2>
+        <p class="section-copy">The interface brings together the business hub, project calendar, client records, employee administration, audit visibility and payroll processing.</p>
+        <div class="wide-shot"><img src="/static/booking_calendar_view.jpg" alt="Monthly booking calendar view" loading="lazy"></div>
+      </div>
+    </section>
+
+    <section id="demo" class="cta">
+      <div class="container">
+        <h2>Ready to simplify your company administration?</h2>
+        <p>Request a demo of Easy Admin and see how AFY Cloud Solutions can help centralise operations, payroll, clients, finance and reporting in one easy-to-use platform.</p>
+        <div class="hero-actions" style="justify-content:center;margin-bottom:0">
+          <a class="btn btn-primary" href="mailto:info@afyenterprises.com?subject=Easy%20Admin%20Demo">Request a Demo</a>
+          <a class="btn btn-primary" href="/login">Log into Easy Admin</a>
+          <a class="btn btn-soft" href="#modules">View Modules</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container footer-row">
+      <span>© <span id="year"></span> AFY Cloud Solutions. Easy Admin. All rights reserved.</span>
+      <span>Easy Company Administration • Operations • Invoicing • Finance • HR & Payroll</span>
+    </div>
+  </footer>
+  <script>document.getElementById('year').textContent=new Date().getFullYear();</script>
+    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+</body>
+</html>
