@@ -1,4 +1,4 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v5-staff-actions';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v6-session-timeout';
 const APP_SHELL = [
   '/mobile',
   '/mobile/offline',
@@ -6,6 +6,7 @@ const APP_SHELL = [
   '/static/mobile.css?v=20260622',
   '/static/mobile.js?v=20260622',
   '/static/easyadmin-formatters.js?v=20260622-format',
+  '/static/session-timeout.js?v=20260623-timeout',
   '/static/staff-portal.css?v=20260623-staff2',
   '/static/staff-portal.js?v=20260623-staff2',
   '/static/easy_admin_logo.png',

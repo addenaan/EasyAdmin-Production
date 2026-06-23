@@ -12,6 +12,7 @@ import json
 import re
 import secrets
 import string
+import time
 from datetime import datetime, timedelta
 from functools import wraps
 import smtplib
@@ -32,6 +33,12 @@ from googleapiclient.discovery import build
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 app.secret_key = os.environ.get('SECRET_KEY', 'change-me-for-render-testing')
+
+# --- Security: session inactivity timeout ---
+SESSION_IDLE_TIMEOUT_SECONDS = int(os.environ.get('SESSION_IDLE_TIMEOUT_SECONDS', '300'))
+SESSION_TIMEOUT_LOGIN_URL = '/login?timeout=1'
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
+
 
 # --- Render / Cloud-ready configuration ---
 def get_database_path():
@@ -2412,6 +2419,50 @@ def calculate_financials(start_date, end_date):
     return { "revenue": round(rev, 2), "employee_cost": round(e_cost, 2), "provider_cost": round(p_cost, 2), "supplier_cost": round(s_cost, 2), "profit": round(rev - e_cost - p_cost - s_cost, 2), "jobs": len(bookings) }
 
 # ==========================================================
+# SESSION TIMEOUT HELPERS
+# ==========================================================
+def _request_expects_json():
+    path = request.path or ''
+    if path.startswith('/api/'):
+        return True
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return True
+    accept = request.headers.get('Accept', '') or ''
+    return 'application/json' in accept and 'text/html' not in accept
+
+
+def _session_timeout_response(message='Your session expired after 5 minutes of inactivity. Please log in again.'):
+    session.clear()
+    if _request_expects_json():
+        return jsonify({'status': 'timeout', 'message': message, 'redirect': SESSION_TIMEOUT_LOGIN_URL}), 401
+    return redirect(SESSION_TIMEOUT_LOGIN_URL)
+
+
+def _touch_session_activity():
+    session['last_activity_at'] = time.time()
+    session.modified = True
+
+
+@app.after_request
+def inject_session_timeout_script(response):
+    if 'logged_in' not in session:
+        return response
+    if response.status_code != 200 or response.is_streamed or response.mimetype != 'text/html':
+        return response
+    try:
+        body = response.get_data(as_text=True)
+    except Exception:
+        return response
+    if '</body>' not in body or 'session-timeout.js' in body:
+        return response
+    script = ('\n<script defer src="/static/session-timeout.js?v=20260623-timeout" '
+              'data-easyadmin-session-timeout data-timeout-seconds="%s"></script>\n') % SESSION_IDLE_TIMEOUT_SECONDS
+    body = body.replace('</body>', script + '</body>', 1)
+    response.set_data(body)
+    response.headers['Content-Length'] = str(len(response.get_data()))
+    return response
+
+# ==========================================================
 # 0. GLOBAL SECURITY
 # ==========================================================
 @app.before_request
@@ -2419,7 +2470,16 @@ def restrict_access():
     public_endpoints = ['landing', 'login', 'forgot_password', 'static', 'manifest_webmanifest', 'service_worker', 'mobile_offline', 'health_check']
     if request.endpoint in public_endpoints:
         return
-    if 'logged_in' not in session: return redirect(url_for('login'))
+    if 'logged_in' not in session:
+        if _request_expects_json():
+            return jsonify({'status': 'timeout', 'message': 'Please log in again.', 'redirect': url_for('login')}), 401
+        return redirect(url_for('login'))
+
+    now_ts = time.time()
+    last_activity = float(session.get('last_activity_at') or now_ts)
+    if now_ts - last_activity > SESSION_IDLE_TIMEOUT_SECONDS:
+        return _session_timeout_response()
+    _touch_session_activity()
     
     if not session.get('company_id') and not session.get('is_superadmin'):
         return "Fatal Error: Account is not assigned to a company.", 403
@@ -2427,7 +2487,7 @@ def restrict_access():
     path = request.path
 
     if session.get('is_staff'):
-        allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/api/staff/', '/logout')
+        allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/api/staff/', '/api/session/', '/logout')
         if path == '/mobile':
             return redirect(url_for('staff_mobile'))
         if path == '/hub':
@@ -2473,16 +2533,37 @@ def restrict_access():
         if not session.get('is_company_admin'):
             return "Access Denied: Only Company Admins can access Email & Calendar Settings from the Hub.", 403
 
+@app.route('/api/session/ping', methods=['POST'])
+def api_session_ping():
+    _touch_session_activity()
+    return jsonify({'status': 'success', 'timeout_seconds': SESSION_IDLE_TIMEOUT_SECONDS})
+
+
+@app.route('/api/session/timeout', methods=['POST'])
+def api_session_timeout():
+    username = session.get('username')
+    if username:
+        try:
+            log_action('System', 'Auto Logout', f'User {username} was logged out after inactivity.')
+        except Exception:
+            pass
+    session.clear()
+    return jsonify({'status': 'success', 'redirect': url_for('login', timeout=1)})
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    error = None
+    error = 'Your session expired after 5 minutes of inactivity. Please log in again.' if request.args.get('timeout') else None
     if request.method == 'POST':
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM users WHERE username = ?', (request.form['username'],)).fetchone()
         
         if user and check_password_hash(user['password_hash'], request.form['password']):
+            session.clear()
+            session.permanent = True
             session['logged_in'] = True
             session['username'] = user['username']
+            _touch_session_activity()
             session['is_superadmin'] = bool(user['is_superadmin'])
             session['is_company_admin'] = bool(dict(user).get('is_company_admin', 0))
             session['is_staff'] = bool(dict(user).get('is_staff', 0))
