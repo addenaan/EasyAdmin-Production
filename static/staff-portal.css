@@ -117,3 +117,16 @@ button:disabled, .primary-btn:disabled { opacity: 0.45; cursor: not-allowed; box
 .attachment-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .attachment-pill { display: inline-flex; align-items: center; border: 1px solid var(--border); background: #ffffff; border-radius: 999px; padding: 8px 10px; color: var(--primary-dark); font-weight: 800; font-size: 0.82rem; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty-state.compact { padding: 12px; font-size: 0.86rem; }
+
+/* Staff payslip access */
+.staff-tabs { grid-template-columns: repeat(4, 1fr); }
+.small-muted { color: var(--muted); font-size: 0.84rem; line-height: 1.45; margin-top: 4px; }
+.card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.primary-btn.compact { min-height: 38px; padding: 9px 12px; font-size: 0.82rem; }
+.payslip-summary-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.net-pay-row { background: #e7f6ee; border-color: #bde6cc; }
+.net-pay-row .detail-value { color: var(--success); font-size: 1.28rem; font-weight: 900; }
+@media (max-width: 620px) {
+    .payslip-summary-grid { grid-template-columns: 1fr; }
+    .staff-tabs { grid-template-columns: repeat(2, 1fr); top: 126px; }
+}

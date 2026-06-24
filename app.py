@@ -2487,7 +2487,7 @@ def restrict_access():
     path = request.path
 
     if session.get('is_staff'):
-        allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/api/staff/', '/api/session/', '/logout')
+        allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/staff/download_payslip/', '/api/staff/', '/api/session/', '/logout')
         if path == '/mobile':
             return redirect(url_for('staff_mobile'))
         if path == '/hub':
@@ -2896,6 +2896,290 @@ def _staff_leave_balances(employee):
     return balances
 
 
+
+def _staff_payslip_to_dict(row):
+    r = dict(row)
+    payslip_date = format_display_date(r.get('date') or '')
+    payslip_type = (r.get('payslip_type') or 'regular').strip() or 'regular'
+    is_adjustment = payslip_type.lower() == 'adjustment'
+    title = 'Adjustment Payslip' if is_adjustment else 'Final Payslip'
+    return {
+        'id': r.get('id'),
+        'employee_id': r.get('employee_id'),
+        'date': payslip_date,
+        'month': (payslip_date[:7] if payslip_date else ''),
+        'payslip_type': payslip_type,
+        'title': title,
+        'adjustment_reason': r.get('adjustment_reason') or '',
+        'gross_salary': float(r.get('gross_salary') or 0),
+        'overtime': float(r.get('overtime') or 0),
+        'bonus': float(r.get('bonus') or 0),
+        'transport': float(r.get('transport') or 0),
+        'reimbursable_expenses': float(r.get('reimbursable_expenses') or 0),
+        'uif': float(r.get('uif') or 0),
+        'paye': float(r.get('paye') or 0),
+        'loan_repayment': float(r.get('loan_repayment') or 0),
+        'net_salary': float(r.get('net_salary') or 0),
+        'created_at': format_display_date(r.get('created_at') or ''),
+        'download_url': url_for('staff_download_payslip', payslip_id=r.get('id'))
+    }
+
+
+
+def _staff_payslip_pdf_money(value):
+    """Money format used on the HR & Payroll payslip PDF layout."""
+    return _money(value)
+
+
+def _build_staff_payslip_pdf(row, employee, company):
+    """Create a staff downloadable payslip PDF matching the HR & Payroll payslip layout."""
+    r = dict(row)
+    emp = dict(employee)
+    comp = dict(company) if company else {}
+
+    page_w, page_h = 595.28, 841.89
+    margin = 34.0
+    content_x = 46.0
+    dark = (0.12, 0.13, 0.16)
+    muted = (0.42, 0.45, 0.48)
+    line_col = (0.84, 0.85, 0.86)
+    light = (0.965, 0.975, 0.985)
+    green = (0.04, 0.52, 0.31)
+    blue = (0.05, 0.43, 0.88)
+    white = (1, 1, 1)
+
+    cmds = []
+    image_resources = {}
+
+    def cmd(line):
+        cmds.append(line)
+
+    def color(c, op='rg'):
+        return f"{c[0]:.3f} {c[1]:.3f} {c[2]:.3f} {op}"
+
+    def text_width(value, size=9, bold=False):
+        value = str(value or '')
+        total = 0.0
+        for ch in value:
+            if ch.isdigit():
+                total += 0.556
+            elif ch in ',.':
+                total += 0.278 if not bold else 0.333
+            elif ch in ' -/:()':
+                total += 0.278 if not bold else 0.333
+            elif ch in 'ilI|!':
+                total += 0.240 if not bold else 0.300
+            elif ch in 'mwMW':
+                total += 0.800 if not bold else 0.900
+            else:
+                total += 0.520 if not bold else 0.600
+        return total * float(size)
+
+    def text(x, y, value, size=9, bold=False, c=dark, align='left', italic=False):
+        value = str(value or '').replace('\u00a0', ' ')
+        tw = text_width(value, size, bold)
+        if align == 'right':
+            x -= tw
+        elif align == 'center':
+            x -= tw / 2
+        # Base PDF fonts do not include Helvetica-Oblique in this lightweight writer.
+        font = 'F2' if bold else 'F1'
+        cmd(f"{color(c)} BT /{font} {float(size):.2f} Tf {float(x):.2f} {float(y):.2f} Td ({_pdf_text_escape(value)}) Tj ET")
+
+    def rect(x, y, w, h, stroke=None, fill=None, width=0.55):
+        if fill is not None:
+            cmd(f"{color(fill)} {float(x):.2f} {float(y):.2f} {float(w):.2f} {float(h):.2f} re f")
+        if stroke is not None:
+            cmd(f"{float(width):.2f} w {color(stroke, 'RG')} {float(x):.2f} {float(y):.2f} {float(w):.2f} {float(h):.2f} re S")
+
+    def line(x1, y1, x2, y2, stroke=line_col, width=0.55):
+        cmd(f"{float(width):.2f} w {color(stroke, 'RG')} {float(x1):.2f} {float(y1):.2f} m {float(x2):.2f} {float(y2):.2f} l S")
+
+    def draw_wrapped(value, x, y, max_chars=42, size=10, c=muted, leading=14, max_lines=4, bold=False):
+        value = str(value or '').replace('\r', ' ').replace('\n', ' ')
+        words = value.split()
+        lines = []
+        current = ''
+        for word in words:
+            trial = (current + ' ' + word).strip()
+            if len(trial) <= max_chars:
+                current = trial
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+                if len(lines) >= max_lines:
+                    break
+        if current and len(lines) < max_lines:
+            lines.append(current)
+        for i, ln in enumerate(lines[:max_lines]):
+            text(x, y - i * leading, ln, size, bold, c)
+        return y - len(lines[:max_lines]) * leading
+
+    def draw_image(name, x, y, w, h):
+        cmd(f"q {float(w):.2f} 0 0 {float(h):.2f} {float(x):.2f} {float(y):.2f} cm /{name} Do Q")
+
+    # Outer document frame similar to the HR & Payroll payslip download.
+    rect(12, 18, page_w - 24, page_h - 36, stroke=(0.20, 0.23, 0.27), fill=None, width=0.8)
+
+    company_name = comp.get('name') or session.get('company_name') or 'Company'
+    company_addr = comp.get('address') or ''
+    company_reg = comp.get('registration_number') or ''
+    period = (format_display_date(r.get('date') or '') or str(r.get('date') or ''))[:7]
+    payslip_type = (r.get('payslip_type') or 'regular').strip().lower()
+    doc_title = 'ADJUSTMENT PAYSLIP' if payslip_type == 'adjustment' else 'PAYSLIP'
+
+    logo_resource_name = None
+    try:
+        logo_file = comp.get('logo_file') or ''
+        if logo_file:
+            logo_path = os.path.join(app.config.get('UPLOAD_FOLDER', 'uploads'), 'logos', os.path.basename(str(logo_file)))
+            logo_info = _get_cached_pdf_image(logo_path) if os.path.exists(logo_path) else None
+            if logo_info:
+                logo_resource_name = 'ImLogo'
+                image_resources[logo_resource_name] = logo_info
+    except Exception:
+        logo_resource_name = None
+
+    top_y = page_h - 72
+    if logo_resource_name:
+        logo = image_resources[logo_resource_name]
+        max_w, max_h = 120.0, 56.0
+        ratio = min(max_w / max(1, float(logo.get('width', 1))), max_h / max(1, float(logo.get('height', 1))))
+        logo_w = float(logo.get('width', 1)) * ratio
+        logo_h = float(logo.get('height', 1)) * ratio
+        draw_image(logo_resource_name, content_x, top_y - logo_h + 4, logo_w, logo_h)
+        company_y = top_y - logo_h - 22
+    else:
+        company_y = top_y
+
+    text(content_x, company_y, company_name, 22, True, dark)
+    y = company_y - 22
+    if company_reg:
+        text(content_x, y, f"Reg No: {company_reg}", 10, False, muted)
+        y -= 14
+    if company_addr:
+        y = draw_wrapped(company_addr, content_x, y, 38, 11, muted, 16, 4)
+
+    text(page_w - content_x, page_h - 83, doc_title, 24, True, green, 'right')
+    info_y = page_h - 142
+    text(page_w - content_x - 85, info_y, 'Date:', 12, True, dark, 'right')
+    text(page_w - content_x, info_y, period, 12, False, dark, 'right')
+    info_y -= 18
+    text(page_w - content_x - 113, info_y, 'Employee:', 12, True, dark, 'right')
+    text(page_w - content_x, info_y, emp.get('name') or '', 12, False, dark, 'right')
+    info_y -= 17
+    if emp.get('emp_number'):
+        text(page_w - content_x, info_y, f"({emp.get('emp_number')})", 12, False, dark, 'right')
+        info_y -= 17
+    text(page_w - content_x - 70, info_y, 'ID:', 12, True, dark, 'right')
+    text(page_w - content_x, info_y, emp.get('id_passport') or '', 12, False, dark, 'right')
+
+    line(content_x - 10, page_h - 238, page_w - content_x + 10, page_h - 238, line_col, 0.7)
+
+    table_x = content_x
+    table_y_top = page_h - 268
+    row_h = 34.0
+    table_w = page_w - (content_x * 2)
+    desc_w = table_w * 0.66
+    earn_w = table_w * 0.155
+    ded_w = table_w - desc_w - earn_w
+    x_desc = table_x
+    x_earn = table_x + desc_w
+    x_ded = x_earn + earn_w
+
+    # Header and table frame.
+    rect(table_x, table_y_top - row_h, table_w, row_h, stroke=None, fill=white)
+    text(table_x + 7, table_y_top - 24, 'Description', 13, True, dark)
+    text(x_earn + earn_w - 8, table_y_top - 24, 'Earnings', 13, True, dark, 'right')
+    text(x_ded + ded_w - 8, table_y_top - 24, 'Deductions', 13, True, dark, 'right')
+    line(x_earn, table_y_top, x_earn, table_y_top - row_h * 8, line_col, 0.9)
+    line(x_ded, table_y_top, x_ded, table_y_top - row_h * 8, line_col, 0.9)
+    line(table_x, table_y_top - row_h, table_x + table_w, table_y_top - row_h, (0.90,0.91,0.92), 0.4)
+
+    def money_amount(value):
+        return _staff_payslip_pdf_money(value)
+
+    table_rows = [
+        {'label': 'Calculated Gross', 'code': 'Code: 3601', 'earn': r.get('gross_salary') or 0, 'ded': None, 'show': True, 'muted': ''},
+        {'label': 'Overtime / Double Rate', 'code': 'Code: 3605', 'earn': r.get('overtime') or 0, 'ded': None, 'show': abs(float(r.get('overtime') or 0)) > 0.004, 'muted': ''},
+        {'label': 'Reimbursable Expenses (Non-taxable)', 'code': '', 'earn': r.get('reimbursable_expenses') or 0, 'ded': None, 'show': abs(float(r.get('reimbursable_expenses') or 0)) > 0.004, 'green': True},
+        {'label': 'Bonus', 'code': 'Code: 3605/3601', 'earn': r.get('bonus') or 0, 'ded': None, 'show': abs(float(r.get('bonus') or 0)) > 0.004},
+        {'label': 'Transport Reimbursement (Tax Free)', 'code': 'Code: 3702', 'earn': r.get('transport') or 0, 'ded': None, 'show': abs(float(r.get('transport') or 0)) > 0.004, 'green': True},
+        {'label': 'PAYE Tax', 'code': 'Code: 4102', 'earn': None, 'ded': r.get('paye') or 0, 'show': True},
+        {'label': 'UIF (Employee 1%)', 'code': 'Code: 4141', 'earn': None, 'ded': r.get('uif') or 0, 'show': True},
+        {'label': 'Loan Repayment', 'code': '', 'earn': None, 'ded': r.get('loan_repayment') or 0, 'show': abs(float(r.get('loan_repayment') or 0)) > 0.004},
+        {'label': 'UIF (Employer 1%)', 'code': '', 'earn': r.get('uif') or 0, 'ded': None, 'show': True, 'italic': True},
+    ]
+    visible_rows = [rr for rr in table_rows if rr.get('show')]
+    y = table_y_top - row_h
+    for rr in visible_rows:
+        rect(table_x, y - row_h, table_w, row_h, stroke=(0.94,0.94,0.94), fill=white, width=0.35)
+        line(x_earn, y, x_earn, y - row_h, line_col, 0.65)
+        line(x_ded, y, x_ded, y - row_h, line_col, 0.65)
+        label_col = muted if rr.get('italic') else dark
+        text(table_x + 7, y - 22, rr['label'], 12, False, label_col)
+        if rr.get('code'):
+            text(x_earn - 22, y - 22, rr['code'], 9, False, muted, 'right')
+        amount_col = green if rr.get('green') else dark
+        if rr.get('earn') is not None:
+            text(x_earn + earn_w - 8, y - 22, money_amount(rr.get('earn')), 12, False, amount_col, 'right')
+        if rr.get('ded') is not None:
+            text(x_ded + ded_w - 8, y - 22, money_amount(rr.get('ded')), 12, False, dark, 'right')
+        y -= row_h
+
+    # Net pay row.
+    net_h = 39.0
+    line(table_x, y, table_x + table_w, y, (0.10,0.10,0.10), 1.0)
+    rect(table_x, y - net_h, table_w, net_h, stroke=(0.10,0.10,0.10), fill=white, width=0.8)
+    line(x_earn, y, x_earn, y - net_h, (0.10,0.10,0.10), 1.0)
+    text(table_x + 7, y - 25, 'NET PAY', 13, True, dark)
+    text(x_ded + ded_w - 8, y - 25, money_amount(r.get('net_salary') or 0), 16, True, green, 'right')
+    y -= net_h + 38
+
+    if r.get('adjustment_reason'):
+        rect(content_x, y - 46, table_w, 46, stroke=line_col, fill=light, width=0.5)
+        text(content_x + 8, y - 16, 'Adjustment reason', 10, True, dark)
+        draw_wrapped(r.get('adjustment_reason'), content_x + 8, y - 31, 84, 9, muted, 11, 2)
+        y -= 62
+
+    # Leave balances panel.
+    panel_h = 112
+    rect(content_x, y - panel_h, table_w, panel_h, stroke=(0.86,0.88,0.91), fill=light, width=0.55)
+    text(content_x + 13, y - 23, 'Statutory Leave Balances', 13, False, blue)
+    line(content_x + 13, y - 34, content_x + table_w - 13, y - 34, (0.82,0.84,0.87), 0.5)
+    try:
+        leave_ref = r.get('date') or datetime.now().strftime('%Y-%m-%d')
+        annual = calculate_leave_balance(emp.get('id'), emp.get('start_date') or datetime.now().strftime('%Y-%m-%d'), emp.get('emp_type') or 'Full-time (5 Days)', emp.get('name') or '', leave_ref)
+        sick = calculate_sick_leave_balance(emp.get('id'), emp.get('start_date') or datetime.now().strftime('%Y-%m-%d'), emp.get('emp_type') or 'Full-time (5 Days)', emp.get('name') or '', leave_ref)
+        family = calculate_family_leave_balance(emp.get('id'), emp.get('start_date') or datetime.now().strftime('%Y-%m-%d'), emp.get('emp_type') or 'Full-time (5 Days)', emp.get('name') or '', leave_ref)
+    except Exception:
+        annual, sick, family = 'N/A', 'N/A', 'N/A'
+
+    def leave_val(v):
+        try:
+            f = float(v)
+            return f"{f:g}"
+        except Exception:
+            return str(v)
+
+    line_y = y - 55
+    text(content_x + 13, line_y, 'Annual Leave Balance:', 10, False, dark)
+    text(content_x + 133, line_y, f"{leave_val(annual)} Days", 10, True, dark)
+    line_y -= 18
+    text(content_x + 13, line_y, 'Sick Leave Balance:', 10, False, dark)
+    text(content_x + 128, line_y, f"{leave_val(sick)} Days left in 36-month cycle", 10, True, dark)
+    line_y -= 18
+    text(content_x + 13, line_y, 'Family Responsibility Leave:', 10, False, dark)
+    text(content_x + 166, line_y, f"{leave_val(family)} Days left in annual cycle", 10, True, dark)
+
+    if image_resources:
+        pdf_bytes = _build_raw_pdf(['\n'.join(cmds)], page_w, page_h, image_resources)
+    else:
+        pdf_bytes = _build_raw_pdf(['\n'.join(cmds)], page_w, page_h, {})
+    return io.BytesIO(pdf_bytes)
+
+
 @app.route('/staff')
 def staff_portal():
     if not _staff_is_user():
@@ -3122,6 +3406,76 @@ def staff_download_attachment(attachment_id):
         if not abs_path.startswith(uploads_root) or not os.path.exists(abs_path):
             return 'Attachment file missing.', 404
         return send_file(abs_path, as_attachment=True, download_name=row['original_filename'])
+    finally:
+        conn.close()
+
+
+
+@app.route('/api/staff/payslips')
+def api_staff_payslips():
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        rows = conn.execute('''SELECT * FROM payslips
+                               WHERE company_id=? AND employee_id=?
+                               ORDER BY date DESC, id DESC
+                               LIMIT 60''', (cid, employee['id'])).fetchall()
+        return jsonify({'status': 'success', 'payslips': [_staff_payslip_to_dict(r) for r in rows]})
+    except Exception as exc:
+        return _staff_json_error(f'Payslips could not be loaded: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/payslips/<int:payslip_id>')
+def api_staff_payslip_detail(payslip_id):
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        row = conn.execute('''SELECT * FROM payslips
+                              WHERE id=? AND company_id=? AND employee_id=?''',
+                           (payslip_id, cid, employee['id'])).fetchone()
+        if not row:
+            return _staff_json_error('Payslip not found for your staff profile.', 404)
+        return jsonify({'status': 'success', 'payslip': _staff_payslip_to_dict(row)})
+    except Exception as exc:
+        return _staff_json_error(f'Payslip could not be loaded: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/staff/download_payslip/<int:payslip_id>')
+def staff_download_payslip(payslip_id):
+    if not _staff_is_user():
+        return redirect(url_for('login'))
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return 'Staff profile not found.', 404
+        row = conn.execute('''SELECT * FROM payslips
+                              WHERE id=? AND company_id=? AND employee_id=?''',
+                           (payslip_id, cid, employee['id'])).fetchone()
+        if not row:
+            return 'Payslip not found.', 404
+        company = conn.execute('SELECT * FROM companies WHERE id=?', (cid,)).fetchone()
+        pdf_bytes = _build_staff_payslip_pdf(row, employee, company)
+        safe_name = secure_filename(employee['name'] or 'employee') or 'employee'
+        period = (format_display_date(row['date']) or str(row['date'] or 'payslip'))[:10]
+        filename = f"Payslip_{safe_name}_{period}.pdf"
+        log_action('Staff Portal', 'Downloaded Payslip', f"{employee['name']} downloaded payslip ID {payslip_id}.")
+        return send_file(pdf_bytes, mimetype='application/pdf', as_attachment=True, download_name=filename)
     finally:
         conn.close()
 

@@ -7,7 +7,7 @@
     <title>Staff Portal | {{ session.get('company_name', 'Easy Admin') }}</title>
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/static/pwa-icon-192.png">
-    <link rel="stylesheet" href="/static/staff-portal.css?v=20260623-staff2">
+    <link rel="stylesheet" href="/static/staff-portal.css?v=20260624-payslips">
 </head>
 <body>
     <div class="staff-shell">
@@ -34,6 +34,7 @@
                 <button class="tab-btn active" data-tab="home">Home</button>
                 <button class="tab-btn" data-tab="bookings">Bookings</button>
                 <button class="tab-btn" data-tab="leave">Leave</button>
+                <button class="tab-btn" data-tab="payslips">Payslips</button>
             </nav>
 
             <section id="homeView" class="view active-view">
@@ -52,6 +53,19 @@
                     <button id="loadBookingsBtn" class="primary-btn" type="button">Load bookings</button>
                 </div>
                 <div id="bookingsList" class="card-list loading-card">Choose a date range to load your bookings.</div>
+            </section>
+
+
+
+            <section id="payslipsView" class="view">
+                <div class="filter-card">
+                    <div>
+                        <h2>My finalised payslips</h2>
+                        <p class="small-muted">Only payslips saved to the payroll ledger by admin will appear here.</p>
+                    </div>
+                    <button id="loadPayslipsBtn" class="primary-btn" type="button">Refresh payslips</button>
+                </div>
+                <div id="payslipsList" class="card-list loading-card">Loading finalised payslips...</div>
             </section>
 
             <section id="leaveView" class="view">
@@ -96,6 +110,6 @@
     </div>
 
     <script src="/static/easyadmin-formatters.js?v=20260622-format"></script>
-    <script defer src="/static/staff-portal.js?v=20260623-staff2"></script>
+    <script defer src="/static/staff-portal.js?v=20260624-payslips"></script>
 </body>
 </html>

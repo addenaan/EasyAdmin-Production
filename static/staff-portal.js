@@ -1,7 +1,8 @@
 (function () {
-    const state = { dashboard: null, bookings: [], currentTab: 'home', currentBooking: null, deferredPrompt: null };
+    const state = { dashboard: null, bookings: [], payslips: [], currentTab: 'home', currentBooking: null, deferredPrompt: null };
     const $ = (id) => document.getElementById(id);
     const fmtDate = (value) => (window.EasyAdminFormat ? window.EasyAdminFormat.date(value) : String(value || '').slice(0, 10));
+    const fmtMoney = (value) => (window.EasyAdminFormat ? window.EasyAdminFormat.money(value) : Number(value || 0).toFixed(2));
     const safe = (value) => String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[ch]));
     const statusClass = (status) => {
         if (status === 'Approved' || status === 'Completed') return 'success';
@@ -66,6 +67,23 @@
         </article>`;
     }
 
+    function payslipCard(p) {
+        const period = p.month || p.date || 'Payslip';
+        return `<article class="item-card" data-payslip-id="${safe(p.id)}">
+            <div class="item-top">
+                <div>
+                    <div class="item-title">${safe(p.title || 'Final Payslip')} - ${safe(period)}</div>
+                    <div class="item-meta">Net pay: ${safe(fmtMoney(p.net_salary))}<br>Issued: ${safe(fmtDate(p.date))}${p.adjustment_reason ? '<br>Adjustment: ' + safe(p.adjustment_reason) : ''}</div>
+                </div>
+                <span class="badge success">Finalised</span>
+            </div>
+            <div class="card-actions">
+                <button class="primary-btn compact" type="button" data-download-payslip="${safe(p.id)}">Download PDF</button>
+            </div>
+        </article>`;
+    }
+
+
     function renderProfile(data) {
         const e = data.employee || {};
         $('profileCard').classList.remove('loading-card');
@@ -115,6 +133,22 @@
             $('leaveHistory').innerHTML = empty(err.message);
         }
     }
+
+    async function loadPayslips() {
+        const list = $('payslipsList');
+        if (!list) return;
+        list.innerHTML = 'Loading finalised payslips...';
+        list.classList.add('loading-card');
+        try {
+            const data = await api('/api/staff/payslips');
+            state.payslips = data.payslips || [];
+            list.classList.remove('loading-card');
+            list.innerHTML = state.payslips.length ? state.payslips.map(payslipCard).join('') : empty('No finalised payslips are available yet. Ask payroll/admin to finalise your payslip first.');
+        } catch (err) {
+            list.innerHTML = empty(err.message);
+        }
+    }
+
 
     async function submitLeave(event) {
         event.preventDefault();
@@ -175,6 +209,37 @@
             <div class="detail-row"><div class="detail-label">Uploaded Files</div><div id="bookingAttachments" class="detail-value">${attachmentList(b.attachments || [])}</div></div>
         </div>`;
     }
+
+    function payslipDetailHtml(p) {
+        return `<div class="detail-grid payslip-detail">
+            <div class="detail-row"><div class="detail-label">Payslip Period</div><div class="detail-value">${safe(p.month || p.date || '')}</div></div>
+            <div class="detail-row"><div class="detail-label">Status</div><div class="detail-value"><span class="badge success">Finalised</span></div></div>
+            ${p.adjustment_reason ? `<div class="detail-row"><div class="detail-label">Adjustment Reason</div><div class="detail-value">${safe(p.adjustment_reason)}</div></div>` : ''}
+            <div class="payslip-summary-grid">
+                <div class="detail-row"><div class="detail-label">Gross Salary</div><div class="detail-value">${safe(fmtMoney(p.gross_salary))}</div></div>
+                <div class="detail-row"><div class="detail-label">Overtime</div><div class="detail-value">${safe(fmtMoney(p.overtime))}</div></div>
+                <div class="detail-row"><div class="detail-label">Bonus</div><div class="detail-value">${safe(fmtMoney(p.bonus))}</div></div>
+                <div class="detail-row"><div class="detail-label">Transport</div><div class="detail-value">${safe(fmtMoney(p.transport))}</div></div>
+                <div class="detail-row"><div class="detail-label">Reimbursable Expenses</div><div class="detail-value">${safe(fmtMoney(p.reimbursable_expenses))}</div></div>
+                <div class="detail-row"><div class="detail-label">UIF</div><div class="detail-value">${safe(fmtMoney(p.uif))}</div></div>
+                <div class="detail-row"><div class="detail-label">PAYE</div><div class="detail-value">${safe(fmtMoney(p.paye))}</div></div>
+                <div class="detail-row"><div class="detail-label">Loan Repayment</div><div class="detail-value">${safe(fmtMoney(p.loan_repayment))}</div></div>
+            </div>
+            <div class="detail-row net-pay-row"><div class="detail-label">Net Pay</div><div class="detail-value">${safe(fmtMoney(p.net_salary))}</div></div>
+            <a class="primary-btn" href="${safe(p.download_url || ('/staff/download_payslip/' + p.id))}" target="_blank" rel="noopener">Download PDF</a>
+        </div>`;
+    }
+
+    async function openPayslipDetail(id) {
+        openSheet('Payslip details', 'Loading...', '<div class="loading-card">Loading payslip...</div>');
+        try {
+            const data = await api(`/api/staff/payslips/${id}`);
+            openSheet((data.payslip && data.payslip.title) || 'Payslip', 'Finalised payslip', payslipDetailHtml(data.payslip));
+        } catch (err) {
+            openSheet('Payslip details', 'Error', empty(err.message));
+        }
+    }
+
 
     async function openBookingDetail(id) {
         openSheet('Booking details', 'Loading...', '<div class="loading-card">Loading booking...</div>');
@@ -258,6 +323,7 @@
             loadBookings();
         }
         if (tab === 'leave') loadLeaveRequests();
+        if (tab === 'payslips') loadPayslips();
     }
 
     function setDefaultDates() {
@@ -274,12 +340,22 @@
         document.querySelectorAll('.tab-btn').forEach((btn) => btn.addEventListener('click', () => setTab(btn.dataset.tab)));
         document.querySelectorAll('[data-jump]').forEach((btn) => btn.addEventListener('click', () => setTab(btn.dataset.jump)));
         $('loadBookingsBtn').addEventListener('click', loadBookings);
+        if ($('loadPayslipsBtn')) $('loadPayslipsBtn').addEventListener('click', loadPayslips);
         $('leaveForm').addEventListener('submit', submitLeave);
         document.addEventListener('click', (event) => {
             const closeEl = event.target.closest('[data-close-sheet]');
             if (closeEl) return closeSheet();
             const actionEl = event.target.closest('[data-staff-action]');
             if (actionEl && (actionEl.dataset.staffAction === 'start' || actionEl.dataset.staffAction === 'complete')) return updateJobStatus(actionEl.dataset.staffAction);
+            const downloadPayslipEl = event.target.closest('[data-download-payslip]');
+            if (downloadPayslipEl) {
+                event.preventDefault();
+                event.stopPropagation();
+                window.open(`/staff/download_payslip/${downloadPayslipEl.dataset.downloadPayslip}`, '_blank');
+                return;
+            }
+            const payslipCardEl = event.target.closest('[data-payslip-id]');
+            if (payslipCardEl) return openPayslipDetail(payslipCardEl.dataset.payslipId);
             const bookingCardEl = event.target.closest('[data-booking-id]');
             if (bookingCardEl) return openBookingDetail(bookingCardEl.dataset.bookingId);
         });
