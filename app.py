@@ -2462,6 +2462,47 @@ def inject_session_timeout_script(response):
     response.headers['Content-Length'] = str(len(response.get_data()))
     return response
 
+
+@app.after_request
+def prevent_dynamic_response_caching(response):
+    """Keep live application data fresh across desktop, mobile PWA and staff portal.
+
+    The PWA service worker and some browsers can otherwise reuse old JSON/HTML
+    responses after a company, employee, booking, payslip, leave request or
+    system setting is changed. Static assets are still allowed to cache via
+    versioned filenames, but database-backed screens and API responses must
+    always be re-read from the server.
+    """
+    try:
+        path = request.path or ''
+        mimetype = (response.mimetype or '').lower()
+    except Exception:
+        return response
+
+    if path.startswith('/static/'):
+        return response
+
+    dynamic_prefixes = (
+        '/api/', '/admin/', '/staff', '/mobile', '/hub', '/booking', '/bookings',
+        '/payroll', '/invoicing', '/finance', '/accounting', '/clients',
+        '/employees', '/projects', '/quotes', '/invoices', '/settings',
+        '/download', '/export', '/uploads/'
+    )
+    is_dynamic = (
+        request.method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE') and (
+            mimetype in ('application/json', 'text/html', 'text/csv', 'application/pdf')
+            or path.startswith(dynamic_prefixes)
+        )
+    )
+
+    if is_dynamic:
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        response.headers.setdefault('Vary', 'Cookie')
+
+    return response
+
 # ==========================================================
 # 0. GLOBAL SECURITY
 # ==========================================================

@@ -1,30 +1,30 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v7-staff-payslips';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v7-live-data-refresh';
 const APP_SHELL = [
-  '/mobile',
   '/mobile/offline',
-  '/staff/mobile',
   '/static/mobile.css?v=20260622',
   '/static/mobile.js?v=20260622',
   '/static/easyadmin-formatters.js?v=20260622-format',
   '/static/session-timeout.js?v=20260623-timeout',
-  '/static/staff-portal.css?v=20260624-payslips',
-  '/static/staff-portal.js?v=20260624-payslips',
+  '/static/staff-portal.css?v=20260623-staff2',
+  '/static/staff-portal.js?v=20260623-staff2',
   '/static/easy_admin_logo.png',
   '/static/pwa-icon-192.png',
   '/static/pwa-icon-512.png',
   '/manifest.webmanifest'
 ];
 
-const DYNAMIC_PATH_PREFIXES = [
-  '/api/',
-  '/bookings',
-  '/booking_staff_hours',
-  '/download_attachment/',
-  '/staff/download_payslip/',
-  '/staff/download_attachment/',
-  '/static/uploads/',
-  '/uploads/'
-];
+function isAppShellAsset(url) {
+  return APP_SHELL.some((entry) => {
+    const entryUrl = new URL(entry, self.location.origin);
+    return entryUrl.pathname === url.pathname;
+  });
+}
+
+function isCacheableStaticAsset(url) {
+  if (url.pathname.startsWith('/uploads/') || url.pathname.startsWith('/static/uploads/')) return false;
+  if (url.pathname === '/manifest.webmanifest') return true;
+  return url.pathname.startsWith('/static/') && isAppShellAsset(url);
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -49,14 +49,15 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
 
-  const isDynamic = DYNAMIC_PATH_PREFIXES.some((prefix) => url.pathname.startsWith(prefix));
-  if (isDynamic) {
-    event.respondWith(fetch(request, { cache: 'no-store' }));
+  if (request.mode === 'navigate') {
+    event.respondWith(fetch(request, { cache: 'no-store' }).catch(() => caches.match('/mobile/offline')));
     return;
   }
 
-  if (request.mode === 'navigate') {
-    event.respondWith(fetch(request).catch(() => caches.match('/mobile/offline')));
+  // All database-backed routes must always be fresh. This includes companies,
+  // employees, bookings, payroll, staff portal data, reports and downloads.
+  if (!isCacheableStaticAsset(url)) {
+    event.respondWith(fetch(request, { cache: 'no-store' }));
     return;
   }
 
