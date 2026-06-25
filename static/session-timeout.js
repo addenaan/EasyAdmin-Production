@@ -2,8 +2,8 @@
     'use strict';
 
     var script = document.querySelector('script[data-easyadmin-session-timeout]');
-    var timeoutSeconds = parseInt((script && script.getAttribute('data-timeout-seconds')) || '300', 10);
-    if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30) timeoutSeconds = 300;
+    var timeoutSeconds = parseInt((script && script.getAttribute('data-timeout-seconds')) || '900', 10);
+    if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30) timeoutSeconds = 900;
 
     var timeoutMs = timeoutSeconds * 1000;
     var pingThrottleMs = 60000;
