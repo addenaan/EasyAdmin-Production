@@ -34,6 +34,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow, Flow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -948,6 +949,126 @@ def update_google_event(event_id, client_name, date_str, time_str, employees, bo
 def delete_google_event(event_id, company_id=None):
     service = get_google_service(company_id)
     service.events().delete(calendarId=get_target_calendar(company_id), eventId=event_id).execute()
+
+def _booking_google_payload_from_row(row):
+    booking = dict(row)
+    start_value = str(booking.get('start') or '')
+    date_str = start_value[:10]
+    time_str = '08:00'
+    if 'T' in start_value and len(start_value.split('T', 1)[1]) >= 5:
+        time_str = start_value.split('T', 1)[1][:5]
+    elif len(start_value) >= 16:
+        time_str = start_value[11:16]
+    if not date_str:
+        raise RuntimeError('Booking has no date saved.')
+    return {
+        'client_name': booking.get('title') or 'Booking',
+        'date_str': date_str,
+        'time_str': time_str,
+        'employees': booking.get('employee') or '',
+        'booking_type': booking.get('booking_type') or '',
+        'transport': booking.get('transport') or '',
+    }
+
+
+def sync_existing_bookings_to_google_calendar(company_id, start_date, end_date):
+    if not company_id:
+        raise RuntimeError('Company context is required for Google Calendar sync.')
+    try:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+    except Exception:
+        raise RuntimeError('Please enter a valid From Date and To Date in YYYY-MM-DD format.')
+    if end_dt < start_dt:
+        raise RuntimeError('To Date cannot be before From Date.')
+    if (end_dt - start_dt).days > 370:
+        raise RuntimeError('Please sync a date range of 12 months or less at a time.')
+
+    company_name = session.get('company_name') or 'Easy Admin'
+    conn = get_db_connection()
+    created = 0
+    updated = 0
+    failed = 0
+    skipped = 0
+    errors = []
+    try:
+        rows = conn.execute("""
+            SELECT id, title, start, employee, booking_type, transport, google_event_id
+            FROM bookings
+            WHERE company_id=?
+              AND substr(COALESCE(start,''), 1, 10) BETWEEN ? AND ?
+            ORDER BY start ASC, id ASC
+        """, (company_id, start_date, end_date)).fetchall()
+
+        for row in rows:
+            booking = dict(row)
+            try:
+                payload = _booking_google_payload_from_row(booking)
+                existing_event_id = booking.get('google_event_id')
+                if existing_event_id:
+                    try:
+                        new_event_id = update_google_event(
+                            existing_event_id,
+                            payload['client_name'],
+                            payload['date_str'],
+                            payload['time_str'],
+                            payload['employees'],
+                            payload['booking_type'],
+                            payload['transport'],
+                            company_name,
+                            company_id,
+                        )
+                        updated += 1
+                    except HttpError as http_exc:
+                        if getattr(getattr(http_exc, 'resp', None), 'status', None) == 404:
+                            new_event_id = create_google_event(
+                                payload['client_name'],
+                                payload['date_str'],
+                                payload['time_str'],
+                                payload['employees'],
+                                payload['booking_type'],
+                                payload['transport'],
+                                company_name,
+                                company_id,
+                            )
+                            created += 1
+                        else:
+                            raise
+                else:
+                    new_event_id = create_google_event(
+                        payload['client_name'],
+                        payload['date_str'],
+                        payload['time_str'],
+                        payload['employees'],
+                        payload['booking_type'],
+                        payload['transport'],
+                        company_name,
+                        company_id,
+                    )
+                    created += 1
+
+                if new_event_id and new_event_id != existing_event_id:
+                    conn.execute('UPDATE bookings SET google_event_id=? WHERE id=? AND company_id=?', (new_event_id, booking['id'], company_id))
+                    conn.commit()
+                elif not new_event_id:
+                    skipped += 1
+            except Exception as exc:
+                failed += 1
+                if len(errors) < 5:
+                    errors.append(f"Booking #{booking.get('id')}: {_format_google_calendar_error(exc)}")
+
+    finally:
+        conn.close()
+
+    total_processed = created + updated + skipped + failed
+    return {
+        'created': created,
+        'updated': updated,
+        'skipped': skipped,
+        'failed': failed,
+        'total': total_processed,
+        'errors': errors,
+    }
 
 # --- Database Setup & Multi-Tenant Migration ---
 def get_db_connection():
@@ -7312,6 +7433,30 @@ def test_google_calendar_connection():
         return jsonify(result)
     except Exception as e:
         return jsonify({"status": "error", "message": "Failed: " + _format_google_calendar_error(e)})
+
+
+@app.route('/api/sync_existing_bookings_google_calendar', methods=['POST'])
+def sync_existing_bookings_google_calendar():
+    if not session.get('is_company_admin') and not session.get('is_superadmin'):
+        return jsonify({"status": "error", "message": "Forbidden: Only Company Admins or Super Admins can sync existing bookings."}), 403
+    data = request.get_json(silent=True) or {}
+    start_date = (data.get('start_date') or '').strip()
+    end_date = (data.get('end_date') or '').strip()
+    if not start_date or not end_date:
+        return jsonify({"status": "error", "message": "Failed: Please select both From Date and To Date."}), 400
+    try:
+        result = sync_existing_bookings_to_google_calendar(session.get('company_id'), start_date, end_date)
+        msg = f"Sync complete. Created {result['created']} calendar event(s), updated {result['updated']} event(s)."
+        if result.get('skipped'):
+            msg += f" Skipped {result['skipped']} booking(s)."
+        if result.get('failed'):
+            msg += f" Failed {result['failed']} booking(s)."
+            if result.get('errors'):
+                msg += " First errors: " + " | ".join(result['errors'])
+        log_action('System', 'Synced Existing Bookings to Google Calendar', f"Synced bookings from {start_date} to {end_date}: created {result['created']}, updated {result['updated']}, failed {result['failed']}.")
+        return jsonify({"status": "success" if not result.get('failed') else "warning", "message": msg, "result": result})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": "Failed: " + _format_google_calendar_error(exc)}), 400
 
 
 @app.route('/email_payslip', methods=['POST'])

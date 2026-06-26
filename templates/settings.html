@@ -105,6 +105,25 @@
                 </div>
                 <div id="googleCalendarTestAlert" style="display: none;"></div>
 
+                <div class="mt-4 p-3 border rounded bg-white">
+                    <h6 class="fw-bold text-success mb-2">Sync Existing Bookings to Google Calendar</h6>
+                    <p class="small text-muted mb-3">Use this after connecting Google Calendar to push existing bookings for this company into the selected Google Calendar. Existing calendar events will be updated instead of duplicated.</p>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold small">From Date</label>
+                            <input type="date" id="sync_gcal_start_date" class="form-control">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold small">To Date</label>
+                            <input type="date" id="sync_gcal_end_date" class="form-control">
+                        </div>
+                        <div class="col-md-4">
+                            <button type="button" class="btn btn-outline-primary fw-bold w-100" id="syncExistingBookingsBtn" onclick="syncExistingBookingsToGoogleCalendar()">Sync Existing Bookings</button>
+                        </div>
+                    </div>
+                    <div id="googleCalendarSyncAlert" style="display: none;"></div>
+                </div>
+
                 <div class="alert alert-secondary small mb-0 mt-3">
                     <strong>Note:</strong> Each company has its own Company Email & Calendar Settings, its own Target Google Calendar ID, and its own saved Google Calendar token. The SMTP App Password is used only for email sending. The saved Google token is used for Calendar sync.
                 </div>
@@ -203,6 +222,55 @@
                 alertBox.innerText = '❌ Failed: Could not reach the server or request timed out.';
                 btn.disabled = false;
                 btn.innerText = 'Test Google Calendar';
+            });
+        }
+
+        function syncExistingBookingsToGoogleCalendar() {
+            const btn = document.getElementById('syncExistingBookingsBtn');
+            const alertBox = document.getElementById('googleCalendarSyncAlert');
+            const startDate = document.getElementById('sync_gcal_start_date').value;
+            const endDate = document.getElementById('sync_gcal_end_date').value;
+
+            if (!startDate || !endDate) {
+                alertBox.style.display = 'block';
+                alertBox.className = 'alert alert-danger mt-3 fw-bold shadow-sm';
+                alertBox.innerText = '❌ Please select both From Date and To Date.';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = 'Syncing...';
+            alertBox.style.display = 'block';
+            alertBox.className = 'alert alert-info mt-3 fw-bold shadow-sm';
+            alertBox.innerText = 'Syncing existing bookings to Google Calendar. Please wait...';
+
+            fetch('/api/sync_existing_bookings_google_calendar', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ start_date: startDate, end_date: endDate })
+            })
+            .then(res => res.json())
+            .then(data => {
+                alertBox.style.display = 'block';
+                if (data.status === 'success') {
+                    alertBox.className = 'alert alert-success mt-3 fw-bold shadow-sm';
+                    alertBox.innerText = '✅ ' + data.message;
+                } else if (data.status === 'warning') {
+                    alertBox.className = 'alert alert-warning mt-3 fw-bold shadow-sm';
+                    alertBox.innerText = '⚠️ ' + data.message;
+                } else {
+                    alertBox.className = 'alert alert-danger mt-3 fw-bold shadow-sm';
+                    alertBox.innerText = '❌ ' + data.message;
+                }
+                btn.disabled = false;
+                btn.innerText = 'Sync Existing Bookings';
+            })
+            .catch(err => {
+                alertBox.style.display = 'block';
+                alertBox.className = 'alert alert-danger mt-3 fw-bold shadow-sm';
+                alertBox.innerText = '❌ Failed: Could not reach the server or request timed out.';
+                btn.disabled = false;
+                btn.innerText = 'Sync Existing Bookings';
             });
         }
     </script>
