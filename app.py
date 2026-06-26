@@ -13,6 +13,11 @@ import re
 import secrets
 import string
 import time
+import uuid
+import base64
+from urllib.parse import quote, unquote
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.error import HTTPError, URLError
 from datetime import datetime, timedelta
 from functools import wraps
 import smtplib
@@ -27,7 +32,7 @@ from app_modules.db_compat import connect_database, is_postgres_enabled, table_e
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import InstalledAppFlow, Flow
 from googleapiclient.discovery import build
 
 app = Flask(__name__)
@@ -643,54 +648,306 @@ def _clear_pdf_logo_cache():
 
 # --- Google Calendar Configuration ---
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
+GOOGLE_CALENDAR_TIMEZONE = 'Africa/Johannesburg'
 
-def get_google_service():
+
+def _company_calendar_settings(company_id=None):
+    cid = company_id if company_id is not None else session.get('company_id')
+    settings = {}
+    if not cid:
+        return settings
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (cid,)).fetchall()
+        settings = {r['key']: r['value'] for r in rows}
+    finally:
+        conn.close()
+    return settings
+
+
+def _set_company_setting(conn, company_id, key, value):
+    exists = conn.execute('SELECT 1 FROM settings WHERE key=? AND company_id=?', (key, company_id)).fetchone()
+    if exists:
+        conn.execute('UPDATE settings SET value=? WHERE key=? AND company_id=?', (value, key, company_id))
+    else:
+        conn.execute('INSERT INTO settings (company_id, key, value) VALUES (?, ?, ?)', (company_id, key, value))
+
+
+def _google_calendar_storage_root():
+    upload_folder = app.config.get('UPLOAD_FOLDER') or os.environ.get('UPLOAD_FOLDER') or '.'
+    return os.path.join(upload_folder, 'google_calendar')
+
+
+def _company_google_calendar_dir(company_id=None):
+    cid = company_id if company_id is not None else session.get('company_id')
+    if not cid:
+        raise RuntimeError('Company context is required for Google Calendar settings.')
+    return os.path.join(_google_calendar_storage_root(), f'company_{int(cid)}')
+
+
+def _company_google_credentials_path(company_id=None):
+    return os.path.join(_company_google_calendar_dir(company_id), 'credentials.json')
+
+
+def _company_google_token_path(company_id=None):
+    return os.path.join(_company_google_calendar_dir(company_id), 'token.json')
+
+
+def _legacy_google_token_path_candidates():
+    candidates = []
+    env_path = os.environ.get('GOOGLE_TOKEN_FILE', '').strip()
+    if env_path:
+        candidates.append(env_path)
+    upload_folder = app.config.get('UPLOAD_FOLDER') or ''
+    if upload_folder:
+        candidates.append(os.path.join(upload_folder, 'google_token.json'))
+        candidates.append(os.path.join(upload_folder, 'token.json'))
+    candidates.append('google_token.json')
+    candidates.append('token.json')
+    seen = set()
+    return [p for p in candidates if p and not (p in seen or seen.add(p))]
+
+
+def _legacy_google_credentials_file_candidates():
+    candidates = []
+    env_path = os.environ.get('GOOGLE_CREDENTIALS_FILE', '').strip()
+    if env_path:
+        candidates.append(env_path)
+    upload_folder = app.config.get('UPLOAD_FOLDER') or ''
+    if upload_folder:
+        candidates.append(os.path.join(upload_folder, 'google_credentials.json'))
+        candidates.append(os.path.join(upload_folder, 'credentials.json'))
+    candidates.append('google_credentials.json')
+    candidates.append('credentials.json')
+    seen = set()
+    return [p for p in candidates if p and not (p in seen or seen.add(p))]
+
+
+def _existing_google_token_path(company_id=None):
+    # Each company gets its own Calendar token. Legacy paths are only fallback
+    # when no company context exists, to avoid one company accidentally using
+    # another company's connected Google account.
+    if company_id is not None or session.get('company_id'):
+        path = _company_google_token_path(company_id)
+        return path if os.path.exists(path) else None
+    for path in _legacy_google_token_path_candidates():
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _preferred_google_token_path(company_id=None):
+    if company_id is not None or session.get('company_id'):
+        return _company_google_token_path(company_id)
+    env_path = os.environ.get('GOOGLE_TOKEN_FILE', '').strip()
+    if env_path:
+        return env_path
+    upload_folder = app.config.get('UPLOAD_FOLDER') or ''
+    if upload_folder:
+        return os.path.join(upload_folder, 'google_token.json')
+    return 'token.json'
+
+
+def _existing_google_credentials_file(company_id=None):
+    # Prefer the company's uploaded OAuth client JSON.
+    if company_id is not None or session.get('company_id'):
+        path = _company_google_credentials_path(company_id)
+        if os.path.exists(path):
+            return path
+    # Fallback for older deployments or environment-based OAuth client config.
+    for path in _legacy_google_credentials_file_candidates():
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _google_client_config_from_env():
+    client_id = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
+    client_secret = os.environ.get('GOOGLE_CLIENT_SECRET', '').strip()
+    if not client_id or not client_secret:
+        return None
+    return {
+        'web': {
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
+            'token_uri': 'https://oauth2.googleapis.com/token',
+            'redirect_uris': []
+        }
+    }
+
+
+def _google_redirect_uri():
+    uri = url_for('google_calendar_oauth_callback', _external=True)
+    if os.environ.get('RENDER') and uri.startswith('http://'):
+        uri = 'https://' + uri[len('http://'):]
+    return uri
+
+
+def _build_google_oauth_flow(company_id=None, redirect_uri=None):
+    redirect_uri = redirect_uri or _google_redirect_uri()
+    credentials_file = _existing_google_credentials_file(company_id)
+    if credentials_file:
+        return Flow.from_client_secrets_file(credentials_file, scopes=SCOPES, redirect_uri=redirect_uri)
+    client_config = _google_client_config_from_env()
+    if client_config:
+        client_config['web']['redirect_uris'] = [redirect_uri]
+        return Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
+    raise RuntimeError('Google Calendar OAuth client JSON is not configured for this company. Upload the Google OAuth Client JSON in Company Email & Calendar Settings, save, then click Connect Google Calendar.')
+
+
+def _validate_google_credentials_json(raw_json):
+    try:
+        data = json.loads(raw_json)
+    except Exception as exc:
+        raise RuntimeError(f'Google OAuth Client JSON is not valid JSON: {exc}')
+    if not isinstance(data, dict) or not (data.get('web') or data.get('installed')):
+        raise RuntimeError('Google OAuth Client JSON must be the OAuth client JSON from Google Cloud and contain a web or installed client section.')
+    client_section = data.get('web') or data.get('installed') or {}
+    if not client_section.get('client_id') or not client_section.get('client_secret'):
+        raise RuntimeError('Google OAuth Client JSON must include client_id and client_secret.')
+    return data
+
+
+def _save_company_google_credentials(company_id, raw_json):
+    data = _validate_google_credentials_json(raw_json)
+    company_dir = _company_google_calendar_dir(company_id)
+    os.makedirs(company_dir, exist_ok=True)
+    credentials_path = _company_google_credentials_path(company_id)
+    with open(credentials_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+    token_path = _company_google_token_path(company_id)
+    if os.path.exists(token_path):
+        os.remove(token_path)
+    return credentials_path
+
+
+def _read_uploaded_google_credentials_json(upload):
+    if not upload or not getattr(upload, 'filename', ''):
+        return ''
+    filename = upload.filename or ''
+    if not filename.lower().endswith('.json'):
+        raise RuntimeError('Please upload the Google OAuth Client JSON file downloaded from Google Cloud. The file must end with .json.')
+    raw_bytes = upload.read()
+    if not raw_bytes:
+        raise RuntimeError('The uploaded Google OAuth Client JSON file is empty.')
+    if len(raw_bytes) > 1024 * 1024:
+        raise RuntimeError('The uploaded Google OAuth Client JSON file is too large. Please upload the original JSON credentials file from Google Cloud.')
+    try:
+        return raw_bytes.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        raise RuntimeError('The uploaded Google OAuth Client JSON file could not be read as text.')
+
+
+def _clear_company_google_token(company_id, conn=None):
+    token_path = _company_google_token_path(company_id)
+    if os.path.exists(token_path):
+        os.remove(token_path)
+    if conn is not None:
+        conn.execute("DELETE FROM settings WHERE company_id=? AND key IN ('gcal_token_id','gcal_token_saved_at')", (company_id,))
+
+
+def _create_google_token_id():
+    return secrets.token_urlsafe(12)
+
+
+def get_google_service(company_id=None):
+    cid = company_id if company_id is not None else session.get('company_id')
+    token_path = _existing_google_token_path(cid)
+    save_path = token_path or _preferred_google_token_path(cid)
+
     creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if token_path:
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
+            token_dir = os.path.dirname(save_path)
+            if token_dir:
+                os.makedirs(token_dir, exist_ok=True)
+            with open(save_path, 'w', encoding='utf-8') as token:
+                token.write(creds.to_json())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            if os.environ.get('RENDER'):
+                raise RuntimeError('Google Calendar is not connected for this company. Open Company Email & Calendar Settings, upload/save the Google OAuth Client JSON, then click Connect Google Calendar.')
+            flow = InstalledAppFlow.from_client_secrets_file(_existing_google_credentials_file(cid) or 'credentials.json', SCOPES)
             creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-    return build('calendar', 'v3', credentials=creds)
+            token_dir = os.path.dirname(save_path)
+            if token_dir:
+                os.makedirs(token_dir, exist_ok=True)
+            with open(save_path, 'w', encoding='utf-8') as token:
+                token.write(creds.to_json())
+    return build('calendar', 'v3', credentials=creds, cache_discovery=False)
 
-def get_target_calendar():
-    cal_id = get_setting('gcal_calendar_id')
-    return cal_id if cal_id else 'primary'
 
-def create_google_event(client_name, date_str, time_str, employees, booking_type, transport, company_name):
-    service = get_google_service()
+def get_target_calendar(company_id=None):
+    cal_id = get_setting('gcal_calendar_id', company_id)
+    if cal_id and str(cal_id).strip():
+        return str(cal_id).strip()
+    return 'primary'
+
+
+def _format_google_calendar_error(exc):
+    message = str(exc)
+    lower = message.lower()
+    if 'oauth client json' in lower or 'not connected' in lower or 'not configured' in lower or 'credentials.json' in lower or 'company context' in lower:
+        return message
+    if 'redirect_uri_mismatch' in lower:
+        return 'Google Calendar OAuth redirect URI mismatch. Add this redirect URI in Google Cloud for the OAuth Client: ' + _google_redirect_uri()
+    if 'invalid_grant' in lower or 'token has been expired or revoked' in lower:
+        return 'Google Calendar OAuth token has expired or was revoked. Open Company Email & Calendar Settings and reconnect Google Calendar.'
+    if 'not found' in lower or '404' in lower:
+        return 'Google Calendar not found. Check the Target Google Calendar ID, or leave it blank to use the connected Google account primary calendar.'
+    if 'insufficient' in lower or 'forbidden' in lower or '403' in lower or 'permission denied' in lower:
+        return 'Google Calendar permission denied. The connected Google account must have permission to create and update events on the selected calendar.'
+    return message
+
+
+def test_google_calendar_sync(company_id=None):
+    cid = company_id if company_id is not None else session.get('company_id')
+    target_calendar = get_target_calendar(cid)
+    service = get_google_service(cid)
+    service.events().list(calendarId=target_calendar, maxResults=1).execute()
+    target_label = 'connected Google account primary calendar' if target_calendar == 'primary' else target_calendar
+    token_id = get_setting('gcal_token_id', cid)
+    token_suffix = f' Token ID: {token_id}.' if token_id else ''
+    return {
+        'status': 'success',
+        'message': f'Google Calendar connection successful. Bookings will sync to {target_label}.{token_suffix}'
+    }
+
+
+def create_google_event(client_name, date_str, time_str, employees, booking_type, transport, company_name, company_id=None):
+    service = get_google_service(company_id)
     start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     end_dt = start_dt + timedelta(hours=2)
     event = {
         'summary': f"[{company_name}] {client_name} ({employees})",
         'description': f"{company_name} Assignment\nService(s): {booking_type}\nStaff: {employees}\nTransport: {transport}",
-        'start': {'dateTime': start_dt.isoformat() + "+02:00", 'timeZone': 'Africa/Johannesburg'},
-        'end': {'dateTime': end_dt.isoformat() + "+02:00", 'timeZone': 'Africa/Johannesburg'}
+        'start': {'dateTime': start_dt.isoformat() + "+02:00", 'timeZone': GOOGLE_CALENDAR_TIMEZONE},
+        'end': {'dateTime': end_dt.isoformat() + "+02:00", 'timeZone': GOOGLE_CALENDAR_TIMEZONE}
     }
-    created_event = service.events().insert(calendarId=get_target_calendar(), body=event).execute()
+    created_event = service.events().insert(calendarId=get_target_calendar(company_id), body=event).execute()
     return created_event.get('id')
 
-def update_google_event(event_id, client_name, date_str, time_str, employees, booking_type, transport, company_name):
-    service = get_google_service()
+
+def update_google_event(event_id, client_name, date_str, time_str, employees, booking_type, transport, company_name, company_id=None):
+    service = get_google_service(company_id)
     start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     end_dt = start_dt + timedelta(hours=2)
-    target_cal = get_target_calendar()
-    
+    target_cal = get_target_calendar(company_id)
     event = service.events().get(calendarId=target_cal, eventId=event_id).execute()
     event['summary'] = f"[{company_name}] {client_name} ({employees})"
     event['description'] = f"{company_name} Assignment\nService(s): {booking_type}\nStaff: {employees}\nTransport: {transport}"
     event['start']['dateTime'] = start_dt.isoformat() + "+02:00"
     event['end']['dateTime'] = end_dt.isoformat() + "+02:00"
     service.events().update(calendarId=target_cal, eventId=event_id, body=event).execute()
+    return event_id
 
-def delete_google_event(event_id):
-    service = get_google_service()
-    service.events().delete(calendarId=get_target_calendar(), eventId=event_id).execute()
+
+def delete_google_event(event_id, company_id=None):
+    service = get_google_service(company_id)
+    service.events().delete(calendarId=get_target_calendar(company_id), eventId=event_id).execute()
 
 # --- Database Setup & Multi-Tenant Migration ---
 def get_db_connection():
@@ -1460,9 +1717,10 @@ def log_action(app_name, action, details):
     conn.commit()
     conn.close()
 
-def get_setting(key):
+def get_setting(key, company_id=None):
     conn = get_db_connection()
-    res = conn.execute('SELECT value FROM settings WHERE key = ? AND company_id = ?', (key, session.get('company_id', 0))).fetchone()
+    cid = company_id if company_id is not None else session.get('company_id', 0)
+    res = conn.execute('SELECT value FROM settings WHERE key = ? AND company_id = ?', (key, cid)).fetchone()
     conn.close()
     return res['value'] if res else ""
 
@@ -2608,7 +2866,7 @@ def restrict_access():
     if path == '/invoicing' or path.startswith('/api/uninvoiced') or path.startswith('/api/save_invoice') or path.startswith('/api/invoice') or path.startswith('/api/save_quote') or path.startswith('/api/quote') or path.startswith('/download/invoice') or path.startswith('/download/quote') or path.startswith('/api/email_invoice_pdf') or path.startswith('/api/email_quote_pdf') or path == '/api/save_invoice_settings' or path == '/api/email_document' or path == '/api/client_statement' or path.startswith('/api/credit_note'):
         if not session.get('can_invoicing'): return "Access Denied: You do not have permissions to access Invoicing & Quotes.", 403
     
-    if path == '/settings' or path == '/api/test_email_connection':
+    if path == '/settings' or path == '/api/test_email_connection' or path == '/api/test_google_calendar_connection':
         if not session.get('is_company_admin'):
             return "Access Denied: Only Company Admins can access Email & Calendar Settings from the Hub.", 403
 
@@ -5678,9 +5936,9 @@ def add_booking():
             google_id = None
             if session.get('comp_google_calendar'):
                 try: 
-                    google_id = create_google_event(client_name, data['date'], data['time'], req['employee'], data.get('booking_type'), req.get('transport'), session['company_name'])
+                    google_id = create_google_event(client_name, data['date'], data['time'], req['employee'], data.get('booking_type'), req.get('transport'), session['company_name'], session.get('company_id'))
                 except Exception as e: 
-                    print(f"Google Sync Error: {e}")
+                    print(f"Google Sync Error: {_format_google_calendar_error(e)}")
 
             cur = conn.execute('INSERT INTO bookings (company_id, client_id, title, start, employee, google_event_id, booking_type, transport, booking_notes, overtime_hours, is_invoiced, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                          (session['company_id'], client_id, client_name, dt_str, req['employee'], google_id, data.get('booking_type'), req.get('transport'), data.get('booking_notes', ''), float(req.get('overtime_hours', 0)), 0, project_id))
@@ -5689,8 +5947,8 @@ def add_booking():
     else:
         google_id = None
         if session.get('comp_google_calendar'):
-            try: google_id = create_google_event(client_name, data['date'], data['time'], data['employee'], data.get('booking_type'), data.get('transport'), session['company_name'])
-            except Exception as e: print(f"Google Sync Error: {e}")
+            try: google_id = create_google_event(client_name, data['date'], data['time'], data['employee'], data.get('booking_type'), data.get('transport'), session['company_name'], session.get('company_id'))
+            except Exception as e: print(f"Google Sync Error: {_format_google_calendar_error(e)}")
                 
         cur = conn.execute('INSERT INTO bookings (company_id, client_id, title, start, employee, google_event_id, booking_type, transport, booking_notes, overtime_hours, is_invoiced, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
                      (session['company_id'], client_id, client_name, dt_str, data['employee'], google_id, data.get('booking_type'), data.get('transport'), data.get('booking_notes', ''), float(data.get('overtime_hours', 0)), 0, project_id))
@@ -5747,14 +6005,19 @@ def edit_booking():
         conn.close()
         return jsonify({"status": "error", "message": availability_message}), 400
     
+    new_google_event_id = b['google_event_id'] if b else None
     if session.get('comp_google_calendar'):
         try:
             if b and b['google_event_id']:
-                update_google_event(b['google_event_id'], client_name, data['date'], data['time'], data['employee'], data['booking_type'], data.get('transport'), session['company_name'])
+                updated_google_id = update_google_event(b['google_event_id'], client_name, data['date'], data['time'], data['employee'], data['booking_type'], data.get('transport'), session['company_name'], session.get('company_id'))
+                if updated_google_id:
+                    new_google_event_id = updated_google_id
+            else:
+                new_google_event_id = create_google_event(client_name, data['date'], data['time'], data['employee'], data['booking_type'], data.get('transport'), session['company_name'], session.get('company_id'))
         except Exception as e:
-            print(f"Google Sync Error: {e}")
+            print(f"Google Sync Error: {_format_google_calendar_error(e)}")
             
-    conn.execute('UPDATE bookings SET client_id=?, title=?, start=?, employee=?, booking_type=?, transport=?, booking_notes=?, overtime_hours=?, project_id=? WHERE id=? AND company_id=?', (client_id, client_name, dt_str, data['employee'], data['booking_type'], data.get('transport'), data.get('booking_notes', ''), overtime_hours, project_id, data['id'], session['company_id']))
+    conn.execute('UPDATE bookings SET client_id=?, title=?, start=?, employee=?, google_event_id=?, booking_type=?, transport=?, booking_notes=?, overtime_hours=?, project_id=? WHERE id=? AND company_id=?', (client_id, client_name, dt_str, data['employee'], new_google_event_id, data['booking_type'], data.get('transport'), data.get('booking_notes', ''), overtime_hours, project_id, data['id'], session['company_id']))
     if custom_fields_submitted:
         save_custom_field_values(conn, session['company_id'], 'booking', data['id'], custom_fields)
     conn.commit(); conn.close()
@@ -5770,8 +6033,8 @@ def delete_booking():
     
     if session.get('comp_google_calendar'):
         try:
-            if b and b['google_event_id']: delete_google_event(b['google_event_id'])
-        except Exception as e: print(f"Google Sync Error: {e}")
+            if b and b['google_event_id']: delete_google_event(b['google_event_id'], session.get('company_id'))
+        except Exception as e: print(f"Google Sync Error: {_format_google_calendar_error(e)}")
             
     conn.execute("DELETE FROM custom_field_values WHERE company_id=? AND module_name='booking' AND record_id=?", (session['company_id'], id))
     conn.execute('DELETE FROM bookings WHERE id=? AND company_id=?', (id, session['company_id']))
@@ -5780,18 +6043,19 @@ def delete_booking():
     if b: log_action('Booking & Ops', 'Deleted Booking', f"Removed assignment for {b['title']} on {b['start'][:10]}")
     return jsonify({"status": "success"})
 
-def async_google_sync(bookings_list, company_name):
+def async_google_sync(bookings_list, company_name, company_id=None):
     conn = get_db_connection()
-    
+
     for b in bookings_list:
         try:
-            g_id = create_google_event(b['client'], b['date'], b['time'], b['employee'], b['booking_type'], b['transport'], company_name)
+            cid = company_id or b.get('company_id')
+            g_id = create_google_event(b['client'], b['date'], b['time'], b['employee'], b['booking_type'], b['transport'], company_name, cid)
             if g_id:
-                conn.execute('UPDATE bookings SET google_event_id=? WHERE id=? AND company_id=?', (g_id, b['db_id'], session['company_id']))
+                conn.execute('UPDATE bookings SET google_event_id=? WHERE id=? AND company_id=?', (g_id, b['db_id'], cid))
                 conn.commit()
         except Exception as e:
-            print(f"Google Sync Error on recurring booking: {e}")
-            
+            print(f"Google Sync Error on recurring booking: {_format_google_calendar_error(e)}")
+
     conn.close()
 
 @app.route('/generate_recurring', methods=['POST'])
@@ -5884,7 +6148,7 @@ def generate_recurring():
     conn.close()
     
     if session.get('comp_google_calendar'):
-        threading.Thread(target=async_google_sync, args=(sync_payload, session.get('company_name'))).start()
+        threading.Thread(target=async_google_sync, args=(sync_payload, session.get('company_name'), session.get('company_id'))).start()
     
     log_action('Booking & Ops', 'Created Contract', f"Auto-scheduled {len(dates_to_schedule)} days for {client_name}")
     
@@ -6852,7 +7116,7 @@ def payroll_index():
 def system_email_settings():
     if not session.get('is_superadmin'):
         return 'Access Denied: Only Super Admins can manage System Email Settings.', 403
-    success_msg = None
+    success_msg = session.pop('settings_success_msg', None)
     if request.method == 'POST':
         save_system_email_settings(request.form)
         success_msg = 'System Email Settings saved successfully!'
@@ -6890,24 +7154,124 @@ def settings():
         return "Access Denied: Only Company Admins or Super Admins can access Email & Calendar Settings from the Hub.", 403
     conn = get_db_connection()
     cid = session['company_id']
-    success_msg = None
+    success_msg = session.pop('settings_success_msg', None)
     if request.method == 'POST':
         for key in ['smtp_server', 'smtp_port', 'smtp_user', 'smtp_pass', 'sender_email', 'gcal_calendar_id']:
             val = request.form.get(key, '')
-            exists = conn.execute('SELECT 1 FROM settings WHERE key=? AND company_id=?', (key, cid)).fetchone()
-            if exists: conn.execute('UPDATE settings SET value=? WHERE key=? AND company_id=?', (val, key, cid))
-            else: conn.execute('INSERT INTO settings (company_id, key, value) VALUES (?, ?, ?)', (cid, key, val))
-        conn.commit()
-        success_msg = "Settings saved successfully!"
+            _set_company_setting(conn, cid, key, val)
+
+        # Service account JSON is not used in this workflow. Each company stores
+        # its own OAuth Client JSON and its own OAuth token file. The JSON is
+        # uploaded as a file, saved server-side, and never echoed back to screen.
+        conn.execute("DELETE FROM settings WHERE company_id=? AND key='gcal_service_account_json'", (cid,))
+        uploaded_json = request.files.get('gcal_credentials_file')
+        legacy_pasted_json = (request.form.get('gcal_credentials_json') or '').strip()
+        try:
+            calendar_json = _read_uploaded_google_credentials_json(uploaded_json) if uploaded_json and uploaded_json.filename else legacy_pasted_json
+            if calendar_json:
+                _save_company_google_credentials(cid, calendar_json)
+                _set_company_setting(conn, cid, 'gcal_credentials_saved', '1')
+                _set_company_setting(conn, cid, 'gcal_credentials_saved_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                if uploaded_json and uploaded_json.filename:
+                    _set_company_setting(conn, cid, 'gcal_credentials_original_filename', os.path.basename(uploaded_json.filename))
+                _clear_company_google_token(cid, conn)
+                success_msg = "Settings saved successfully. Google Calendar JSON was uploaded for this company. Please reconnect Google Calendar to create a new token."
+            else:
+                success_msg = "Settings saved successfully!"
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (cid,)).fetchall()
+            s_dict = {row['key']: row['value'] for row in rows}
+            try:
+                s_dict['gcal_credentials_file_exists'] = '1' if os.path.exists(_company_google_credentials_path(cid)) else ''
+                s_dict['gcal_token_file_exists'] = '1' if os.path.exists(_company_google_token_path(cid)) else ''
+            except Exception:
+                pass
+            conn.close()
+            success_msg = "Settings were not saved: " + _format_google_calendar_error(exc)
+            return render_template('settings.html', settings=s_dict, session=session, success_msg=success_msg)
 
     rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (cid,)).fetchall()
     s_dict = {row['key']: row['value'] for row in rows}
+    try:
+        s_dict['gcal_credentials_file_exists'] = '1' if os.path.exists(_company_google_credentials_path(cid)) else ''
+        s_dict['gcal_token_file_exists'] = '1' if os.path.exists(_company_google_token_path(cid)) else ''
+    except Exception:
+        pass
     conn.close()
     
     if request.method == 'POST':
         log_action('System', 'Updated Settings', "Modified company integrations & email configurations.")
         
     return render_template('settings.html', settings=s_dict, session=session, success_msg=success_msg)
+
+
+@app.route('/settings/google_calendar/connect')
+def google_calendar_oauth_connect():
+    if not session.get('is_company_admin') and not session.get('is_superadmin'):
+        return "Access Denied: Only Company Admins or Super Admins can connect Google Calendar.", 403
+    try:
+        redirect_uri = _google_redirect_uri()
+        flow = _build_google_oauth_flow(session.get('company_id'), redirect_uri)
+        settings = _company_calendar_settings(session.get('company_id'))
+        auth_kwargs = {
+            'access_type': 'offline',
+            'include_granted_scopes': 'true',
+            'prompt': 'consent'
+        }
+        smtp_user = str(settings.get('smtp_user') or '').strip()
+        if smtp_user:
+            auth_kwargs['login_hint'] = smtp_user
+        authorization_url, state = flow.authorization_url(**auth_kwargs)
+        session['google_oauth_state'] = state
+        session['google_oauth_company_id'] = session.get('company_id')
+        return redirect(authorization_url)
+    except Exception as exc:
+        session['settings_success_msg'] = 'Google Calendar connection could not start: ' + _format_google_calendar_error(exc)
+        return redirect(url_for('settings'))
+
+
+@app.route('/settings/google_calendar/callback')
+def google_calendar_oauth_callback():
+    if not session.get('is_company_admin') and not session.get('is_superadmin'):
+        return "Access Denied: Only Company Admins or Super Admins can connect Google Calendar.", 403
+    if request.args.get('error'):
+        session['settings_success_msg'] = 'Google Calendar connection cancelled or failed: ' + request.args.get('error')
+        return redirect(url_for('settings'))
+    try:
+        state = session.get('google_oauth_state')
+        oauth_company_id = session.get('google_oauth_company_id') or session.get('company_id')
+        redirect_uri = _google_redirect_uri()
+        flow = _build_google_oauth_flow(oauth_company_id, redirect_uri)
+        if state:
+            flow.oauth2session.state = state
+        authorization_response = request.url
+        if os.environ.get('RENDER') and authorization_response.startswith('http://'):
+            authorization_response = 'https://' + authorization_response[len('http://'):]
+        flow.fetch_token(authorization_response=authorization_response)
+        creds = flow.credentials
+        token_path = _preferred_google_token_path(oauth_company_id)
+        token_dir = os.path.dirname(token_path)
+        if token_dir:
+            os.makedirs(token_dir, exist_ok=True)
+        with open(token_path, 'w', encoding='utf-8') as token:
+            token.write(creds.to_json())
+        token_id = _create_google_token_id()
+        conn = get_db_connection()
+        try:
+            _set_company_setting(conn, oauth_company_id, 'gcal_token_id', token_id)
+            _set_company_setting(conn, oauth_company_id, 'gcal_token_saved_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            conn.commit()
+        finally:
+            conn.close()
+        session.pop('google_oauth_state', None)
+        session.pop('google_oauth_company_id', None)
+        session['settings_success_msg'] = 'Google Calendar connected successfully for this company. Token ID: ' + token_id + '. Bookings will use the Target Google Calendar ID, or the connected account primary calendar if the field is blank.'
+        return redirect(url_for('settings'))
+    except Exception as exc:
+        session['settings_success_msg'] = 'Google Calendar connection failed: ' + _format_google_calendar_error(exc)
+        return redirect(url_for('settings'))
 
 
 @app.route('/api/test_email_connection', methods=['POST'])
@@ -6937,6 +7301,17 @@ def test_email_connection():
         return jsonify({"status": "success", "message": "Successful: Connection established and authenticated!"})
     except Exception as e:
         return jsonify({"status": "error", "message": f"Failed: {str(e)}"})
+
+
+@app.route('/api/test_google_calendar_connection', methods=['POST'])
+def test_google_calendar_connection():
+    if not session.get('is_company_admin') and not session.get('is_superadmin'):
+        return jsonify({"status": "error", "message": "Forbidden: Only Company Admins or Super Admins can test Google Calendar Settings."}), 403
+    try:
+        result = test_google_calendar_sync(session.get('company_id'))
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status": "error", "message": "Failed: " + _format_google_calendar_error(e)})
 
 
 @app.route('/email_payslip', methods=['POST'])

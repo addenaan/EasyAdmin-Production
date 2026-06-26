@@ -26,7 +26,7 @@
         <div class="alert alert-success shadow-sm fw-bold">✅ {{ success_msg }}</div>
         {% endif %}
 
-        <form method="POST" action="/settings">
+        <form method="POST" action="/settings" enctype="multipart/form-data">
             
             <div class="settings-card border-top border-primary border-4">
                 <h4 class="section-header">📧 Outbound Email Server (SMTP)</h4>
@@ -65,17 +65,48 @@
 
             <div class="settings-card border-top border-success border-4">
                 <h4 class="section-header text-success">📅 Google Calendar Sync</h4>
-                <p class="small text-muted mb-4">Route your scheduled bookings into a specific Google Calendar. If left blank, bookings will default to the master account's primary calendar.</p>
+                <p class="small text-muted mb-4">Configure Google Calendar for this company. The SMTP Email Username and App Password remain for email sending. Calendar access uses this company's uploaded Google OAuth JSON file and the saved Google token created by the Connect Google Calendar button.</p>
                 
                 <div class="row">
                     <div class="col-md-12 mb-3">
                         <label class="form-label fw-bold small">Target Google Calendar ID</label>
-                        <input type="text" name="gcal_calendar_id" class="form-control" value="{{ settings.get('gcal_calendar_id', '') }}" placeholder="e.g., yourname@group.calendar.google.com">
+                        <input type="text" name="gcal_calendar_id" id="gcal_calendar_id" class="form-control" value="{{ settings.get('gcal_calendar_id', '') }}" placeholder="Leave blank to use the connected account's primary calendar, or enter yourname@group.calendar.google.com">
+                        <div class="form-text">If this is blank, bookings will sync to the primary calendar of the connected Google account for this company.</div>
+                    </div>
+                    <div class="col-md-12 mb-3">
+                        <label class="form-label fw-bold small">Upload Google OAuth JSON File</label>
+                        <input type="file" name="gcal_credentials_file" id="gcal_credentials_file" class="form-control" accept=".json,application/json">
+                        <div class="form-text">
+                            Upload the OAuth client JSON file downloaded from Google Cloud for this company. The file is saved securely on the server and is not displayed again.
+                            {% if settings.get('gcal_credentials_file_exists') %}
+                                <br>✅ Google Calendar JSON is saved for this company{% if settings.get('gcal_credentials_original_filename') %} — {{ settings.get('gcal_credentials_original_filename') }}{% endif %}{% if settings.get('gcal_credentials_saved_at') %} — saved {{ settings.get('gcal_credentials_saved_at') }}{% endif %}.
+                            {% else %}
+                                <br>No Google Calendar JSON is currently saved for this company.
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="col-md-12 mb-3">
+                        <div class="p-3 border rounded bg-light small">
+                            <div><strong>Calendar token status:</strong>
+                                {% if settings.get('gcal_token_file_exists') %}
+                                    ✅ Connected{% if settings.get('gcal_token_id') %} — Token ID: {{ settings.get('gcal_token_id') }}{% endif %}{% if settings.get('gcal_token_saved_at') %} — saved {{ settings.get('gcal_token_saved_at') }}{% endif %}
+                                {% else %}
+                                    Not connected yet. Upload and save the JSON, then click Connect Google Calendar.
+                                {% endif %}
+                            </div>
+                        </div>
                     </div>
                 </div>
                 
+                <div class="d-flex flex-wrap align-items-center gap-2 mt-3 p-3 bg-light border rounded">
+                    <a href="/settings/google_calendar/connect" class="btn btn-outline-success fw-bold">Connect Google Calendar</a>
+                    <button type="button" class="btn btn-success fw-bold" id="testGoogleCalendarBtn" onclick="testGoogleCalendarConnection()">Test Google Calendar</button>
+                    <div class="small text-muted">Save settings first. If you upload a new JSON file, reconnect Google Calendar so the company receives a new saved token.</div>
+                </div>
+                <div id="googleCalendarTestAlert" style="display: none;"></div>
+
                 <div class="alert alert-secondary small mb-0 mt-3">
-                    <strong>Developer Note:</strong> The actual Google OAuth 2.0 connection is managed by the <code>credentials.json</code> and <code>token.json</code> files stored securely on the server backend.
+                    <strong>Note:</strong> Each company has its own Company Email & Calendar Settings, its own Target Google Calendar ID, and its own saved Google Calendar token. The SMTP App Password is used only for email sending. The saved Google token is used for Calendar sync.
                 </div>
             </div>
 
@@ -136,6 +167,42 @@
                 alertBox.innerText = '❌ Failed: Could not reach the server or request timed out.';
                 btn.disabled = false;
                 btn.innerText = "Test Connection";
+            });
+        }
+
+
+        function testGoogleCalendarConnection() {
+            const btn = document.getElementById('testGoogleCalendarBtn');
+            const alertBox = document.getElementById('googleCalendarTestAlert');
+
+            btn.disabled = true;
+            btn.innerText = 'Testing...';
+            alertBox.style.display = 'none';
+
+            fetch('/api/test_google_calendar_connection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            })
+            .then(res => res.json())
+            .then(data => {
+                alertBox.style.display = 'block';
+                if (data.status === 'success') {
+                    alertBox.className = 'alert alert-success mt-3 fw-bold shadow-sm';
+                    alertBox.innerText = '✅ ' + data.message;
+                } else {
+                    alertBox.className = 'alert alert-danger mt-3 fw-bold shadow-sm';
+                    alertBox.innerText = '❌ ' + data.message;
+                }
+                btn.disabled = false;
+                btn.innerText = 'Test Google Calendar';
+            })
+            .catch(err => {
+                alertBox.style.display = 'block';
+                alertBox.className = 'alert alert-danger mt-3 fw-bold shadow-sm';
+                alertBox.innerText = '❌ Failed: Could not reach the server or request timed out.';
+                btn.disabled = false;
+                btn.innerText = 'Test Google Calendar';
             });
         }
     </script>
