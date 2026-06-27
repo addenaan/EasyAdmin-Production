@@ -149,23 +149,12 @@
                                     {% elif inv.status == 'Partially Paid/Credited' %}<span class="badge bg-primary">Partially Paid/Credited</span>
                                     {% elif inv.status == 'Settled with Credit' %}<span class="badge bg-success">Settled with Credit</span>
                                     {% else %}<span class="badge bg-danger">Unpaid</span>{% endif %}
-                                    <br>
-                                    {% if inv.accounting_journal_id|default(None) %}
-                                        <span class="badge bg-dark mt-1">Accounting Posted</span>
-                                    {% else %}
-                                        <span class="badge bg-light text-dark border mt-1">Accounting Not Posted</span>
-                                    {% endif %}
                                 </td>
                                 <td class="col-actions">
                                     <div class="dropdown">
                                         <button class="btn btn-sm btn-outline-dark dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">Actions</button>
                                         <ul class="dropdown-menu dropdown-menu-end">
                                             <li><button class="dropdown-item" type="button" onclick="viewInvoice({{ inv.id }}, false)">👁️ View Invoice</button></li>
-                                            {% if inv.accounting_journal_id|default(None) %}
-                                                <li><button class="dropdown-item text-success" type="button" disabled>📘 Posted to Accounting #{{ inv.accounting_journal_id }}</button></li>
-                                            {% else %}
-                                                <li><button class="dropdown-item text-primary" type="button" onclick="postInvoiceAccounting({{ inv.id }}, '{{ inv.formatted_num }}')">📘 Post Invoice to Accounting</button></li>
-                                            {% endif %}
                                             {% if inv.payment_count|default(0) > 0 %}
                                                 {% if inv.payment_count == 1 %}
                                                     {% set receipt = inv.payments[0] %}
@@ -189,13 +178,8 @@
                                                 {% for credit in inv.credit_notes %}
                                                 <li>
                                                     <button class="dropdown-item text-secondary small" type="button" onclick="viewCreditNote({{ credit.id }})">
-                                                        ↩️ Credit #{{ credit.id }} - {{ (credit.amount|float)|fmt_money }} - {{ credit.credit_date|fmt_date }}{% if credit.accounting_journal_id|default(None) %} · Posted{% endif %}
+                                                        ↩️ Credit #{{ credit.id }} - {{ (credit.amount|float)|fmt_money }} - {{ credit.credit_date|fmt_date }}
                                                     </button>
-                                                    {% if not credit.accounting_journal_id|default(None) %}
-                                                    <button class="dropdown-item text-primary small" type="button" onclick="postCreditNoteAccounting({{ credit.id }}, 'CN-{{ '%04d'|format(credit.id|int) }}')">
-                                                        📘 Post Credit Note to Accounting
-                                                    </button>
-                                                    {% endif %}
                                                 </li>
                                                 {% endfor %}
                                             {% endif %}
@@ -1802,30 +1786,6 @@
                 infoBox.style.display = r.notes ? 'block' : 'none';
                 docModal.show();
             });
-        }
-
-        function postInvoiceAccounting(invoiceId, invoiceNumber) {
-            if(!confirm(`Post ${invoiceNumber || 'this invoice'} to Accounting? This will create a posted General Ledger entry and cannot be posted twice.`)) return;
-            fetch(`/api/invoice/${invoiceId}/post_accounting`, { method: 'POST' })
-                .then(r => r.json())
-                .then(res => {
-                    if(res.status === 'error') return alert(res.message || 'Could not post invoice to Accounting.');
-                    alert(res.message || 'Invoice posted to Accounting.');
-                    refreshInvoicingLists();
-                })
-                .catch(err => alert('Could not post invoice to Accounting: ' + err.message));
-        }
-
-        function postCreditNoteAccounting(creditId, creditNumber) {
-            if(!confirm(`Post ${creditNumber || 'this credit note'} to Accounting? This will create a posted General Ledger entry and cannot be posted twice.`)) return;
-            fetch(`/api/credit_note/${creditId}/post_accounting`, { method: 'POST' })
-                .then(r => r.json())
-                .then(res => {
-                    if(res.status === 'error') return alert(res.message || 'Could not post credit note to Accounting.');
-                    alert(res.message || 'Credit note posted to Accounting.');
-                    refreshInvoicingLists();
-                })
-                .catch(err => alert('Could not post credit note to Accounting: ' + err.message));
         }
 
         function markInvoiceStatus(id, status) {
