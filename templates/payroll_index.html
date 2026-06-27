@@ -24,9 +24,12 @@
         .table thead th { vertical-align: bottom; }
         .search-row th { padding-top: 0 !important; padding-bottom: 10px !important; border-bottom-width: 2px; }
         .column-search { font-size: 0.85rem; font-weight: normal; }
+        .payroll-notification-area { position: fixed; top: 18px; right: 18px; z-index: 1080; width: min(420px, calc(100vw - 36px)); }
+        .payroll-notification-area .alert { box-shadow: 0 .5rem 1rem rgba(0,0,0,.15); margin-bottom: .5rem; }
     </style>
 </head>
 <body>
+    <div id="payrollNotificationArea" class="payroll-notification-area" aria-live="polite" aria-atomic="true"></div>
     <div class="container mb-5">
         <div class="d-flex justify-content-between align-items-center mb-4 pb-3 border-bottom">
             <div class="d-flex align-items-center">
@@ -68,7 +71,7 @@
                         <button class="btn btn-sm btn-primary fw-bold" onclick="openProfileModal(null)">+ Add New Employee</button>
                     </div>
                 </div>
-                
+
                 <form method="GET" action="/payroll" class="row g-2 align-items-end mb-3 bg-light border rounded p-2">
                     <div class="col-md-6">
                         <label class="form-label small fw-bold text-muted mb-1">Server Search</label>
@@ -170,22 +173,23 @@
                     <thead class="table-light">
                         <tr>
                             <th style="width: 40px;"><input class="form-check-input border-secondary" type="checkbox" id="selectAll" onchange="toggleAll(this)"></th>
-                            <th>Name</th><th>Status</th><th>Leave Bal.</th><th>Sick Leave</th><th>Hours (Month)</th><th>Alert</th><th>Process</th>
+                            <th>Name</th><th>Status</th><th>Current Month Payroll</th><th>Leave Bal.</th><th>Sick Leave</th><th>Hours (Month)</th><th>Alert</th><th>Process</th>
                         </tr>
                         <tr class="search-row">
                             <th></th>
                             <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="1" placeholder="Search Name..."></th>
                             <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="2" placeholder="Search Status..."></th>
-                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="3" placeholder="Search Bal..."></th>
-                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="4" placeholder="Search Sick..."></th>
-                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="5" placeholder="Search Hours..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="3" placeholder="Search Finalized..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="4" placeholder="Search Bal..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="5" placeholder="Search Sick..."></th>
+                            <th><input type="text" class="form-control form-control-sm column-search" data-target="payrollTable" data-col="6" placeholder="Search Hours..."></th>
                             <th></th> 
                             <th></th> 
                         </tr>
                     </thead>
                     <tbody>
                         {% for emp in employees %}
-                        <tr class="payroll-row {% if emp.status == 'Resigned' %}table-warning{% elif emp.status == 'Terminated' %}table-danger{% elif emp.status == 'On Leave' %}table-info{% endif %}">
+                        <tr class="payroll-row {% if emp.status == 'Resigned' %}table-warning{% elif emp.status == 'Terminated' %}table-danger{% elif emp.status == 'On Leave' %}table-info{% endif %}" data-employee-id="{{ emp.id }}">
                             <td><input class="form-check-input border-secondary emp-cb" type="checkbox" value="{{ emp.id }}" data-name="{{ emp.name }}" data-status="{{ emp.status or 'Active' }}" title="{{ emp.status or 'Active' }}" onchange="updateSelectionCount()"></td>
                             <td><span class="emp-link" onclick="openProfileModal({{ emp | tojson | safe }})">{{ emp.name }}</span></td>
                             <td>
@@ -194,6 +198,17 @@
                                 {% elif emp.status == 'On Leave' %}<span class="badge bg-info text-dark">On Leave</span>
                                 {% elif emp.status == 'Terminated' %}<span class="badge bg-danger">Terminated</span>
                                 {% else %}<span class="badge bg-secondary">{{ emp.status or 'Unknown' }}</span>{% endif %}
+                            </td>
+                            <td class="current-month-payroll-cell" data-payroll-status-employee-id="{{ emp.id }}">
+                                {% if not emp.current_month_payroll_applicable %}
+                                    <span class="badge bg-secondary">N/A</span>
+                                    <div class="small text-muted">Inactive before month</div>
+                                {% elif emp.current_month_payroll_finalized %}
+                                    <span class="badge bg-success">Finalized</span>
+                                    {% if emp.current_month_payroll_date %}<div class="small text-muted">{{ emp.current_month_payroll_date }}</div>{% endif %}
+                                {% else %}
+                                    <span class="badge bg-warning text-dark">Not finalized</span>
+                                {% endif %}
                             </td>
                             <td>{{ emp.leave_balance }} Days</td>
                             <td>{{ emp.sick_leave_balance }}{% if emp.sick_leave_balance != 'N/A' %} Days{% endif %}</td>
@@ -254,7 +269,7 @@
                         {% for iv in interviews %}
                         <tr class="interview-row">
                             <td><strong>{{ iv.name }}</strong></td>
-                            <td>{{ fmt_date(iv.interview_datetime) if iv.interview_datetime else 'N/A' }}</td>
+                            <td>{{ iv.interview_datetime.replace('T', ' ') if iv.interview_datetime else 'N/A' }}</td>
                             <td>{{ iv.phone or 'N/A' }}</td>
                             <td><strong>{{ iv.total_score }} / {{ interview_scorecard_max_score or 0 }}</strong></td>
                             <td>
@@ -636,7 +651,7 @@
                     <div id="payslipPreviewArea" style="display:none;" class="mt-4 border-top pt-4">
                         <div class="d-flex justify-content-end mb-3 gap-2">
                             <button class="btn btn-primary fw-bold shadow-sm" id="btnSaveLedger" onclick="savePayslipToLedger()">💾 Save to Ledger & Lock</button>
-                            <button class="btn btn-warning fw-bold shadow-sm" id="btnAdjustmentPayslip" style="display:none;" onclick="openAdjustmentPayslipModal()">➕ Create Adjustment Payslip</button>
+                            <button class="btn btn-warning fw-bold shadow-sm" id="btnAdjustmentPayslip" style="display:none;" onclick="openAdjustmentPayslipModal()">➕ Apply Payslip Adjustment</button>
                             <button class="btn btn-info text-white fw-bold shadow-sm" id="btnEmailSingle" onclick="emailSinglePayslip()">📧 Email Draft</button>
                             <button class="btn btn-dark fw-bold shadow-sm" id="btnViewPayslip" onclick="downloadSinglePayslip()">⬇️ Download PDF</button>
                         </div>
@@ -944,12 +959,12 @@
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header bg-warning text-dark">
-                    <h5 class="modal-title fw-bold">Create Adjustment Payslip</h5>
+                    <h5 class="modal-title fw-bold">Apply Payslip Adjustment</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body bg-light">
                     <div class="alert alert-warning small">
-                        Use this only for corrections after a payslip has already been finalised. Enter positive or negative amounts. This creates a separate ledger adjustment and does not change the original finalised payslip.
+                        Use this only for corrections after a payslip has already been finalised. Enter positive or negative amounts. The saved finalised payslip will be updated and future downloads will reflect the adjustment.
                     </div>
                     <input type="hidden" id="adjEmpId">
                     <input type="hidden" id="adjDate">
@@ -966,12 +981,12 @@
                         <div class="col-md-4"><label class="small fw-bold">Loan Repayment Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjLoan" value="0" oninput="calculateAdjustmentNet()"></div>
                         <div class="col-md-4"><label class="small fw-bold text-danger">PAYE Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjPaye" value="0" oninput="calculateAdjustmentNet()"></div>
                         <div class="col-md-4"><label class="small fw-bold text-danger">UIF Adjustment</label><input type="number" step="0.01" class="form-control adj-field" id="adjUif" value="0" oninput="calculateAdjustmentNet()"></div>
-                        <div class="col-md-4"><label class="small fw-bold text-success">Net Adjustment</label><input type="text" class="form-control fw-bold text-success" id="adjNet" value="0,00" readonly></div>
+                        <div class="col-md-4"><label class="small fw-bold text-success">Net Adjustment</label><input type="text" class="form-control fw-bold text-success" id="adjNet" value="R 0.00" readonly></div>
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button class="btn btn-warning fw-bold" onclick="saveAdjustmentPayslip()">Save Adjustment to Ledger</button>
+                    <button class="btn btn-warning fw-bold" onclick="saveAdjustmentPayslip()">Apply Adjustment to Finalized Payslip</button>
                 </div>
             </div>
         </div>
@@ -1004,6 +1019,53 @@
         if(document.getElementById('leaveDate')) document.getElementById('leaveDate').value = td;
         if(document.getElementById('bankExportMonth')) document.getElementById('bankExportMonth').value = td.substring(0, 7);
         if(document.getElementById('ui19Month')) document.getElementById('ui19Month').value = td.substring(0, 7);
+
+        function escapeHtml(value) {
+            return String(value || '').replace(/[&<>'"]/g, function(ch) {
+                return {'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch];
+            });
+        }
+
+        function showPayrollNotification(message, type='success') {
+            const area = document.getElementById('payrollNotificationArea');
+            if(!area) { alert(message); return; }
+            const map = {success:'success', error:'danger', warning:'warning', info:'info'};
+            const div = document.createElement('div');
+            div.className = `alert alert-${map[type] || 'success'} alert-dismissible fade show`;
+            div.setAttribute('role', 'alert');
+            const span = document.createElement('span');
+            span.textContent = message;
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'btn-close';
+            close.setAttribute('data-bs-dismiss', 'alert');
+            close.setAttribute('aria-label', 'Close');
+            div.appendChild(span);
+            div.appendChild(close);
+            area.appendChild(div);
+            setTimeout(() => {
+                try {
+                    const alertObj = bootstrap.Alert.getOrCreateInstance(div);
+                    alertObj.close();
+                } catch(e) {
+                    div.remove();
+                }
+            }, 4500);
+        }
+
+        function currentMonthKey() {
+            const d = new Date();
+            return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+        }
+
+        function updateCurrentMonthPayrollCell(employeeId, payrollDate) {
+            const dateText = String(payrollDate || '').slice(0, 10);
+            const monthKey = String(payrollDate || '').slice(0, 7);
+            if(monthKey && monthKey !== currentMonthKey()) return;
+            const cell = document.querySelector(`[data-payroll-status-employee-id="${employeeId}"]`);
+            if(!cell) return;
+            cell.innerHTML = '<span class="badge bg-success">Finalized</span>' + (dateText ? `<div class="small text-muted">${escapeHtml(dateText)}</div>` : '');
+        }
 
         // --- HIGH QUALITY PDF SETTINGS ---
         function getPdfOptions(docName) {
@@ -1157,6 +1219,7 @@
                     }
 
                     successes.push(data.payslip.name || `Employee ID ${id}`);
+                    updateCurrentMonthPayrollCell(id, date);
                 } catch(err) {
                     failures.push(`Employee ID ${id}: ${err.message || 'Unexpected error.'}`);
                 }
@@ -1166,6 +1229,7 @@
             if(successes.length) summary += `\n\nFinalized:\n- ${successes.join('\n- ')}`;
             if(failures.length) summary += `\n\nNeeds attention:\n- ${failures.join('\n- ')}`;
             status.innerText = summary;
+            if(successes.length) showPayrollNotification(`${successes.length} payslip(s) finalized successfully.`, failures.length ? 'warning' : 'success');
             btn.innerText = 'Done';
             btn.disabled = false;
         }
@@ -1517,21 +1581,9 @@
         function parseCurrencyAmount(value) {
             if (typeof value === 'number') return value;
             if (!value) return 0;
-            let cleaned = String(value).replace(/\u00a0/g, ' ').replace(/[Rr]/g, '').trim();
-            const negative = /^-/.test(cleaned);
-            cleaned = cleaned.replace(/\s+/g, '');
-            if(cleaned.includes(',') && cleaned.includes('.')) {
-                cleaned = cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.') ? cleaned.replace(/\./g, '').replace(',', '.') : cleaned.replace(/,/g, '');
-            } else if(cleaned.includes(',')) cleaned = cleaned.replace(',', '.');
-            cleaned = cleaned.replace(/[^0-9.\-]/g, '');
+            const cleaned = String(value).replace(/[^0-9.\-]/g, '');
             const parsed = parseFloat(cleaned);
-            if(isNaN(parsed)) return 0;
-            return negative ? -Math.abs(parsed) : parsed;
-        }
-
-        function money(value) {
-            if(window.EasyAdminFormat) return window.EasyAdminFormat.money(value);
-            return Number(value || 0).toLocaleString('en-ZA', {minimumFractionDigits:2, maximumFractionDigits:2});
+            return isNaN(parsed) ? 0 : parsed;
         }
 
         function setOptionalPayslipLine(rowId, amountId, value) {
@@ -1541,7 +1593,7 @@
             if (!row || !cell) return;
             if (amount > 0) {
                 row.style.display = '';
-                cell.innerText = value || money(amount);
+                cell.innerText = value || `R ${amount.toFixed(2)}`;
             } else {
                 row.style.display = 'none';
                 cell.innerText = '';
@@ -1576,12 +1628,12 @@
 
 
         function moneyToNumber(value) {
-            return parseCurrencyAmount(value);
+            return parseFloat(String(value || '0').replace(/[^0-9.-]/g, '')) || 0;
         }
 
         function openAdjustmentPayslipModal() {
             if(!currentPayslipData || !currentPayslipData.payslip || !currentPayslipData.payslip.is_finalized) {
-                alert('An adjustment can only be created after the payslip has been finalised to ledger.');
+                alert('An adjustment can only be applied after the payslip has been finalised to ledger.');
                 return;
             }
             document.getElementById('adjEmpId').value = currentPayslipData.raw.employee_id;
@@ -1602,12 +1654,110 @@
             const paye = parseFloat(document.getElementById('adjPaye').value || 0);
             const uif = parseFloat(document.getElementById('adjUif').value || 0);
             const net = gross + overtime + bonus + transport + reimb - loan - paye - uif;
-            document.getElementById('adjNet').value = money(net);
+            document.getElementById('adjNet').value = 'R ' + net.toFixed(2);
+        }
+
+        function applyPayslipPreviewPayload(res) {
+            if(!res || !res.payslip) return false;
+            currentPayslipData = res;
+            const p = res.payslip;
+
+            const setText = (id, value) => {
+                const el = document.getElementById(id);
+                if(el) el.innerText = value || '';
+            };
+
+            setText('bpCompName', p.company_name);
+            const logoEl = document.getElementById('bpLogo');
+            if(logoEl) {
+                if(p.company_logo) {
+                    logoEl.src = '/uploads/logos/' + p.company_logo;
+                    logoEl.style.display = 'block';
+                } else {
+                    logoEl.style.display = 'none';
+                }
+            }
+            setText('bpCompReg', p.company_reg ? 'Reg No: ' + p.company_reg : '');
+            setText('bpCompAddr', p.company_address);
+
+            const isFinalized = !!p.is_finalized;
+            const titleEl = document.getElementById('bpDocTitle');
+            if(titleEl) {
+                titleEl.innerText = isFinalized ? 'PAYSLIP' : 'DRAFT PAYSLIP';
+                titleEl.className = isFinalized ? 'text-success fw-bold' : 'text-danger fw-bold';
+            }
+
+            setText('bpDate', p.date);
+            setText('bpName', p.name);
+            setText('bpEmpNum', p.emp_num);
+            setText('bpIdNum', p.id_num);
+            setText('bpGross', p.gross);
+            setText('bpDaysWorked', p.days_worked_display);
+            setText('bpOvertime', p.overtime);
+            setText('bpSundaysWorked', p.sundays_display);
+            setOptionalPayslipLine('bpReimbursableExpensesRow', 'bpReimbursableExpenses', p.reimbursable_expenses);
+            setOptionalPayslipLine('bpBonusRow', 'bpBonus', p.bonus);
+            setOptionalPayslipLine('bpLoanRepaymentRow', 'bpLoanRepayment', p.loan_repayment);
+            setOptionalPayslipLine('bpTransportRow', 'bpTransport', p.transport);
+            setText('bpPaye', p.paye);
+            setText('bpUif', p.uif_emp);
+            setText('bpUifEr', p.uif_er);
+            setText('bpNet', p.net);
+            setText('bpLeave', p.leave);
+            setText('bpSickLeave', p.sick_leave);
+            setText('bpSickLeaveExt', p.sick_leave === 'N/A' ? '' : 'Days left in 36-month cycle');
+            setText('bpFamilyLeave', p.family_leave);
+            setText('bpFamilyLeaveExt', p.family_leave === 'N/A' ? '' : 'Days left in annual cycle');
+
+            const preview = document.getElementById('payslipPreviewArea');
+            if(preview) preview.style.display = 'block';
+            ['psReimbursableExpenses','psBonus','psLoanRepayment'].forEach(id => {
+                const el = document.getElementById(id);
+                if(el) el.disabled = isFinalized;
+            });
+            const saveBtn = document.getElementById('btnSaveLedger');
+            const adjBtn = document.getElementById('btnAdjustmentPayslip');
+            const emailBtn = document.getElementById('btnEmailSingle');
+            if(isFinalized) {
+                if(saveBtn) saveBtn.style.display = 'none';
+                if(adjBtn) adjBtn.style.display = 'inline-block';
+                if(emailBtn) emailBtn.innerText = '📧 Email Payslip';
+            } else {
+                if(saveBtn) {
+                    saveBtn.style.display = 'inline-block';
+                    saveBtn.disabled = false;
+                    saveBtn.innerText = '💾 Save to Ledger & Lock';
+                }
+                if(adjBtn) adjBtn.style.display = 'none';
+                if(emailBtn) emailBtn.innerText = '📧 Email Draft';
+            }
+            const runBtn = document.getElementById('btnRunEngine');
+            if(runBtn) {
+                runBtn.innerText = '✅ Calculated Successfully';
+                runBtn.disabled = false;
+            }
+            return true;
+        }
+
+        function refreshFinalizedPayslipPreview(employeeId, dateStr) {
+            return fetch('/api/payslip_for_distribution', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                cache: 'no-store',
+                body: JSON.stringify({employee_id: employeeId, date: dateStr})
+            })
+            .then(r => r.json().then(data => ({ok: r.ok, data})))
+            .then(({ok, data}) => {
+                if(!ok || data.message) throw new Error(data.message || 'Unable to refresh finalized payslip preview.');
+                applyPayslipPreviewPayload(data);
+                updateCurrentMonthPayrollCell(employeeId, dateStr);
+                return data;
+            });
         }
 
         function saveAdjustmentPayslip() {
             const reason = document.getElementById('adjReason').value.trim();
-            if(!reason) return alert('Please enter an adjustment reason.');
+            if(!reason) { showPayrollNotification('Please enter an adjustment reason.', 'warning'); return; }
             const payload = {
                 employee_id: document.getElementById('adjEmpId').value,
                 date: document.getElementById('adjDate').value,
@@ -1621,13 +1771,35 @@
                 paye: parseFloat(document.getElementById('adjPaye').value || 0),
                 uif: parseFloat(document.getElementById('adjUif').value || 0)
             };
-            fetch('/api/save_adjustment_payslip', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })
-            .then(r => r.json().then(data => ({ok:r.ok, data}))).then(({ok, data}) => {
-                if(!ok || data.message) return alert(data.message || 'Unable to save adjustment payslip.');
-                alert('Adjustment payslip saved to ledger. Net adjustment: ' + money(data.net || 0));
-                bootstrap.Modal.getInstance(document.getElementById('adjustmentPayslipModal')).hide();
-                runPayslipEngine();
-            });
+            fetch('/api/save_adjustment_payslip', { method:'POST', headers:{'Content-Type':'application/json'}, cache:'no-store', body: JSON.stringify(payload) })
+            .then(async r => {
+                const contentType = (r.headers.get('content-type') || '').toLowerCase();
+                if(contentType.includes('application/json')) {
+                    const data = await r.json();
+                    return {ok:r.ok, data};
+                }
+                const text = await r.text();
+                const cleanText = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                throw new Error(cleanText || 'The server returned an unexpected response while applying the adjustment.');
+            }).then(({ok, data}) => {
+                if(!ok || data.status === 'error' || (data.message && data.status !== 'success')) {
+                    showPayrollNotification(data.message || 'Unable to save adjustment payslip.', 'error');
+                    return;
+                }
+                showPayrollNotification(data.message || ('Adjustment applied successfully. Finalized payslip updated. Net adjustment: R ' + Number(data.net || 0).toFixed(2)), 'success');
+                const modal = bootstrap.Modal.getInstance(document.getElementById('adjustmentPayslipModal'));
+                if(modal) modal.hide();
+
+                // Update the visible payslip immediately. Use the refreshed payload returned by the server first,
+                // then fall back to a no-cache finalized payslip fetch. This avoids users having to press F5.
+                if(data.payslip) {
+                    applyPayslipPreviewPayload({payslip: data.payslip, raw: data.raw || (currentPayslipData ? currentPayslipData.raw : payload)});
+                    updateCurrentMonthPayrollCell(payload.employee_id, payload.date);
+                } else {
+                    refreshFinalizedPayslipPreview(payload.employee_id, payload.date)
+                        .catch(refreshErr => showPayrollNotification('Adjustment was applied, but the payslip preview could not refresh automatically: ' + (refreshErr.message || refreshErr), 'warning'));
+                }
+            }).catch(err => showPayrollNotification(err.message || 'Unable to save adjustment payslip.', 'error'));
         }
 
         function runPayslipEngine() {
@@ -1722,7 +1894,7 @@
             fetch('/api/save_payslip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(currentPayslipData.raw) })
             .then(r => r.json().then(data => ({ok: r.ok, data: data}))).then(({ok, data}) => {
                 if(!ok || data.message) {
-                    alert(data.message || 'Unable to save payslip.');
+                    showPayrollNotification(data.message || 'Unable to save payslip.', 'error');
                     btn.innerText = '💾 Save to Ledger & Lock';
                     btn.disabled = false;
                     return;
@@ -1737,6 +1909,12 @@
                 document.getElementById('btnAdjustmentPayslip').style.display = 'inline-block';
                 if(currentPayslipData && currentPayslipData.payslip) currentPayslipData.payslip.is_finalized = true;
                 ['psReimbursableExpenses','psBonus','psLoanRepayment'].forEach(id => { const el = document.getElementById(id); if(el) el.disabled = true; });
+                updateCurrentMonthPayrollCell(currentPayslipData.raw.employee_id, currentPayslipData.raw.date);
+                showPayrollNotification('Payslip finalized successfully and saved to ledger.', 'success');
+            }).catch(err => {
+                showPayrollNotification(err.message || 'Unable to save payslip.', 'error');
+                btn.innerText = '💾 Save to Ledger & Lock';
+                btn.disabled = false;
             });
         }
 
@@ -1817,7 +1995,7 @@
 
         function ui19Money(value) {
             const amount = parseFloat(value || 0);
-            return isNaN(amount) ? '0,00' : money(amount);
+            return isNaN(amount) ? '0.00' : amount.toFixed(2);
         }
 
         function buildUi19Html(data) {
@@ -1929,10 +2107,10 @@
             if(!m) return alert("Select a month");
             fetch('/generate_emp201', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({month: m})})
             .then(r => r.json()).then(res => {
-                document.getElementById('e201Gross').innerText = money(res.gross);
-                document.getElementById('e201Paye').innerText = money(res.paye);
-                document.getElementById('e201Uif').innerText = money(res.uif);
-                document.getElementById('e201Total').innerText = money(res.total);
+                document.getElementById('e201Gross').innerText = `R ${res.gross.toFixed(2)}`;
+                document.getElementById('e201Paye').innerText = `R ${res.paye.toFixed(2)}`;
+                document.getElementById('e201Uif').innerText = `R ${res.uif.toFixed(2)}`;
+                document.getElementById('e201Total').innerText = `R ${res.total.toFixed(2)}`;
                 document.getElementById('emp201Result').style.display = 'block';
             });
         }
@@ -2104,6 +2282,5 @@
             } 
         }
     </script>
-    <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
 </body>
 </html>

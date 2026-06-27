@@ -1765,7 +1765,7 @@ def init_db():
     except sqlite3.Error: pass
 
     # Payslip adjustment migrations.
-    # Regular ledger payslips remain unique per employee/month, but adjustment payslips are allowed.
+    # Regular ledger payslips remain unique per employee/month. Historical adjustment rows are supported for older data.
     try: conn.execute('ALTER TABLE payslips ADD COLUMN payslip_type TEXT DEFAULT "regular"')
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE payslips ADD COLUMN adjustment_of_payslip_id INTEGER')
@@ -1781,7 +1781,7 @@ def init_db():
 
     # Clean up any historical duplicate REGULAR payslip ledger rows before enforcing uniqueness.
     # Source of truth is one regular finalised payslip per company + employee + payroll month.
-    # Adjustment payslips are separate rows and must not be deleted by this cleanup.
+    # Historical adjustment rows are kept for audit/legacy totals and are not deleted by this cleanup.
     try:
         conn.execute('''DELETE FROM payslips
                         WHERE COALESCE(payslip_type, 'regular')='regular'
@@ -3881,9 +3881,11 @@ def api_staff_payslips():
             return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
         rows = conn.execute('''SELECT * FROM payslips
                                WHERE company_id=? AND employee_id=?
+                                 AND COALESCE(payslip_type, 'regular')='regular'
                                ORDER BY date DESC, id DESC
                                LIMIT 60''', (cid, employee['id'])).fetchall()
-        return jsonify({'status': 'success', 'payslips': [_staff_payslip_to_dict(r) for r in rows]})
+        adjusted_rows = [_payslip_row_with_historical_adjustments(conn, r, cid) for r in rows]
+        return jsonify({'status': 'success', 'payslips': [_staff_payslip_to_dict(r) for r in adjusted_rows]})
     except Exception as exc:
         return _staff_json_error(f'Payslips could not be loaded: {exc}', 500)
     finally:
@@ -3901,10 +3903,12 @@ def api_staff_payslip_detail(payslip_id):
         if not employee:
             return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
         row = conn.execute('''SELECT * FROM payslips
-                              WHERE id=? AND company_id=? AND employee_id=?''',
+                              WHERE id=? AND company_id=? AND employee_id=?
+                                AND COALESCE(payslip_type, 'regular')='regular' ''',
                            (payslip_id, cid, employee['id'])).fetchone()
         if not row:
             return _staff_json_error('Payslip not found for your staff profile.', 404)
+        row = _payslip_row_with_historical_adjustments(conn, row, cid)
         return jsonify({'status': 'success', 'payslip': _staff_payslip_to_dict(row)})
     except Exception as exc:
         return _staff_json_error(f'Payslip could not be loaded: {exc}', 500)
@@ -3923,10 +3927,12 @@ def staff_download_payslip(payslip_id):
         if not employee:
             return 'Staff profile not found.', 404
         row = conn.execute('''SELECT * FROM payslips
-                              WHERE id=? AND company_id=? AND employee_id=?''',
+                              WHERE id=? AND company_id=? AND employee_id=?
+                                AND COALESCE(payslip_type, 'regular')='regular' ''',
                            (payslip_id, cid, employee['id'])).fetchone()
         if not row:
             return 'Payslip not found.', 404
+        row = _payslip_row_with_historical_adjustments(conn, row, cid)
         company = conn.execute('SELECT * FROM companies WHERE id=?', (cid,)).fetchone()
         pdf_bytes = _build_staff_payslip_pdf(row, employee, company)
         safe_name = secure_filename(employee['name'] or 'employee') or 'employee'
@@ -7209,12 +7215,57 @@ def payroll_index():
     employees = conn.execute(f"SELECT * FROM employees WHERE {emp_where} ORDER BY name ASC LIMIT ? OFFSET ?", emp_params + [payroll_per_page, payroll_offset]).fetchall()
     employee_pagination = pagination_meta(employee_total, payroll_page, payroll_per_page)
     
+    current_month = datetime.now().strftime('%Y-%m')
+    current_month_label = datetime.now().strftime('%B %Y')
+    current_month_ref_date = datetime.now().strftime('%Y-%m-%d')
+
+    all_payroll_employees = conn.execute("""SELECT id, name, start_date, emp_type, status, inactive_date
+                                            FROM employees
+                                            WHERE company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL)
+                                            ORDER BY name ASC""", (cid,)).fetchall()
+    finalized_rows = conn.execute("""SELECT employee_id, MAX(date) AS finalised_date
+                                   FROM payslips
+                                   WHERE company_id=?
+                                     AND date LIKE ?
+                                     AND COALESCE(payslip_type, 'regular')='regular'
+                                   GROUP BY employee_id""", (cid, f"{current_month}%")).fetchall()
+    current_month_finalized_map = {int(r['employee_id']): (r['finalised_date'] or '') for r in finalized_rows if r['employee_id'] is not None}
+
+    current_month_expected_ids = []
+    current_month_missing_names = []
+    for payroll_emp in all_payroll_employees:
+        _m_start, _m_end, _inactive, payroll_cutoff = get_employee_payroll_cutoff(payroll_emp, current_month_ref_date)
+        if payroll_cutoff is None:
+            continue
+        emp_id_int = int(payroll_emp['id'])
+        current_month_expected_ids.append(emp_id_int)
+        if emp_id_int not in current_month_finalized_map:
+            current_month_missing_names.append(payroll_emp['name'] or f"Employee #{emp_id_int}")
+
+    current_month_finalized_count = sum(1 for emp_id in current_month_expected_ids if emp_id in current_month_finalized_map)
+    current_month_expected_count = len(current_month_expected_ids)
+    current_month_missing_count = max(current_month_expected_count - current_month_finalized_count, 0)
+    payroll_current_month_status = {
+        'month': current_month,
+        'month_label': current_month_label,
+        'expected_count': current_month_expected_count,
+        'finalized_count': current_month_finalized_count,
+        'missing_count': current_month_missing_count,
+        'is_complete': current_month_expected_count > 0 and current_month_finalized_count == current_month_expected_count,
+        'missing_names': current_month_missing_names[:12],
+        'more_missing_count': max(len(current_month_missing_names) - 12, 0),
+    }
+
     emp_data = []
     for emp in employees:
         d = dict(emp)
         d['leave_balance'] = calculate_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'])
         d['sick_leave_balance'] = calculate_sick_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'])
-        d['hours_worked'] = round(conn.execute("SELECT COUNT(*) as c FROM bookings WHERE company_id=? AND start LIKE ? AND employee LIKE ?", (cid, f"{datetime.now().strftime('%Y-%m')}%", f"%{emp['name']}%")).fetchone()['c'] * get_employee_workday_hours(emp), 2)
+        d['hours_worked'] = round(conn.execute("SELECT COUNT(*) as c FROM bookings WHERE company_id=? AND start LIKE ? AND employee LIKE ?", (cid, f"{current_month}%", f"%{emp['name']}%")).fetchone()['c'] * get_employee_workday_hours(emp), 2)
+        _m_start, _m_end, _inactive, payroll_cutoff = get_employee_payroll_cutoff(emp, current_month_ref_date)
+        d['current_month_payroll_applicable'] = payroll_cutoff is not None
+        d['current_month_payroll_finalized'] = int(emp['id']) in current_month_finalized_map
+        d['current_month_payroll_date'] = current_month_finalized_map.get(int(emp['id']), '')
         emp_data.append(d)
 
     interviews = conn.execute("SELECT * FROM interviews WHERE company_id=? ORDER BY interview_datetime DESC", (cid,)).fetchall()
@@ -7230,6 +7281,7 @@ def payroll_index():
         interview_scorecard_max_score=interview_scorecard_max_score,
         employee_pagination=employee_pagination,
         payroll_q=payroll_q,
+        payroll_current_month_status=payroll_current_month_status,
         session=session
     )
 
@@ -7529,7 +7581,7 @@ def get_bank_export_templates():
     }
 
 def payroll_payment_rows(conn, company_id, month_str):
-    # Bank exports use finalised ledger rows only, including adjustment payslips.
+    # Bank exports use finalised ledger rows only. Historical adjustment rows remain included.
     # Multiple ledger rows for an employee/month are combined into one net payment amount.
     return conn.execute('''
         SELECT MAX(p.id) AS payslip_id, MAX(p.date) AS date, SUM(p.net_salary) AS net_salary,
@@ -7811,14 +7863,6 @@ def generate_payslip():
                                    (session['company_id'], emp_id, f"{target_month}%")).fetchone()
     if existing_ledger:
         payload = build_saved_payslip_payload(conn, emp, company, existing_ledger)
-        adj_rows = conn.execute('''SELECT id, date, gross_salary, overtime, transport, bonus, reimbursable_expenses, loan_repayment, uif, paye, net_salary, adjustment_reason
-                                   FROM payslips
-                                   WHERE company_id=? AND employee_id=? AND date LIKE ?
-                                     AND COALESCE(payslip_type, 'regular')='adjustment'
-                                   ORDER BY id ASC''',
-                                (session['company_id'], emp_id, f"{target_month}%")).fetchall()
-        payload['payslip']['adjustment_count'] = len(adj_rows)
-        payload['payslip']['adjustment_net_total'] = f"R {sum(float(r['net_salary'] or 0) for r in adj_rows):.2f}"
         payload['payslip']['regular_payslip_id'] = existing_ledger['id']
         conn.close()
         return jsonify(payload)
@@ -7972,8 +8016,77 @@ def generate_payslip():
         }
     })
 
+
+def _payslip_row_with_historical_adjustments(conn, ledger_row, company_id):
+    '''Return a regular payslip row dict with any historical separate adjustment rows applied.'''
+    if not ledger_row:
+        return ledger_row
+    row = dict(ledger_row)
+    payslip_type = (row.get('payslip_type') or 'regular').strip().lower()
+    if payslip_type == 'adjustment':
+        return row
+    date_str = row.get('date') or ''
+    target_month = date_str[:7]
+    if not target_month:
+        return row
+    employee_id = row.get('employee_id')
+    regular_id = row.get('id')
+    if not employee_id or not company_id:
+        row['adjustment_count'] = int(row.get('adjustment_count') or 0)
+        row['adjustment_net_total'] = float(row.get('adjustment_net_total') or 0)
+        return row
+    adjustment_filter = """
+        company_id=? AND employee_id=? AND date LIKE ?
+        AND COALESCE(payslip_type, 'regular')='adjustment'
+        AND (adjustment_of_payslip_id=? OR adjustment_of_payslip_id IS NULL)
+    """
+    sums = conn.execute(f'''
+        SELECT COUNT(*) AS adjustment_count,
+               COALESCE(SUM(gross_salary),0) AS gross_salary,
+               COALESCE(SUM(overtime),0) AS overtime,
+               COALESCE(SUM(transport),0) AS transport,
+               COALESCE(SUM(bonus),0) AS bonus,
+               COALESCE(SUM(reimbursable_expenses),0) AS reimbursable_expenses,
+               COALESCE(SUM(loan_repayment),0) AS loan_repayment,
+               COALESCE(SUM(uif),0) AS uif,
+               COALESCE(SUM(paye),0) AS paye,
+               COALESCE(SUM(net_salary),0) AS net_salary
+        FROM payslips
+        WHERE {adjustment_filter}
+    ''', (company_id, employee_id, f"{target_month}%", regular_id)).fetchone()
+    adjustment_count = int((sums['adjustment_count'] if sums else 0) or 0)
+    if adjustment_count <= 0:
+        row['adjustment_count'] = int(row.get('adjustment_count') or 0)
+        row['adjustment_net_total'] = float(row.get('adjustment_net_total') or 0)
+        return row
+    for field in ['gross_salary', 'overtime', 'transport', 'bonus', 'reimbursable_expenses', 'loan_repayment', 'uif', 'paye', 'net_salary']:
+        row[field] = float(row.get(field) or 0) + float(sums[field] or 0)
+    row['adjustment_count'] = adjustment_count
+    row['adjustment_net_total'] = float(sums['net_salary'] or 0)
+    return row
+
+
+def _append_regular_payslip_adjustment_note(existing_note, reason, adjustments, net_adjustment):
+    '''Append a concise audit note to the regular finalized payslip row.'''
+    parts = []
+    for label, value in adjustments:
+        if abs(float(value or 0)) >= 0.005:
+            parts.append(f"{label}: {float(value):+.2f}")
+    value_summary = '; '.join(parts) if parts else 'No value change'
+    stamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+    note = f"{stamp} - Adjustment applied ({value_summary}; Net: {float(net_adjustment):+.2f}). Reason: {reason}"
+    existing = (existing_note or '').strip()
+    return (existing + "\n" + note).strip() if existing else note
+
 def build_saved_payslip_payload(conn, emp, company, ledger_row):
-    """Return a payslip response payload using only the saved payslip ledger row."""
+    """Return a payslip response payload using the saved finalized payslip ledger row."""
+    company_id = session.get('company_id')
+    if not company_id and company:
+        try:
+            company_id = company['id']
+        except Exception:
+            company_id = None
+    ledger_row = _payslip_row_with_historical_adjustments(conn, ledger_row, company_id)
     date_str = ledger_row['date'] or ''
     target_month = date_str[:7] if date_str else ''
     gross = float(ledger_row['gross_salary'] or 0)
@@ -8020,7 +8133,10 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
             "payslip_status": "Final Payslip",
             "is_finalized": True,
             "source": "Saved Payslip Ledger",
-            "regular_payslip_id": ledger_row['id']
+            "regular_payslip_id": ledger_row['id'],
+            "adjustment_count": int(ledger_row.get('adjustment_count') or 0),
+            "adjustment_net_total": f"R {float(ledger_row.get('adjustment_net_total') or 0):.2f}",
+            "adjustment_reason": ledger_row.get('adjustment_reason') or ''
         },
         "raw": {
             "employee_id": emp['id'],
@@ -8068,53 +8184,115 @@ def payslip_for_distribution():
 
 @app.route('/api/save_adjustment_payslip', methods=['POST'])
 def save_adjustment_payslip():
-    if not session.get('can_payroll') and not session.get('is_superadmin'):
-        return jsonify({"message": "Forbidden"}), 403
-    data = request.get_json() or {}
-    emp_id = data.get('employee_id')
-    date_str = data.get('date')
-    reason = (data.get('adjustment_reason') or '').strip()
-    if not emp_id or not date_str:
-        return jsonify({"message": "Employee and payroll date are required."}), 400
-    if not reason:
-        return jsonify({"message": "Adjustment reason is required."}), 400
-    target_month = date_str[:7]
+    """Apply an adjustment to an existing finalized payslip and always return JSON."""
+    try:
+        if not session.get('can_payroll') and not session.get('is_superadmin'):
+            return jsonify({"status": "error", "message": "Forbidden"}), 403
+        data = request.get_json(silent=True) or {}
+        emp_id = data.get('employee_id')
+        date_str = data.get('date')
+        reason = (data.get('adjustment_reason') or '').strip()
+        if not emp_id or not date_str:
+            return jsonify({"status": "error", "message": "Employee and payroll date are required."}), 400
+        if not reason:
+            return jsonify({"status": "error", "message": "Adjustment reason is required."}), 400
+        target_month = date_str[:7]
 
-    gross = safe_adjustment_money(data.get('gross'))
-    overtime = safe_adjustment_money(data.get('overtime'))
-    transport = safe_adjustment_money(data.get('transport'))
-    bonus = safe_adjustment_money(data.get('bonus'))
-    reimbursable = safe_adjustment_money(data.get('reimbursable_expenses'))
-    loan_repayment = safe_adjustment_money(data.get('loan_repayment'))
-    uif = safe_adjustment_money(data.get('uif'))
-    paye = safe_adjustment_money(data.get('paye'))
-    net = gross + overtime + bonus + transport + reimbursable - uif - paye - loan_repayment
+        gross = safe_adjustment_money(data.get('gross'))
+        overtime = safe_adjustment_money(data.get('overtime'))
+        transport = safe_adjustment_money(data.get('transport'))
+        bonus = safe_adjustment_money(data.get('bonus'))
+        reimbursable = safe_adjustment_money(data.get('reimbursable_expenses'))
+        loan_repayment = safe_adjustment_money(data.get('loan_repayment'))
+        uif = safe_adjustment_money(data.get('uif'))
+        paye = safe_adjustment_money(data.get('paye'))
+        net = gross + overtime + bonus + transport + reimbursable - uif - paye - loan_repayment
 
-    if all(abs(v) < 0.005 for v in [gross, overtime, transport, bonus, reimbursable, loan_repayment, uif, paye]):
-        return jsonify({"message": "Enter at least one adjustment amount."}), 400
+        if all(abs(v) < 0.005 for v in [gross, overtime, transport, bonus, reimbursable, loan_repayment, uif, paye]):
+            return jsonify({"status": "error", "message": "Enter at least one adjustment amount."}), 400
 
-    conn = get_db_connection()
-    emp = conn.execute('SELECT id, name FROM employees WHERE id=? AND company_id=?', (emp_id, session['company_id'])).fetchone()
-    if not emp:
-        conn.close()
-        return jsonify({"message": "Employee not found."}), 404
-    regular = conn.execute('''SELECT id FROM payslips
-                              WHERE company_id=? AND employee_id=? AND date LIKE ?
-                                AND COALESCE(payslip_type, 'regular')='regular'
-                              ORDER BY id DESC LIMIT 1''',
-                           (session['company_id'], emp_id, f"{target_month}%")).fetchone()
-    if not regular:
-        conn.close()
-        return jsonify({"message": "A finalised regular payslip must exist before an adjustment payslip can be created."}), 400
+        conn = get_db_connection()
+        try:
+            emp = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (emp_id, session['company_id'])).fetchone()
+            if not emp:
+                return jsonify({"status": "error", "message": "Employee not found."}), 404
+            regular = conn.execute("""SELECT * FROM payslips
+                                      WHERE company_id=? AND employee_id=? AND date LIKE ?
+                                        AND COALESCE(payslip_type, 'regular')='regular'
+                                      ORDER BY id DESC LIMIT 1""",
+                                   (session['company_id'], emp_id, f"{target_month}%")).fetchone()
+            if not regular:
+                return jsonify({"status": "error", "message": "A finalised regular payslip must exist before an adjustment can be applied."}), 400
 
-    conn.execute('''INSERT INTO payslips
-                    (company_id, employee_id, date, gross_salary, overtime, transport, bonus, reimbursable_expenses, loan_repayment, uif, paye, net_salary, payslip_type, adjustment_of_payslip_id, adjustment_reason, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'adjustment', ?, ?, ?)''',
-                 (session['company_id'], emp_id, date_str, gross, overtime, transport, bonus, reimbursable, loan_repayment, uif, paye, net, regular['id'], reason, datetime.now().isoformat(timespec='seconds')))
-    conn.commit()
-    conn.close()
-    log_action('HR & Payroll', 'Created Adjustment Payslip', f"Created adjustment payslip for Employee ID {emp_id} for {target_month}: {reason}")
-    return jsonify({"status": "success", "net": round(net, 2)})
+            new_gross = float(regular['gross_salary'] or 0) + gross
+            new_overtime = float(regular['overtime'] or 0) + overtime
+            new_transport = float(regular['transport'] or 0) + transport
+            new_bonus = float(regular['bonus'] or 0) + bonus
+            new_reimbursable = float(regular['reimbursable_expenses'] or 0) + reimbursable
+            new_loan = float(regular['loan_repayment'] or 0) + loan_repayment
+            new_uif = float(regular['uif'] or 0) + uif
+            new_paye = float(regular['paye'] or 0) + paye
+            new_net = new_gross + new_overtime + new_bonus + new_transport + new_reimbursable - new_uif - new_paye - new_loan
+
+            try:
+                existing_adjustment_note = regular['adjustment_reason'] or ''
+            except Exception:
+                existing_adjustment_note = ''
+            adjustment_note = _append_regular_payslip_adjustment_note(
+                existing_adjustment_note,
+                reason,
+                [
+                    ('Gross', gross), ('Overtime', overtime), ('Bonus', bonus), ('Transport', transport),
+                    ('Reimbursable', reimbursable), ('Loan repayment', loan_repayment), ('PAYE', paye), ('UIF', uif)
+                ],
+                net
+            )
+
+            conn.execute("""UPDATE payslips
+                            SET gross_salary=?, overtime=?, transport=?, bonus=?, reimbursable_expenses=?,
+                                loan_repayment=?, uif=?, paye=?, net_salary=?, adjustment_reason=?
+                            WHERE id=? AND company_id=?""",
+                         (new_gross, new_overtime, new_transport, new_bonus, new_reimbursable,
+                          new_loan, new_uif, new_paye, new_net, adjustment_note, regular['id'], session['company_id']))
+            conn.commit()
+
+            response = {
+                "status": "success",
+                "message": "Adjustment applied successfully. Finalized payslip updated.",
+                "net": round(net, 2),
+                "updated_net": round(new_net, 2),
+                "employee_id": emp_id,
+                "month": target_month
+            }
+
+            # Build the refreshed payslip payload where possible, but do not fail the adjustment if this refresh helper errors.
+            try:
+                company = conn.execute('SELECT * FROM companies WHERE id=?', (session['company_id'],)).fetchone()
+                updated_regular = conn.execute('SELECT * FROM payslips WHERE id=? AND company_id=?', (regular['id'], session['company_id'])).fetchone()
+                payload = build_saved_payslip_payload(conn, emp, company, updated_regular) if updated_regular else {}
+                if payload.get('payslip'):
+                    response['payslip'] = payload.get('payslip')
+                    response['raw'] = payload.get('raw')
+            except Exception as refresh_error:
+                app.logger.warning('Payslip adjustment applied, but refreshed payload could not be built: %s', refresh_error)
+
+            log_action('HR & Payroll', 'Updated Finalized Payslip', f"Applied payslip adjustment for Employee ID {emp_id} for {target_month}: {reason}")
+            return jsonify(response)
+        except Exception as db_error:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            app.logger.exception('Failed to apply finalized payslip adjustment')
+            return jsonify({"status": "error", "message": f"Unable to apply adjustment: {db_error}"}), 500
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        app.logger.exception('Unexpected finalized payslip adjustment error')
+        return jsonify({"status": "error", "message": f"Unable to apply adjustment: {exc}"}), 500
 
 
 UI19_SETTING_KEYS = [
