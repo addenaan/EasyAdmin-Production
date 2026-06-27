@@ -1095,7 +1095,12 @@
 
         async function refreshInvoicingLists() {
             try {
-                const res = await fetch(window.location.pathname + window.location.search, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                const refreshUrl = new URL(window.location.href);
+                refreshUrl.searchParams.set('_ea_refresh', Date.now().toString());
+                const res = await fetch(refreshUrl.pathname + refreshUrl.search, {
+                    cache: 'no-store',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest', 'Cache-Control': 'no-cache' }
+                });
                 if(!res.ok) throw new Error('Could not refresh invoicing data.');
                 const html = await res.text();
                 const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -1621,7 +1626,16 @@
             fetch('/api/save_invoice', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
-            }).then(() => { createInvModal.hide(); refreshInvoicingLists(); });
+            })
+            .then(r => r.json().catch(() => ({status:'error', message:'Server returned an invalid response.'})))
+            .then(res => {
+                if(res.status === 'error') return alert(res.message || 'Could not create invoice.');
+                createInvModal.hide();
+                const msg = res.message || (res.accounting_posted ? 'Invoice created and automatically posted to Accounting.' : 'Invoice created.');
+                alert(msg);
+                return refreshInvoicingLists();
+            })
+            .catch(err => alert('Could not create invoice: ' + err.message));
         }
 
         function renderDocumentItemRow(item) {
@@ -1837,8 +1851,9 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ amount: amount, reason: reason })
-                }).then(r => r.json()).then(res => {
+                }).then(r => r.json().catch(() => ({status:'error', message:'Server returned an invalid response.'}))).then(res => {
                     if(res.status === 'error') return alert(res.message || 'Could not issue credit note.');
+                    alert(res.message || (res.accounting_posted ? 'Credit note created and automatically posted to Accounting.' : 'Credit note created.'));
                     viewCreditNote(res.credit_id);
                     refreshInvoicingLists();
                 }).catch(err => alert('Could not issue credit note: ' + err.message));
@@ -2076,7 +2091,7 @@
             .then(r => r.json().then(data => ({ok: r.ok, data})).catch(() => ({ok: false, data: {status:'error', message:'Server returned an invalid response.'}})))
             .then(({ok, data}) => {
                 if(!ok || data.status === 'error') return alert(data.message || 'Could not convert quote.');
-                alert('Quote converted to invoice #' + data.invoice_id + '.');
+                alert(data.message || ('Quote converted to invoice #' + data.invoice_id + '.'));
                 refreshInvoicingLists();
             })
             .catch(err => alert('Could not convert quote: ' + err.message));

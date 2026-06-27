@@ -9274,11 +9274,25 @@ def save_invoice():
 
     if invoice_type == 'project' and project_id:
         cursor.execute("UPDATE projects SET status='Invoiced', updated_at=CURRENT_TIMESTAMP WHERE id=? AND company_id=?", (project_id, cid))
-            
+
+    accounting_result = _auto_post_invoice_to_accounting_if_enabled(conn, cid, inv_id)
+
     conn.commit()
     conn.close()
+    if accounting_result.get('posted'):
+        log_action('Accounting', 'Auto Posted Invoice', f"Invoice #{inv_id} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
+    else:
+        log_action('Accounting', 'Invoice Auto Post Skipped/Failed', f"Invoice #{inv_id}: {accounting_result.get('message')}")
     log_action('Invoicing', 'Created Invoice', f"Generated Invoice #{inv_id} for {client_name}")
-    return jsonify({"status": "success", "invoice_id": inv_id})
+    response_message = 'Invoice created and automatically posted to Accounting.' if accounting_result.get('posted') else 'Invoice created. ' + (accounting_result.get('message') or '')
+    return jsonify({
+        "status": "success",
+        "invoice_id": inv_id,
+        "message": response_message,
+        "accounting_posted": bool(accounting_result.get('posted')),
+        "accounting_journal_id": accounting_result.get('journal_id'),
+        "accounting_message": accounting_result.get('message')
+    })
 
 @app.route('/api/invoice/<int:inv_id>')
 def get_invoice(inv_id):
@@ -9475,10 +9489,24 @@ def credit_invoice(inv_id):
         for item in items:
             conn.execute('UPDATE bookings SET is_invoiced=0 WHERE id=? AND company_id=?', (item['booking_id'], cid))
 
+    accounting_result = _auto_post_credit_note_to_accounting_if_enabled(conn, cid, credit_id)
+
     conn.commit()
     conn.close()
+    if accounting_result.get('posted'):
+        log_action('Accounting', 'Auto Posted Credit Note', f"Credit Note #{credit_id} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
+    else:
+        log_action('Accounting', 'Credit Note Auto Post Skipped/Failed', f"Credit Note #{credit_id}: {accounting_result.get('message')}")
     log_action('Invoicing', 'Issued Credit Note', f"Credited R{amount:.2f} on Invoice #{inv_id}.")
-    return jsonify({'status': 'success', 'credit_id': credit_id})
+    response_message = 'Credit note created and automatically posted to Accounting.' if accounting_result.get('posted') else 'Credit note created. ' + (accounting_result.get('message') or '')
+    return jsonify({
+        'status': 'success',
+        'credit_id': credit_id,
+        'message': response_message,
+        'accounting_posted': bool(accounting_result.get('posted')),
+        'accounting_journal_id': accounting_result.get('journal_id'),
+        'accounting_message': accounting_result.get('message')
+    })
 
 
 
@@ -9788,10 +9816,25 @@ def convert_quote_to_invoice(q_id):
 
     conn.execute("UPDATE quotes SET status='Converted', converted_invoice_id=?, converted_date=? WHERE id=? AND company_id=?",
                  (inv_id, invoice_date, q_id, cid))
+
+    accounting_result = _auto_post_invoice_to_accounting_if_enabled(conn, cid, inv_id)
+
     conn.commit()
     conn.close()
+    if accounting_result.get('posted'):
+        log_action('Accounting', 'Auto Posted Converted Invoice', f"Converted Invoice #{inv_id} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
+    else:
+        log_action('Accounting', 'Converted Invoice Auto Post Skipped/Failed', f"Converted Invoice #{inv_id}: {accounting_result.get('message')}")
     log_action('Invoicing', 'Converted Quote to Invoice', f"Converted Quote #{q_id} to Invoice #{inv_id}")
-    return jsonify({"status": "success", "invoice_id": inv_id})
+    response_message = 'Quote converted to invoice and automatically posted to Accounting.' if accounting_result.get('posted') else 'Quote converted to invoice. ' + (accounting_result.get('message') or '')
+    return jsonify({
+        "status": "success",
+        "invoice_id": inv_id,
+        "message": response_message,
+        "accounting_posted": bool(accounting_result.get('posted')),
+        "accounting_journal_id": accounting_result.get('journal_id'),
+        "accounting_message": accounting_result.get('message')
+    })
 
 
 
@@ -10863,6 +10906,54 @@ def post_credit_note_to_accounting_record(conn, company_id, credit_id):
                     WHERE id=? AND company_id=?''',
                  (journal_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), session.get('username'), credit_id, company_id))
     return journal_id
+
+
+
+
+def _auto_post_invoice_to_accounting_if_enabled(conn, company_id, invoice_id):
+    """Post a newly-created invoice to Accounting without blocking invoice creation.
+
+    Auto-posting intentionally uses the same posting routine as the manual
+    "Post to Accounting" button. It no longer skips posting because of a stale
+    company/module flag; if Accounting setup is incomplete, the invoice still
+    saves and the returned message explains the posting issue.
+    """
+    try:
+        conn.execute('SAVEPOINT auto_invoice_accounting')
+        journal_id = post_invoice_to_accounting_record(conn, company_id, invoice_id)
+        conn.execute('RELEASE SAVEPOINT auto_invoice_accounting')
+        return {'posted': True, 'journal_id': journal_id, 'message': f'Invoice automatically posted to Accounting Journal #{journal_id}.'}
+    except Exception as exc:
+        try:
+            conn.execute('ROLLBACK TO SAVEPOINT auto_invoice_accounting')
+            conn.execute('RELEASE SAVEPOINT auto_invoice_accounting')
+        except Exception:
+            pass
+        try:
+            conn.execute("UPDATE invoices SET accounting_status='not_posted', accounting_journal_id=NULL, accounting_posted_at=NULL, accounting_posted_by=NULL WHERE id=? AND company_id=?", (invoice_id, company_id))
+        except Exception:
+            pass
+        return {'posted': False, 'journal_id': None, 'message': f'Invoice was created but could not be posted to Accounting automatically: {exc}'}
+
+
+def _auto_post_credit_note_to_accounting_if_enabled(conn, company_id, credit_id):
+    """Post a newly-created credit note to Accounting without blocking credit creation."""
+    try:
+        conn.execute('SAVEPOINT auto_credit_note_accounting')
+        journal_id = post_credit_note_to_accounting_record(conn, company_id, credit_id)
+        conn.execute('RELEASE SAVEPOINT auto_credit_note_accounting')
+        return {'posted': True, 'journal_id': journal_id, 'message': f'Credit note automatically posted to Accounting Journal #{journal_id}.'}
+    except Exception as exc:
+        try:
+            conn.execute('ROLLBACK TO SAVEPOINT auto_credit_note_accounting')
+            conn.execute('RELEASE SAVEPOINT auto_credit_note_accounting')
+        except Exception:
+            pass
+        try:
+            conn.execute("UPDATE invoice_credit_notes SET accounting_status='not_posted', accounting_journal_id=NULL, accounting_posted_at=NULL, accounting_posted_by=NULL WHERE id=? AND company_id=?", (credit_id, company_id))
+        except Exception:
+            pass
+        return {'posted': False, 'journal_id': None, 'message': f'Credit note was created but could not be posted to Accounting automatically: {exc}'}
 
 
 def _accounting_accounts(conn, company_id, active_only=False):
