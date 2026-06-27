@@ -11283,6 +11283,15 @@ def accounting_accounts_api():
     if not code or not name:
         conn.close()
         return jsonify({'status': 'error', 'message': 'Account code and name are required.'}), 400
+
+    duplicate = conn.execute('SELECT id FROM accounting_accounts WHERE company_id=? AND account_code=?', (cid, code)).fetchone()
+    if duplicate:
+        duplicate_id = int(dict(duplicate).get('id') or 0)
+        current_id = int(account_id or 0) if str(account_id or '').strip() else 0
+        if not current_id or duplicate_id != current_id:
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'Code already exist'}), 409
+
     try:
         if account_id:
             conn.execute('''UPDATE accounting_accounts SET account_code=?, account_name=?, account_type=?, report_section=?, normal_balance=?, cash_flow_category=?, is_cash_equivalent=?, active=?
@@ -11291,12 +11300,15 @@ def accounting_accounts_api():
             conn.execute('''INSERT INTO accounting_accounts (company_id, account_code, account_name, account_type, report_section, normal_balance, cash_flow_category, is_cash_equivalent, active)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', (cid, code, name, acc_type, section, normal, cf_category, is_cash, active))
         conn.commit()
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, sqlite3.OperationalError) as exc:
+        message = str(exc).lower()
         conn.close()
-        return jsonify({'status': 'error', 'message': 'An account with this code already exists.'}), 400
+        if 'unique' in message or 'duplicate' in message or 'account_code' in message:
+            return jsonify({'status': 'error', 'message': 'Code already exist'}), 409
+        return jsonify({'status': 'error', 'message': 'Account could not be saved.'}), 500
     conn.close()
     log_action('Accounting', 'Saved Account', f'Saved chart of accounts item {code} - {name}.')
-    return jsonify({'status': 'success'})
+    return jsonify({'status': 'success', 'message': 'Chart of Accounts item saved.'})
 
 
 @app.route('/api/accounting/settings', methods=['GET', 'POST'])
