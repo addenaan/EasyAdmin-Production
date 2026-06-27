@@ -9719,6 +9719,10 @@ def _build_billing_pdf_payload(kind, doc_id):
         except Exception:
             formatted_num = f"{prefix}{doc['id']:04d}"
         totals = get_invoice_financial_totals(conn, cid, doc_id)
+        credit_notes = [dict(cn) for cn in conn.execute(
+            'SELECT id, credit_date, amount, reason FROM invoice_credit_notes WHERE invoice_id=? AND company_id=? ORDER BY credit_date ASC, id ASC',
+            (doc_id, cid)
+        ).fetchall()]
         title = 'TAX INVOICE'
         meta_label = 'Due Date'
         meta_value = doc['due_date'] or 'On Receipt'
@@ -9736,10 +9740,11 @@ def _build_billing_pdf_payload(kind, doc_id):
             totals_rows.append(('Amount Due Now', doc['amount_due_now']))
         if doc['balance_remaining'] is not None:
             totals_rows.append(('Balance Remaining', doc['balance_remaining']))
-        if totals.get('paid', 0) > 0 or totals.get('credited', 0) > 0:
+        if totals.get('credited', 0) > 0:
+            totals_rows.append(('Credit Notes Applied', -float(totals.get('credited', 0) or 0)))
+        if totals.get('paid', 0) > 0:
             totals_rows.append(('Total Paid', totals.get('paid', 0)))
-            if totals.get('credited', 0) > 0:
-                totals_rows.append(('Total Credited', totals.get('credited', 0)))
+        if totals.get('paid', 0) > 0 or totals.get('credited', 0) > 0:
             totals_rows.append(('Outstanding Balance', totals.get('outstanding', 0)))
         project_note = ''
         if dict(doc).get('project_id'):
@@ -9795,6 +9800,7 @@ def _build_billing_pdf_payload(kind, doc_id):
         'client_email': client_email,
         'client_lines': client_lines,
         'items': [dict(i) for i in items],
+        'credit_notes': credit_notes if kind == 'invoice' else [],
         'totals_rows': totals_rows,
         'additional_info': additional_info,
         'filename': f"{title.replace(' ', '_')}_{formatted_num}.pdf"

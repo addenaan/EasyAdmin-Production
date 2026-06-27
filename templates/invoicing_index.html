@@ -733,6 +733,7 @@
                                     <tr class="grand-total"><td>TOTAL INVOICE</td><td class="amount-col" id="docTotal"></td></tr>
                                     <tr class="text-muted" id="docDueNowRow"><td>Amount Due Now</td><td class="amount-col text-success" id="docDueNow"></td></tr>
                                     <tr class="text-muted" id="docBalanceRow"><td>Balance Remaining</td><td class="amount-col" id="docBalanceRemaining"></td></tr>
+                                    <tr class="text-muted" id="docCreditedRow" style="display:none;"><td>Credit Notes Applied</td><td class="amount-col text-danger" id="docTotalCredited"></td></tr>
                                     <tr class="text-muted" id="docPaidRow" style="display:none;"><td>Total Paid</td><td class="amount-col text-success" id="docTotalPaid"></td></tr>
                                     <tr class="text-muted" id="docOutstandingRow" style="display:none;"><td>Outstanding Balance</td><td class="amount-col" id="docOutstanding"></td></tr>
                                 </table>
@@ -1692,15 +1693,15 @@
                 document.getElementById('docBalanceRow').style.display = '';
                 document.getElementById('docDueNow').innerText = money(i.amount_due_now || i.total || 0);
                 document.getElementById('docBalanceRemaining').innerText = money(i.balance_remaining || 0);
-                if(parseFloat(i.total_paid || 0) > 0 || parseFloat(i.total_credited || 0) > 0) {
-                    document.getElementById('docPaidRow').style.display = '';
-                    document.getElementById('docOutstandingRow').style.display = '';
-                    document.getElementById('docTotalPaid').innerText = money(i.total_paid || 0);
-                    document.getElementById('docOutstanding').innerText = money(i.outstanding_balance || 0);
-                } else {
-                    document.getElementById('docPaidRow').style.display = 'none';
-                    document.getElementById('docOutstandingRow').style.display = 'none';
-                }
+                const totalPaid = parseFloat(i.total_paid || 0);
+                const totalCredited = parseFloat(i.total_credited || 0);
+                const hasAdjustments = totalPaid > 0 || totalCredited > 0;
+                document.getElementById('docCreditedRow').style.display = totalCredited > 0 ? '' : 'none';
+                document.getElementById('docPaidRow').style.display = totalPaid > 0 ? '' : 'none';
+                document.getElementById('docOutstandingRow').style.display = hasAdjustments ? '' : 'none';
+                document.getElementById('docTotalCredited').innerText = totalCredited > 0 ? '-' + money(totalCredited) : '';
+                document.getElementById('docTotalPaid').innerText = totalPaid > 0 ? money(totalPaid) : '';
+                document.getElementById('docOutstanding').innerText = hasAdjustments ? money(i.outstanding_balance || 0) : '';
                 
                 const infoBox = document.getElementById('docAdditionalInfo');
                 const projectNote = i.invoice_type === 'project' && i.project_name ? `Project Invoice: ${i.project_name}${i.project_code ? ' (' + i.project_code + ')' : ''}` : '';
@@ -1776,6 +1777,8 @@
                 document.getElementById('docTotal').innerText = money(r.amount || 0);
                 document.getElementById('docDueNowRow').style.display = 'none';
                 document.getElementById('docBalanceRow').style.display = 'none';
+                document.getElementById('docCreditedRow').style.display = 'none';
+                document.getElementById('docTotalCredited').innerText = '';
                 document.getElementById('docPaidRow').style.display = '';
                 document.getElementById('docOutstandingRow').style.display = '';
                 document.getElementById('docTotalPaid').innerText = money(data.total_paid || 0);
@@ -1871,6 +1874,8 @@
                 document.getElementById('docTotal').innerText = '-' + money(cn.amount || 0);
                 document.getElementById('docDueNowRow').style.display = 'none';
                 document.getElementById('docBalanceRow').style.display = 'none';
+                document.getElementById('docCreditedRow').style.display = 'none';
+                document.getElementById('docTotalCredited').innerText = '';
                 document.getElementById('docPaidRow').style.display = '';
                 document.getElementById('docOutstandingRow').style.display = '';
                 document.getElementById('docTotalPaid').innerText = money(data.total_paid || 0);
@@ -2030,6 +2035,8 @@
                 document.getElementById('docTotal').innerText = money(q.total);
                 document.getElementById('docDueNowRow').style.display = 'none';
                 document.getElementById('docBalanceRow').style.display = 'none';
+                document.getElementById('docCreditedRow').style.display = 'none';
+                document.getElementById('docTotalCredited').innerText = '';
                 document.getElementById('docPaidRow').style.display = 'none';
                 document.getElementById('docOutstandingRow').style.display = 'none';
 
