@@ -10910,6 +10910,42 @@ def post_credit_note_to_accounting_record(conn, company_id, credit_id):
 
 
 
+def _run_accounting_post_in_safe_transaction(conn, post_callable):
+    """Run an automatic accounting post safely on SQLite and PostgreSQL.
+
+    PostgreSQL connections in Easy Admin run with autocommit enabled so that
+    migration/introspection errors do not leave the connection in an aborted
+    state. Because of that, SAVEPOINT cannot be used unless we explicitly open
+    a transaction block first. SQLite already has the invoice/credit-note save
+    flow in a transaction, so a SAVEPOINT is still the safest option there.
+    """
+    if is_postgres_enabled():
+        try:
+            conn.execute('BEGIN')
+            result = post_callable()
+            conn.execute('COMMIT')
+            return result
+        except Exception:
+            try:
+                conn.execute('ROLLBACK')
+            except Exception:
+                pass
+            raise
+
+    conn.execute('SAVEPOINT auto_accounting_post')
+    try:
+        result = post_callable()
+        conn.execute('RELEASE SAVEPOINT auto_accounting_post')
+        return result
+    except Exception:
+        try:
+            conn.execute('ROLLBACK TO SAVEPOINT auto_accounting_post')
+            conn.execute('RELEASE SAVEPOINT auto_accounting_post')
+        except Exception:
+            pass
+        raise
+
+
 def _auto_post_invoice_to_accounting_if_enabled(conn, company_id, invoice_id):
     """Post a newly-created invoice to Accounting without blocking invoice creation.
 
@@ -10919,16 +10955,12 @@ def _auto_post_invoice_to_accounting_if_enabled(conn, company_id, invoice_id):
     saves and the returned message explains the posting issue.
     """
     try:
-        conn.execute('SAVEPOINT auto_invoice_accounting')
-        journal_id = post_invoice_to_accounting_record(conn, company_id, invoice_id)
-        conn.execute('RELEASE SAVEPOINT auto_invoice_accounting')
+        journal_id = _run_accounting_post_in_safe_transaction(
+            conn,
+            lambda: post_invoice_to_accounting_record(conn, company_id, invoice_id)
+        )
         return {'posted': True, 'journal_id': journal_id, 'message': f'Invoice automatically posted to Accounting Journal #{journal_id}.'}
     except Exception as exc:
-        try:
-            conn.execute('ROLLBACK TO SAVEPOINT auto_invoice_accounting')
-            conn.execute('RELEASE SAVEPOINT auto_invoice_accounting')
-        except Exception:
-            pass
         try:
             conn.execute("UPDATE invoices SET accounting_status='not_posted', accounting_journal_id=NULL, accounting_posted_at=NULL, accounting_posted_by=NULL WHERE id=? AND company_id=?", (invoice_id, company_id))
         except Exception:
@@ -10939,16 +10971,12 @@ def _auto_post_invoice_to_accounting_if_enabled(conn, company_id, invoice_id):
 def _auto_post_credit_note_to_accounting_if_enabled(conn, company_id, credit_id):
     """Post a newly-created credit note to Accounting without blocking credit creation."""
     try:
-        conn.execute('SAVEPOINT auto_credit_note_accounting')
-        journal_id = post_credit_note_to_accounting_record(conn, company_id, credit_id)
-        conn.execute('RELEASE SAVEPOINT auto_credit_note_accounting')
+        journal_id = _run_accounting_post_in_safe_transaction(
+            conn,
+            lambda: post_credit_note_to_accounting_record(conn, company_id, credit_id)
+        )
         return {'posted': True, 'journal_id': journal_id, 'message': f'Credit note automatically posted to Accounting Journal #{journal_id}.'}
     except Exception as exc:
-        try:
-            conn.execute('ROLLBACK TO SAVEPOINT auto_credit_note_accounting')
-            conn.execute('RELEASE SAVEPOINT auto_credit_note_accounting')
-        except Exception:
-            pass
         try:
             conn.execute("UPDATE invoice_credit_notes SET accounting_status='not_posted', accounting_journal_id=NULL, accounting_posted_at=NULL, accounting_posted_by=NULL WHERE id=? AND company_id=?", (credit_id, company_id))
         except Exception:
