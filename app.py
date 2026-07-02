@@ -2542,6 +2542,32 @@ def analyse_employee_hours_for_period(conn, company_id, employee, start_date, en
     warning = get_bcea_hours_warning(hours['ordinary_hours'], hours['overtime_hours'], employee['emp_type'])
     return hours, warning
 
+def is_employee_booked_on_date(conn, company_id, employee_name, target_date, exclude_booking_id=None):
+    """Return True when an employee already has a booking on the selected date.
+
+    Bookings can contain one staff name or a comma-separated staff list, so this
+    check compares cleaned names rather than relying on a broad SQL LIKE match.
+    """
+    try:
+        target_date_only = as_date(target_date)
+        target_date_str = target_date_only.strftime('%Y-%m-%d')
+    except Exception:
+        return False
+    target_name = (employee_name or '').strip().lower()
+    if not target_name:
+        return False
+    rows = conn.execute('''SELECT id, employee FROM bookings
+                           WHERE company_id=? AND substr(start, 1, 10)=?''',
+                        (company_id, target_date_str)).fetchall()
+    exclude_id = str(exclude_booking_id or '').strip()
+    for row in rows:
+        if exclude_id and str(row['id']) == exclude_id:
+            continue
+        names = [n.strip().lower() for n in (row['employee'] or '').split(',') if n.strip()]
+        if target_name in names:
+            return True
+    return False
+
 def get_booking_staff_hours_summary(conn, company_id, employee, target_date, proposed_overtime=0, exclude_booking_id=None, include_proposed=False):
     target_date_only = as_date(target_date)
     week_start, week_end = get_week_bounds(target_date_only)
@@ -2580,6 +2606,7 @@ def get_booking_staff_hours_summary(conn, company_id, employee, target_date, pro
         'workday_hours': get_employee_workday_hours(employee),
         'requested_date': target_date_only.strftime('%Y-%m-%d'),
         'is_on_leave': target_date_only.strftime('%Y-%m-%d') in leave_dates,
+        'is_booked_on_date': is_employee_booked_on_date(conn, company_id, employee['name'], target_date_only, exclude_booking_id),
         'week_start': week_start.strftime('%Y-%m-%d'),
         'week_end': week_end.strftime('%Y-%m-%d'),
         'week_hours': round(week_hours['total_hours'], 2),
@@ -2869,6 +2896,25 @@ def inject_session_timeout_script(response):
         return response
     script = ('\n<script defer src="/static/session-timeout.js?v=20260625-timeout15-desktop" '
               'data-easyadmin-session-timeout data-timeout-seconds="%s"></script>\n') % DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS
+    body = body.replace('</body>', script + '</body>', 1)
+    response.set_data(body)
+    response.headers['Content-Length'] = str(len(response.get_data()))
+    return response
+
+
+@app.after_request
+def inject_easyadmin_live_refresh_script(response):
+    if 'logged_in' not in session:
+        return response
+    if response.status_code != 200 or response.is_streamed or response.mimetype != 'text/html':
+        return response
+    try:
+        body = response.get_data(as_text=True)
+    except Exception:
+        return response
+    if '</body>' not in body or 'easyadmin-live-refresh.js' in body:
+        return response
+    script = '\n<script defer src="/static/easyadmin-live-refresh.js?v=20260630-live-refresh"></script>\n'
     body = body.replace('</body>', script + '</body>', 1)
     response.set_data(body)
     response.headers['Content-Length'] = str(len(response.get_data()))

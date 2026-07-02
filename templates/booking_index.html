@@ -25,6 +25,8 @@
         .badge-adhoc { background-color: #6c757d; }
         #calendar-view { display: none; }
         .wizard-client-btn { text-align: left; }
+        .wizard-emp-row.staff-hidden-by-date { display: none !important; }
+        .staff-month-over-limit { background-color: #dc3545 !important; color: #fff !important; }
     </style>
 </head>
 <body>
@@ -139,10 +141,16 @@
 
                     <div id="step2" style="display:none;">
                         
-                        <div class="form-check mb-3 p-3 bg-white border rounded shadow-sm border-primary">
+                        <div class="form-check mb-2 p-3 bg-white border rounded shadow-sm border-primary">
                             <input class="form-check-input ms-1 border-primary" type="checkbox" id="wizardSplit" onchange="toggleWizMode()" checked>
                             <label class="form-check-label ms-2 fw-bold text-primary fs-6" for="wizardSplit">Create separate bookings for each employee</label>
                             <div class="small text-muted ms-2 mt-1">Checked: Set transport & overtime individually per staff member. Unchecked: Group staff into a single shift with shared master logistics.</div>
+                        </div>
+
+                        <div class="form-check mb-3 p-3 bg-white border rounded shadow-sm border-secondary">
+                            <input class="form-check-input ms-1 border-secondary" type="checkbox" id="wizardHideBookedEmployees" onchange="refreshWizardStaffAvailability(); filterWizardEmps();">
+                            <label class="form-check-label ms-2 fw-bold text-secondary fs-6" for="wizardHideBookedEmployees">Hide employees already booked on this date</label>
+                            <div class="small text-muted ms-2 mt-1">When checked, staff with an existing booking on the selected date are removed from this selection list.</div>
                         </div>
 
                         <div id="globalLogistics" class="bg-white border border-dark rounded p-3 mb-4 shadow-sm" style="display:none;">
@@ -176,7 +184,7 @@
                         <input type="text" id="wizardEmpSearch" class="form-control border-primary mb-3" placeholder="Search {{ employee_label|lower }}s..." onkeyup="filterWizardEmps()">
                         <div class="list-group shadow-sm border" id="wizardEmpList" style="max-height: 300px; overflow-y: auto;">
                             {% for e in employees %}
-                            <div class="list-group-item wizard-emp-row py-3">
+                            <div class="list-group-item wizard-emp-row py-3" data-contract-type="{{ e.emp_type or '' }}">
                                 <div class="form-check fw-bold text-dark fs-5 mb-0">
                                     <input class="form-check-input wizard-emp-cb border-dark" type="checkbox" value="{{ e.name }}" id="empCb_{{ loop.index }}" onchange="toggleEmpLogistics('{{ loop.index }}'); refreshWizardEmployeeHours(this.closest('.wizard-emp-row'));">
                                     <label class="form-check-label" style="cursor:pointer;" for="empCb_{{ loop.index }}">{{ e.name }}</label>
@@ -1104,10 +1112,14 @@
 
         function filterWizardEmps() {
             const term = document.getElementById('wizardEmpSearch').value.toLowerCase();
+            const hideBooked = document.getElementById('wizardHideBookedEmployees')?.checked;
             document.querySelectorAll('.wizard-emp-row').forEach(row => {
                 const name = row.querySelector('.form-check-label').innerText.toLowerCase();
                 const onLeave = row.dataset.onLeave === '1';
-                row.style.display = (!onLeave && name.includes(term)) ? 'block' : 'none';
+                const alreadyBooked = row.dataset.bookedOnDate === '1';
+                const shouldHide = onLeave || (hideBooked && alreadyBooked) || !name.includes(term);
+                row.style.display = shouldHide ? 'none' : 'block';
+                row.classList.toggle('staff-hidden-by-date', Boolean(hideBooked && alreadyBooked));
             });
         }
 
@@ -1161,8 +1173,13 @@
             return `<span class="badge ${cls} me-1" title="${titleParts.join(' | ')}">${label}: ${hours} hrs</span>`;
         }
 
-        function staffMonthBadge(hours) {
-            return `<span class="badge bg-success me-1">Month: ${hours} hrs</span>`;
+        function staffMonthBadge(hours, empType) {
+            const numericHours = parseFloat(hours || 0) || 0;
+            const contractType = String(empType || '').trim().toLowerCase();
+            const overContractLimit = contractType === 'contract <25 hrs' && numericHours > 25;
+            const cls = overContractLimit ? 'bg-danger staff-month-over-limit' : 'bg-success';
+            const title = overContractLimit ? 'Contract <25 Hrs employee has more than 25 monthly hours.' : 'Monthly hours';
+            return `<span class="badge ${cls} me-1" title="${title}">Month: ${hours} hrs</span>`;
         }
 
         function refreshWizardStaffAvailability() {
@@ -1180,17 +1197,26 @@
                         const info = byName[cb.value];
                         if (!info) return;
                         row.dataset.onLeave = info.is_on_leave ? '1' : '0';
+                        row.dataset.bookedOnDate = info.is_booked_on_date ? '1' : '0';
+                        row.dataset.contractType = info.emp_type || row.dataset.contractType || '';
+                        const hideBooked = document.getElementById('wizardHideBookedEmployees')?.checked;
+                        const panel = row.querySelector('.logistics-panel');
                         if (info.is_on_leave) {
                             cb.checked = false;
                             cb.disabled = true;
                             row.style.display = 'none';
-                            const panel = row.querySelector('.logistics-panel');
                             if (panel) panel.style.display = 'none';
                             if (summary) summary.innerHTML = '<span class="badge bg-warning text-dark">ON LEAVE</span>';
+                        } else if (info.is_booked_on_date && hideBooked) {
+                            cb.checked = false;
+                            cb.disabled = true;
+                            if (panel) panel.style.display = 'none';
+                            if (summary) summary.innerHTML = '<span class="badge bg-secondary">BOOKED ON THIS DATE</span>';
                         } else {
                             cb.disabled = false;
                             if (summary && !cb.checked) {
-                                summary.innerHTML = `${staffStatusBadge(info.week_status, 'Week', info.week_hours, info.week_start, info.week_end, info.requested_date)} ${staffMonthBadge(info.month_hours)}<div class="small text-muted mt-1">Week: ${info.week_start} to ${info.week_end}</div>`;
+                                const bookedNote = info.is_booked_on_date ? '<span class="badge bg-secondary me-1">Already booked</span>' : '';
+                                summary.innerHTML = `${staffStatusBadge(info.week_status, 'Week', info.week_hours, info.week_start, info.week_end, info.requested_date)} ${staffMonthBadge(info.month_hours, info.emp_type)} ${bookedNote}<div class="small text-muted mt-1">Week: ${info.week_start} to ${info.week_end}</div>`;
                             }
                         }
                     });
@@ -1228,8 +1254,12 @@
                         summary.innerHTML = '<span class="badge bg-warning text-dark">ON LEAVE</span>';
                         return;
                     }
+                    row.dataset.bookedOnDate = info.is_booked_on_date ? '1' : '0';
+                    row.dataset.contractType = info.emp_type || row.dataset.contractType || '';
                     const messages = (info.week_messages || []).length ? `<div class="small text-muted mt-1">${info.week_messages.join(' | ')}</div>` : '';
-                    summary.innerHTML = `${staffStatusBadge(info.week_status, 'Week', info.week_hours, info.week_start, info.week_end, info.requested_date)} ${staffMonthBadge(info.month_hours)}<div class="small text-muted mt-1">Week: ${info.week_start} to ${info.week_end}</div>${messages}`;
+                    const bookedNote = info.is_booked_on_date ? '<span class="badge bg-secondary me-1">Already booked</span>' : '';
+                    summary.innerHTML = `${staffStatusBadge(info.week_status, 'Week', info.week_hours, info.week_start, info.week_end, info.requested_date)} ${staffMonthBadge(info.month_hours, info.emp_type)} ${bookedNote}<div class="small text-muted mt-1">Week: ${info.week_start} to ${info.week_end}</div>${messages}`;
+                    filterWizardEmps();
                 });
         }
 
@@ -1248,7 +1278,7 @@
             });
             
             document.getElementById('wizardEmpSearch').value = '';
-            document.querySelectorAll('.wizard-emp-row').forEach(row => { row.dataset.onLeave = '0'; row.style.display = 'block'; });
+            document.querySelectorAll('.wizard-emp-row').forEach(row => { row.dataset.onLeave = '0'; row.dataset.bookedOnDate = '0'; row.classList.remove('staff-hidden-by-date'); row.style.display = 'block'; });
             document.querySelectorAll('.wizard-emp-cb').forEach(cb => { cb.checked = false; cb.disabled = false; });
             document.querySelectorAll('.staff-hours-summary').forEach(h => h.innerHTML = 'Select staff to view week/month hours.');
             document.querySelectorAll('.logistics-panel').forEach(p => p.style.display = 'none');
@@ -1256,6 +1286,8 @@
             document.querySelectorAll('.emp-overtime').forEach(i => i.value = '0');
             
             document.getElementById('wizardSplit').checked = true;
+            const hideBookedEl = document.getElementById('wizardHideBookedEmployees');
+            if (hideBookedEl) hideBookedEl.checked = false;
             document.getElementById('globalTransport').value = '';
             document.getElementById('globalOvertime').value = '0';
             toggleWizMode();
@@ -1469,6 +1501,8 @@
                     newBookingModal.hide();
                     calendar.refetchEvents();
                     loadDashboardLists();
+                    if (window.EasyAdminRefresh) window.EasyAdminRefresh.markChanged('booking-edit');
+                    refreshWizardStaffAvailability();
                 }).catch(err => alert(err.message)).finally(() => {
                     btn.disabled = false;
                     btn.innerText = 'Save Changes';
@@ -1497,6 +1531,8 @@
                 newBookingModal.hide(); 
                 calendar.refetchEvents(); 
                 loadDashboardLists(); 
+                if (window.EasyAdminRefresh) window.EasyAdminRefresh.markChanged('booking-create');
+                refreshWizardStaffAvailability();
             }).catch(err => alert(err.message)).finally(() => {
                 btn.disabled = false;
                 btn.innerText = 'Finish';

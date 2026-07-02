@@ -1,9 +1,10 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v8-timeout-desktop15-mobile-none';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v9-live-refresh';
 const APP_SHELL = [
   '/mobile/offline',
   '/static/mobile.css?v=20260622',
   '/static/mobile.js?v=20260622',
   '/static/easyadmin-formatters.js?v=20260622-format',
+  '/static/easyadmin-live-refresh.js?v=20260630-live-refresh',
   '/static/session-timeout.js?v=20260625-timeout15-desktop',
   '/static/staff-portal.css?v=20260623-staff2',
   '/static/staff-portal.js?v=20260623-staff2',
