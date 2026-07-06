@@ -552,13 +552,16 @@
                     </div>
 
                     <div id="projectInvoiceNotice" class="alert alert-dark small" style="display:none;">
-                        Select a project above. The invoice will use the project fixed price as the line item. Use Amount Due Now for deposits or staged upfront payments.
+                        Select a project above. The fixed project price will populate as an editable invoice line. You can also add extra project costs or select services from the service list before generating the invoice.
                     </div>
 
                     <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-2">
                         <h6 class="fw-bold text-dark mb-0" id="invCustomLinesHeading">2. Custom Line Items (Optional)</h6>
                         <button class="btn btn-sm btn-outline-secondary" id="addInvRowBtn" onclick="addCustomInvRow()">+ Add Row</button>
                     </div>
+                    <datalist id="invoiceServiceList">
+                        {% for s in services %}<option value="{{ s.name }}">{{ s.name }} - {{ (s.client_price or 0)|fmt_money }}</option>{% endfor %}
+                    </datalist>
                     <div id="invCustomRows" class="mb-4"></div>
 
                     <div class="row">
@@ -1164,9 +1167,10 @@
             rebuildQuoteServicePriceMap();
             renderServiceMarginsTable(quoteServices);
             const serviceList = document.getElementById('quoteServiceList');
-            if(serviceList) {
-                serviceList.innerHTML = quoteServices.map(s => `<option value="${escapeJsHtml(s.name || '')}">${escapeJsHtml(s.name || '')} - ${money(s.client_price)}</option>`).join('');
-            }
+            const invoiceServiceList = document.getElementById('invoiceServiceList');
+            const serviceOptionsHtml = quoteServices.map(s => `<option value="${escapeJsHtml(s.name || '')}">${escapeJsHtml(s.name || '')} - ${money(s.client_price)}</option>`).join('');
+            if(serviceList) serviceList.innerHTML = serviceOptionsHtml;
+            if(invoiceServiceList) invoiceServiceList.innerHTML = serviceOptionsHtml;
         }
 
         async function refreshInvoicingStaticData() {
@@ -1332,11 +1336,13 @@
             document.getElementById('standardInvoiceBookingsWrap').style.display = isProject ? 'none' : '';
             document.getElementById('projectInvoiceSelectWrap').style.display = isProject ? '' : 'none';
             document.getElementById('projectInvoiceNotice').style.display = isProject ? '' : 'none';
-            document.getElementById('invCustomLinesHeading').innerText = isProject ? '2. Project Invoice Line' : '2. Custom Line Items (Optional)';
-            document.getElementById('addInvRowBtn').style.display = isProject ? 'none' : '';
+            document.getElementById('invCustomLinesHeading').innerText = isProject ? '2. Project Invoice Lines & Additional Costs' : '2. Custom Line Items (Optional)';
+            const addRowBtn = document.getElementById('addInvRowBtn');
+            addRowBtn.style.display = '';
+            addRowBtn.innerText = isProject ? '+ Add Project Cost / Service' : '+ Add Row';
             document.getElementById('invCustomRows').innerHTML = '';
             if(isProject) {
-                document.getElementById('uninvoicedBody').innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">Project invoice selected.</td></tr>';
+                document.getElementById('uninvoicedBody').innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">Project invoice selected.</td></tr>';
                 populateProjectOptionsForClient();
                 populateProjectInvoiceLine();
             } else {
@@ -1376,7 +1382,7 @@
             const code = project.project_code ? ` (${project.project_code})` : '';
             div.innerHTML = `
                 <input type="date" class="form-control form-control-sm date-input" style="width: 140px;" value="${project.start_date || today}">
-                <input type="text" class="form-control form-control-sm desc-input" value="Project: ${escapeAttr((project.project_name || 'Project') + code)}" readonly>
+                <input type="text" class="form-control form-control-sm desc-input" value="Project: ${escapeAttr((project.project_name || 'Project') + code)}" placeholder="Project invoice description...">
                 <input type="number" class="form-control form-control-sm qty-input text-end" style="width: 80px;" min="0.01" step="0.01" value="1" readonly oninput="clearManualLineTotal(this); calculateInvTotals()">
                 <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" value="${(parseFloat(project.fixed_price || 0)).toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()">
                 <input type="number" class="form-control form-control-sm line-total-display text-end" style="width: 120px;" min="0" step="0.01" value="${(parseFloat(project.fixed_price || 0)).toFixed(2)}" oninput="setManualInvoiceLineTotal(this)" title="Line Total">
@@ -1425,12 +1431,24 @@
             });
         }
 
+        function applyInvoiceServiceSelection(descInput) {
+            const row = descInput.closest('.custom-inv-row');
+            if(!row) return;
+            const priceInput = row.querySelector('.price-input');
+            const key = String(descInput.value || '').trim().toLowerCase();
+            if(priceInput && Object.prototype.hasOwnProperty.call(quoteServicePriceMap, key)) {
+                priceInput.value = quoteServicePriceMap[key].toFixed(2);
+                clearManualLineTotal(priceInput);
+                calculateInvTotals();
+            }
+        }
+
         function addCustomInvRow() {
             const div = document.createElement('div');
             div.className = 'd-flex mb-2 gap-2 custom-inv-row';
             div.innerHTML = `
                 <input type="date" class="form-control form-control-sm date-input" style="width: 140px;">
-                <input type="text" class="form-control form-control-sm desc-input" placeholder="Item description...">
+                <input type="text" class="form-control form-control-sm desc-input" list="invoiceServiceList" placeholder="Select service or type custom project cost..." oninput="applyInvoiceServiceSelection(this)" onchange="applyInvoiceServiceSelection(this)">
                 <input type="number" class="form-control form-control-sm qty-input text-end" style="width: 80px;" min="0.01" step="0.01" value="1" oninput="clearManualLineTotal(this); calculateInvTotals()">
                 <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" placeholder="Unit Price (R)" oninput="clearManualLineTotal(this); calculateInvTotals()">
                 <input type="number" class="form-control form-control-sm line-total-display text-end" style="width: 120px;" min="0" step="0.01" value="0.00" oninput="setManualInvoiceLineTotal(this)" title="Line Total">
