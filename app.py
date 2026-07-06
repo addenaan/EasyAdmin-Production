@@ -4720,7 +4720,7 @@ def api_staff_admin_send_notification():
             if not requested_ids:
                 return _staff_json_error('Please tick at least one staff member.', 400)
             placeholders = ','.join(['?'] * len(requested_ids))
-            rows = conn.execute(f'''SELECT DISTINCT e.id FROM employees e
+            rows = conn.execute(f'''SELECT DISTINCT e.id, e.name FROM employees e
                                     JOIN users u ON u.company_id=e.company_id AND u.employee_id=e.id AND COALESCE(u.is_staff,0)=1
                                     WHERE e.company_id=? AND e.id IN ({placeholders}) AND COALESCE(e.status,'Active') != 'Inactive'
                                     ORDER BY e.name ASC''', [cid] + requested_ids).fetchall()
