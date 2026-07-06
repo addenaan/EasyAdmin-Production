@@ -11,6 +11,14 @@
         .app-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.1); }
         .app-icon { font-size: 3rem; margin-bottom: 15px; }
         .admin-panel { background: white; border-radius: 12px; padding: 25px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-top: 30px; border-top: 4px solid #212529; }
+        .hub-user-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 0.5rem 0.75rem; }
+        .hub-user-greeting { white-space: nowrap; }
+        .hub-auth-buttons { display: inline-flex; align-items: center; gap: 0.5rem; flex-wrap: nowrap; }
+        .hub-auth-buttons .btn { white-space: nowrap; }
+        @media (max-width: 991.98px) {
+            .hub-header .container { flex-direction: column; align-items: flex-start !important; gap: 1rem; }
+            .hub-user-actions { justify-content: flex-start; text-align: left; width: 100%; }
+        }
     </style>
 </head>
 <body>
@@ -30,15 +38,17 @@
                     <p class="mb-0 opacity-75">Enterprise Operations Hub</p>
                 </div>
             </div>
-            <div class="text-end">
-                <span class="me-3 fw-bold">👋 Welcome, {{ session.get('username', 'User') }}</span>
+            <div class="hub-user-actions text-end">
+                <span class="hub-user-greeting fw-bold">👋 Welcome, {{ session.get('username', 'User') }}</span>
                 {% if session.get('is_superadmin') %}
-                    <span class="badge bg-warning text-dark me-3 py-2 px-3 shadow-sm border border-dark">⭐ Super Admin</span>
+                    <span class="badge bg-warning text-dark py-2 px-3 shadow-sm border border-dark">⭐ Super Admin</span>
                 {% elif session.get('is_company_admin') %}
-                    <span class="badge bg-danger text-white me-3 py-2 px-3 shadow-sm border border-dark">🛡️ Company Admin</span>
+                    <span class="badge bg-danger text-white py-2 px-3 shadow-sm border border-dark">🛡️ Company Admin</span>
                 {% endif %}
-                <a href="{{ url_for('change_password') }}" class="btn btn-light fw-bold text-primary me-2">Change Password</a>
-                <a href="/logout" class="btn btn-light fw-bold text-danger">Logout</a>
+                <div class="hub-auth-buttons">
+                    <a href="{{ url_for('change_password') }}" class="btn btn-light fw-bold text-primary">Change Password</a>
+                    <a href="/logout" class="btn btn-light fw-bold text-danger">Logout</a>
+                </div>
             </div>
         </div>
     </div>
