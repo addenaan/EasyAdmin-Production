@@ -37,6 +37,7 @@
                 {% elif session.get('is_company_admin') %}
                     <span class="badge bg-danger text-white me-3 py-2 px-3 shadow-sm border border-dark">🛡️ Company Admin</span>
                 {% endif %}
+                <a href="{{ url_for('change_password') }}" class="btn btn-light fw-bold text-primary me-2">Change Password</a>
                 <a href="/logout" class="btn btn-light fw-bold text-danger">Logout</a>
             </div>
         </div>

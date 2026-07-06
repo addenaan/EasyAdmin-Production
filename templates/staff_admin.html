@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Staff Portal Admin | {{ session.get('company_name', 'Easy Admin') }}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/staff-portal.css?v=20260623-staff1">
+    <link rel="stylesheet" href="/static/staff-portal.css?v=20260706-staffnotify-search">
 </head>
 <body class="admin-body">
     <header class="admin-topbar">
@@ -16,35 +16,100 @@
         </div>
         <div class="d-flex gap-2 flex-wrap">
             <a href="/hub" class="btn btn-light fw-bold">Back to Hub</a>
+            <a href="{{ url_for('change_password') }}" class="btn btn-outline-light fw-bold">Change Password</a>
             <a href="/logout" class="btn btn-outline-light fw-bold">Logout</a>
         </div>
     </header>
 
-    <main class="admin-wrap">
+    <main class="admin-wrap staff-admin-wrap">
         <section id="adminToast" class="notice hidden"></section>
-        <div class="admin-grid">
-            <section class="admin-panel-card">
-                <div class="section-heading"><h2>Staff portal accounts</h2><button id="refreshEmployeesBtn" class="small-link">Refresh</button></div>
-                <p class="text-muted small">Create a staff login linked to an employee. Staff can only see their own bookings and leave requests.</p>
-                <div id="employeesList" class="admin-list loading-card">Loading employees...</div>
+
+        <section class="staff-admin-landing-card">
+            <div>
+                <div class="eyebrow text-primary">Staff Portal Management</div>
+                <h2>Manage staff access, leave and notifications</h2>
+                <p class="text-muted small mt-1">Use the tabs below to manage staff portal accounts, review staff leave requests and send staff notifications.</p>
+            </div>
+        </section>
+
+        <ul class="nav nav-tabs nav-fill staff-admin-tabs" id="staffAdminTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active text-dark" id="staff-accounts-tab" data-staff-admin-tab="accounts" type="button" role="tab" aria-controls="tab-staff-accounts" aria-selected="true">Staff Portal Accounts</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link text-success" id="leave-requests-tab" data-staff-admin-tab="leave" type="button" role="tab" aria-controls="tab-leave-requests" aria-selected="false">Leave Requests</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link text-primary" id="staff-notification-tab" data-staff-admin-tab="notifications" type="button" role="tab" aria-controls="tab-staff-notification" aria-selected="false">Staff Notification</button>
+            </li>
+        </ul>
+
+        <div class="staff-admin-tab-content" id="staffAdminTabsContent">
+            <section class="admin-tab-panel active" id="tab-staff-accounts" data-staff-admin-panel="accounts" role="tabpanel" aria-labelledby="staff-accounts-tab">
+                <section class="admin-panel-card">
+                    <div class="section-heading"><h2>Staff portal accounts</h2><button id="refreshEmployeesBtn" class="small-link">Refresh</button></div>
+                    <p class="text-muted small">Create a staff login linked to an employee. Staff can only see their own bookings and leave requests.</p>
+                    <div id="employeesList" class="admin-list loading-card">Loading employees...</div>
+                </section>
             </section>
-            <section class="admin-panel-card">
-                <div class="section-heading"><h2>Leave requests</h2></div>
-                <div class="filter-card compact admin-filter">
-                    <select id="leaveStatusFilter">
-                        <option>Pending</option>
-                        <option>Approved</option>
-                        <option>Declined</option>
-                        <option>All</option>
-                    </select>
-                    <button id="refreshLeaveBtn" class="primary-btn">Load</button>
-                </div>
-                <div id="leaveRequestsList" class="admin-list loading-card">Loading leave requests...</div>
+
+            <section class="admin-tab-panel" id="tab-leave-requests" data-staff-admin-panel="leave" role="tabpanel" aria-labelledby="leave-requests-tab">
+                <section class="admin-panel-card">
+                    <div class="section-heading"><h2>Leave requests</h2></div>
+                    <div class="filter-card compact admin-filter">
+                        <select id="leaveStatusFilter">
+                            <option>Pending</option>
+                            <option>Approved</option>
+                            <option>Declined</option>
+                            <option>All</option>
+                        </select>
+                        <button id="refreshLeaveBtn" class="primary-btn">Load</button>
+                    </div>
+                    <div id="leaveRequestsList" class="admin-list loading-card">Loading leave requests...</div>
+                </section>
+            </section>
+
+            <section class="admin-tab-panel" id="tab-staff-notification" data-staff-admin-panel="notifications" role="tabpanel" aria-labelledby="staff-notification-tab">
+                <section class="admin-panel-card">
+                    <div class="section-heading"><h2>Send staff notification</h2></div>
+                    <p class="text-muted small">Send a push/in-app message to one employee or broadcast to all active staff portal users.</p>
+                    <div class="filter-card compact admin-notification-form">
+                        <label>Title
+                            <input id="notificationTitle" type="text" placeholder="Message title">
+                        </label>
+                        <label>Message
+                            <textarea id="notificationMessage" placeholder="Write the message employees should receive"></textarea>
+                        </label>
+                        <button id="sendNotificationBtn" class="primary-btn" type="button">Send Notification</button>
+                        <div class="notification-recipient-panel" aria-label="Staff notification recipients">
+                            <div class="recipient-panel-head">
+                                <div>
+                                    <div class="row-title">Recipients</div>
+                                    <div id="notificationRecipientCount" class="row-meta">Select one or more staff members below.</div>
+                                </div>
+                                <label class="recipient-select-all">
+                                    <input id="selectAllNotificationStaff" type="checkbox">
+                                    <span id="selectAllNotificationStaffText">Select all</span>
+                                </label>
+                            </div>
+                            <div class="recipient-search-row">
+                                <label class="recipient-search-label" for="notificationRecipientSearch">Search recipients</label>
+                                <div class="recipient-search-control">
+                                    <input id="notificationRecipientSearch" type="search" placeholder="Search by name, employee no, job title or username" autocomplete="off">
+                                    <button id="clearNotificationRecipientSearch" class="small-link" type="button">Clear</button>
+                                </div>
+                            </div>
+                            <div id="notificationEmployeeChecklist" class="recipient-checklist loading-card">Loading staff...</div>
+                        </div>
+                    </div>
+                    <div class="section-heading"><h2>Notification history</h2><button id="refreshNotificationsHistoryBtn" class="small-link" type="button">Refresh</button></div>
+                    <div id="notificationsHistoryList" class="admin-list loading-card">Loading notifications...</div>
+                </section>
             </section>
         </div>
     </main>
 
     <script src="/static/easyadmin-formatters.js?v=20260622-format"></script>
-    <script defer src="/static/staff-admin.js?v=20260623-staff1"></script>
+    <script defer src="/static/staff-admin.js?v=20260706-staffnotify-search"></script>
 </body>
 </html>

@@ -108,6 +108,25 @@ textarea { min-height: 100px; resize: vertical; }
     .staff-header h1 { font-size: 1rem; }
 }
 
+/* Staff Portal Admin module-style tabs */
+.staff-admin-wrap { max-width: 1280px; }
+.staff-admin-landing-card { background: #ffffff; border: 1px solid var(--border); border-radius: 22px; box-shadow: 0 8px 22px rgba(15,23,42,0.06); padding: 18px 20px; margin-bottom: 14px; }
+.staff-admin-landing-card h2 { font-size: 1.28rem; font-weight: 900; color: var(--text); }
+.staff-admin-tabs { margin-top: 10px; }
+.staff-admin-tabs .nav-link { color: #6c757d; background-color: #e9ecef; border: 1px solid #dee2e6; margin-right: 5px; cursor: pointer; font-weight: 800; }
+.staff-admin-tabs .nav-link.active { font-weight: 900; background: #ffffff; border-bottom-color: transparent; box-shadow: 0 -2px 12px rgba(15,23,42,0.04); }
+.staff-admin-tab-content { background: #ffffff; padding: 20px; border: 1px solid #dee2e6; border-top: none; border-radius: 0 0 10px 10px; box-shadow: 0 .125rem .25rem rgba(0,0,0,.075); }
+.admin-tab-panel { display: none; }
+.admin-tab-panel.active { display: block; }
+.staff-admin-tab-content .admin-panel-card { box-shadow: none; border-radius: 16px; }
+@media (max-width: 760px) {
+    .staff-admin-tabs { display: grid; grid-template-columns: 1fr; gap: 6px; border-bottom: 0; }
+    .staff-admin-tabs .nav-item, .staff-admin-tabs .nav-link { width: 100%; }
+    .staff-admin-tabs .nav-link { margin-right: 0; border-radius: 12px; }
+    .staff-admin-tabs .nav-link.active { border-bottom-color: #dee2e6; }
+    .staff-admin-tab-content { border-top: 1px solid #dee2e6; border-radius: 10px; padding: 12px; }
+}
+
 /* Staff Portal Phase 2 operational actions */
 .action-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .action-row .primary-btn, .mini-form .primary-btn { flex: 1 1 150px; }
@@ -129,4 +148,29 @@ button:disabled, .primary-btn:disabled { opacity: 0.45; cursor: not-allowed; box
 @media (max-width: 620px) {
     .payslip-summary-grid { grid-template-columns: 1fr; }
     .staff-tabs { grid-template-columns: repeat(2, 1fr); top: 126px; }
+}
+
+/* Staff push notifications */
+.ghost-btn.success-enabled { background: rgba(25,135,84,0.86); }
+.notification-card { border-left: 4px solid var(--primary); }
+.admin-notification-form { grid-template-columns: 1fr; }
+.admin-notification-form textarea { min-height: 92px; }
+.notification-recipient-panel { grid-column: 1 / -1; background: #f8fbff; border: 1px solid var(--border); border-radius: 18px; padding: 12px; display: grid; gap: 10px; }
+.recipient-panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.recipient-select-all { display: inline-flex; grid-template-columns: auto 1fr; align-items: center; gap: 8px; color: var(--text); font-size: 0.85rem; white-space: nowrap; }
+.recipient-select-all input { width: auto; min-height: auto; }
+
+.recipient-search-row { display: grid; gap: 6px; }
+.recipient-search-label { margin: 0; color: var(--muted); font-size: 0.78rem; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; }
+.recipient-search-control { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
+.recipient-search-control input { min-height: 42px; border-radius: 12px; border: 1px solid var(--border); padding: 8px 12px; background: #fff; color: var(--text); font-weight: 700; }
+.recipient-search-control .small-link { min-height: 42px; border-radius: 12px; }
+.recipient-checklist { display: grid; gap: 8px; max-height: 360px; overflow: auto; padding: 4px; }
+.recipient-checkbox-row { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; color: var(--text); font-size: 0.9rem; }
+.recipient-checkbox-row input { width: auto; min-height: auto; }
+.recipient-checkbox-row strong { display: block; font-weight: 900; }
+.recipient-checkbox-row small { display: block; color: var(--muted); font-weight: 700; margin-top: 3px; }
+@media (min-width: 960px) {
+  .admin-notification-form { grid-template-columns: 1fr 1fr; }
+  .admin-notification-form > label:nth-child(2), .admin-notification-form > button, .admin-notification-form > .notification-recipient-panel { grid-column: 1 / -1; }
 }

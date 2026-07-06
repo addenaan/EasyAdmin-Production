@@ -72,6 +72,7 @@
             </div>
             <div>
                 <a href="/hub" class="btn btn-secondary me-2">🔙 Hub</a>
+                <a href="{{ url_for('change_password') }}" class="btn btn-outline-primary me-2">Change Password</a>
                 <a href="/logout" class="btn btn-outline-danger">Logout</a>
             </div>
         </div>
@@ -804,7 +805,7 @@
                             <div class="totals-box" style="float: right; width: 45%; margin-top: 0;">
                                 <table>
                                     <tr class="text-muted"><td>Total Invoiced</td><td class="amount-col" id="stmtTotalInvoiced"></td></tr>
-                                    <tr class="text-muted" id="stmtCreditedRow" style="display:none;"><td>Credit Notes Applied</td><td class="amount-col text-danger" id="stmtTotalCredited"></td></tr>
+                                    <tr class="text-muted" id="stmtCreditedRow" style="display: none;"><td>Credit Notes Applied</td><td class="amount-col text-danger" id="stmtTotalCredited"></td></tr>
                                     <tr class="text-muted"><td>Total Paid</td><td class="amount-col text-success" id="stmtTotalPaid"></td></tr>
                                     <tr class="grand-total border-dark text-dark"><td>BALANCE DUE</td><td class="amount-col" id="stmtTotalDue"></td></tr>
                                 </table>

@@ -1,13 +1,13 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v9-live-refresh';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v16-multi-service-select';
 const APP_SHELL = [
   '/mobile/offline',
   '/static/mobile.css?v=20260622',
   '/static/mobile.js?v=20260622',
   '/static/easyadmin-formatters.js?v=20260622-format',
-  '/static/easyadmin-live-refresh.js?v=20260630-live-refresh',
+  '/static/pwa-update.js?v=20260706-update-prompt-password-route-fix',
   '/static/session-timeout.js?v=20260625-timeout15-desktop',
-  '/static/staff-portal.css?v=20260623-staff2',
-  '/static/staff-portal.js?v=20260623-staff2',
+  '/static/staff-portal.css?v=20260706-staffnotify-search',
+  '/static/staff-portal.js?v=20260706-staffnotify-checkbox',
   '/static/easy_admin_logo.png',
   '/static/pwa-icon-192.png',
   '/static/pwa-icon-512.png',
@@ -28,11 +28,13 @@ function isCacheableStaticAsset(url) {
 }
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
-      .then(() => self.skipWaiting())
-  );
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener('activate', (event) => {
@@ -69,5 +71,43 @@ self.addEventListener('fetch', (event) => {
       caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
       return response;
     }).catch(() => cached))
+  );
+});
+
+
+self.addEventListener('push', (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch (error) {
+    payload = { title: 'Easy Admin', body: event.data ? event.data.text() : 'New notification' };
+  }
+  const title = payload.title || 'Easy Admin';
+  const options = {
+    body: payload.body || payload.message || '',
+    icon: payload.icon || '/static/pwa-icon-192.png',
+    badge: payload.badge || '/static/pwa-icon-192.png',
+    data: payload.data || { url: payload.url || '/staff/mobile' },
+    vibrate: [120, 60, 120],
+    tag: (payload.data && (payload.data.type || payload.data.notification_id)) || payload.url || title,
+    renotify: true
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const data = event.notification.data || {};
+  const targetUrl = new URL(data.url || '/staff/mobile', self.location.origin).href;
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url.startsWith(self.location.origin) && 'focus' in client) {
+          client.navigate(targetUrl);
+          return client.focus();
+        }
+      }
+      if (clients.openWindow) return clients.openWindow(targetUrl);
+    })
   );
 });

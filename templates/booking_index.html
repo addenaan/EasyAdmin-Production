@@ -48,6 +48,8 @@
             <div>
                 <a href="/hub" class="btn btn-secondary fw-bold me-2">🔙 Back to Hub</a>
                 <button class="btn btn-info text-white fw-bold me-2" onclick="openBulkBookingModal()">🔁 Bulk Booking Scheduler</button>
+                <button class="btn btn-outline-info fw-bold me-2" onclick="openBulkManageBookingsModal()">🛠️ Bulk Manage Bookings</button>
+                <a href="{{ url_for('change_password') }}" class="btn btn-outline-primary fw-bold me-2">Change Password</a>
                 <a href="/logout" class="btn btn-outline-danger fw-bold">Logout</a>
             </div>
         </div>
@@ -405,9 +407,10 @@
                             </div>
                             <div class="col-md-6">
                                 <label class="small fw-bold">{{ service_label }}</label>
-                                <select id="bulkService" class="form-select border-info">
+                                <select id="bulkService" class="form-select border-info" multiple size="6">
                                     {% for s in services %}<option value="{{ s.name }}">{{ s.name }}</option>{% endfor %}
                                 </select>
+                                <div class="form-text small">Use Ctrl/Cmd on desktop, or tap/select multiple services on touch devices.</div>
                             </div>
                         </div>
 
@@ -480,6 +483,211 @@
                         <button type="button" class="btn btn-info text-white fw-bold ms-2" id="bulkBtnNext" onclick="bulkNext()">Next</button>
                         <button type="button" class="btn btn-success fw-bold ms-2" id="bulkBtnFinish" style="display:none;" onclick="saveBulkBooking()">Generate Dates</button>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="bulkManageBookingsModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title fw-bold">🛠️ Bulk Manage {{ booking_label }}s</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="alert alert-info small mb-3">
+                        Find {{ booking_label|lower }}s by {{ client_label|lower }} and date range, preview them, then bulk update only the fields you tick or delete safe uninvoiced bookings.
+                    </div>
+
+                    <div class="bg-white border rounded p-3 mb-3 shadow-sm">
+                        <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">1. Find {{ booking_label }}s</h6>
+                        <div class="row g-3">
+                            <div class="col-md-4">
+                                <label class="small fw-bold">{{ client_label }}</label>
+                                <select id="bulkManageClient" class="form-select border-primary" onchange="bulkManageClientChanged()">
+                                    <option value="">Select {{ client_label|lower }}...</option>
+                                    {% for c in clients %}
+                                    <option value="{{ c.id }}">{{ c.option_label or c.display_name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <label class="small fw-bold">Start Date</label>
+                                <input type="date" id="bulkManageStartDate" class="form-control border-dark">
+                            </div>
+                            <div class="col-md-2">
+                                <label class="small fw-bold">End Date</label>
+                                <input type="date" id="bulkManageEndDate" class="form-control border-dark">
+                            </div>
+                            <div class="col-md-2">
+                                <label class="small fw-bold">Project Filter</label>
+                                <select id="bulkManageProjectFilter" class="form-select">
+                                    <option value="all">All</option>
+                                    <option value="no_project" selected>No project</option>
+                                    <option value="linked">Linked to project</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <label class="small fw-bold">Invoice Filter</label>
+                                <select id="bulkManageInvoicedFilter" class="form-select">
+                                    <option value="all">All</option>
+                                    <option value="uninvoiced" selected>Uninvoiced only</option>
+                                    <option value="invoiced">Invoiced only</option>
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="small fw-bold">{{ service_label }} Filter (Optional)</label>
+                                <select id="bulkManageServiceFilter" class="form-select">
+                                    <option value="">All {{ service_label|lower }}s</option>
+                                    {% for s in services %}<option value="{{ s.name }}">{{ s.name }}</option>{% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="small fw-bold">{{ employee_label }} Filter (Optional)</label>
+                                <select id="bulkManageEmployeeFilter" class="form-select">
+                                    <option value="">All {{ employee_label|lower }}s</option>
+                                    {% for e in employees %}<option value="{{ e.name }}">{{ e.name }}</option>{% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-md-4 d-flex align-items-end">
+                                <button type="button" id="bulkManageLoadBtn" class="btn btn-primary fw-bold w-100" onclick="loadBulkManageBookings()">Load Matching {{ booking_label }}s</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white border rounded p-3 mb-3 shadow-sm">
+                        <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-2">
+                            <h6 class="fw-bold text-primary mb-0">2. Preview and Select</h6>
+                            <div class="small fw-bold" id="bulkManageCount">No bookings loaded.</div>
+                        </div>
+                        <div class="d-flex gap-2 mb-2">
+                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="setBulkManageSelection(true)">Select all loaded</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="setBulkManageSelection(false)">Clear selection</button>
+                            <span class="small text-muted align-self-center" id="bulkManageSelectedCount">0 selected</span>
+                        </div>
+                        <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                            <table class="table table-sm table-hover align-middle mb-0">
+                                <thead class="table-light position-sticky top-0">
+                                    <tr>
+                                        <th style="width:40px;"><input type="checkbox" id="bulkManageSelectAll" onchange="setBulkManageSelection(this.checked)"></th>
+                                        <th>Date</th>
+                                        <th>Time</th>
+                                        <th>{{ client_label }}</th>
+                                        <th>{{ employee_label }}</th>
+                                        <th>{{ service_label }}</th>
+                                        <th>Project</th>
+                                        <th>Status</th>
+                                        <th>Notes / Files</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="bulkManageBookingsBody">
+                                    <tr><td colspan="9" class="text-center text-muted py-4">Use the filters above and click Load.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="bg-white border rounded p-3 shadow-sm">
+                        <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">3. Bulk Edit Selected {{ booking_label }}s</h6>
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" id="bulkManageSkipInvoiced" checked>
+                            <label class="form-check-label small fw-bold" for="bulkManageSkipInvoiced">Skip invoiced bookings when updating</label>
+                        </div>
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <div class="border rounded p-3 h-100">
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="bulkManageUpdateProject">
+                                        <label class="form-check-label fw-bold" for="bulkManageUpdateProject">Update Project</label>
+                                    </div>
+                                    <select id="bulkManageProject" class="form-select border-secondary">
+                                        <option value="">No Project / Normal {{ service_label }}</option>
+                                        {% for p in projects %}
+                                            {% if p.status != 'Cancelled' %}
+                                            <option value="{{ p.id }}" data-client-id="{{ p.client_id or '' }}">{{ p.project_name }}{% if p.project_code %} ({{ p.project_code }}){% endif %}</option>
+                                            {% endif %}
+                                        {% endfor %}
+                                    </select>
+                                    <div class="form-text small">Tick this and leave blank to unlink selected bookings from any project.</div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="border rounded p-3 h-100">
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="bulkManageUpdateService">
+                                        <label class="form-check-label fw-bold" for="bulkManageUpdateService">Update {{ service_label }}</label>
+                                    </div>
+                                    <select id="bulkManageService" class="form-select border-info" multiple size="6">
+                                        {% for s in services %}<option value="{{ s.name }}">{{ s.name }}</option>{% endfor %}
+                                    </select>
+                                    <div class="form-text small">Use Ctrl/Cmd on desktop, or tap/select multiple services on touch devices.</div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="border rounded p-3 h-100">
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="bulkManageUpdateTime">
+                                        <label class="form-check-label fw-bold" for="bulkManageUpdateTime">Update Time</label>
+                                    </div>
+                                    <input type="time" id="bulkManageTime" class="form-control border-dark" value="08:00">
+                                    <div class="form-text small">Google Calendar is updated when linked events already exist.</div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="border rounded p-3 h-100">
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="bulkManageUpdateNotes">
+                                        <label class="form-check-label fw-bold" for="bulkManageUpdateNotes">Update Booking Notes</label>
+                                    </div>
+                                    <textarea id="bulkManageNotes" class="form-control" rows="3" placeholder="Gate codes, special instructions..."></textarea>
+                                </div>
+                            </div>
+                        </div>
+
+                        {% if booking_custom_fields %}
+                        <div class="border rounded p-3 mt-3">
+                            <h6 class="fw-bold text-secondary mb-3">Additional {{ booking_label }} Details</h6>
+                            <div class="row g-3">
+                                {% for f in booking_custom_fields %}
+                                <div class="col-md-6">
+                                    <div class="border rounded p-2 h-100">
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input bulk-manage-custom-check" type="checkbox" id="bulkManageCustomCheck_{{ loop.index }}" data-field-key="{{ f.field_key }}">
+                                            <label class="form-check-label fw-bold small" for="bulkManageCustomCheck_{{ loop.index }}">Update {{ f.field_label }}</label>
+                                        </div>
+                                        {% if f.field_type == 'textarea' %}
+                                            <textarea class="form-control bulk-manage-custom-control" rows="2" data-field-key="{{ f.field_key }}" data-field-type="{{ f.field_type }}"></textarea>
+                                        {% elif f.field_type == 'checkbox' %}
+                                            <div class="form-check mt-2">
+                                                <input class="form-check-input bulk-manage-custom-control" type="checkbox" data-field-key="{{ f.field_key }}" data-field-type="{{ f.field_type }}">
+                                                <label class="form-check-label small">Yes</label>
+                                            </div>
+                                        {% elif f.field_type == 'dropdown' %}
+                                            <select class="form-select bulk-manage-custom-control" data-field-key="{{ f.field_key }}" data-field-type="{{ f.field_type }}">
+                                                <option value="">Select...</option>
+                                                {% for opt in f.options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}
+                                                {% if not f.options %}<option value="" disabled>No options configured</option>{% endif %}
+                                            </select>
+                                        {% else %}
+                                            <input type="{{ 'time' if f.field_type == 'time' else 'date' if f.field_type == 'date' else 'number' if f.field_type == 'number' else 'text' }}" class="form-control bulk-manage-custom-control" data-field-key="{{ f.field_key }}" data-field-type="{{ f.field_type }}">
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        <div class="d-flex justify-content-between align-items-center mt-4 pt-3 border-top">
+                            <button type="button" id="bulkManageDeleteBtn" class="btn btn-outline-danger fw-bold" onclick="deleteBulkManageBookings()">Delete Selected Safe Bookings</button>
+                            <button type="button" id="bulkManageUpdateBtn" class="btn btn-success fw-bold" onclick="updateBulkManageBookings()">Apply Bulk Update</button>
+                        </div>
+                        <div class="form-text small mt-2">Delete skips invoiced bookings and bookings already started or completed on the staff/mobile app.</div>
+                    </div>
+                </div>
+                <div class="modal-footer bg-dark">
+                    <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
@@ -875,6 +1083,7 @@
         const editModal = new bootstrap.Modal(document.getElementById('editModal'));
         const bookingDetailsModal = new bootstrap.Modal(document.getElementById('bookingDetailsModal'));
         const bulkBookingModal = new bootstrap.Modal(document.getElementById('bulkBookingModal'));
+        const bulkManageBookingsModal = new bootstrap.Modal(document.getElementById('bulkManageBookingsModal'));
         const clientDirModal = new bootstrap.Modal(document.getElementById('clientDirModal'));
         const clientProfileModal = new bootstrap.Modal(document.getElementById('clientProfileModal'));
         const clientReportModal = new bootstrap.Modal(document.getElementById('clientReportModal'));
@@ -1673,7 +1882,10 @@
                 else field.value = '';
                 field.classList.remove('is-invalid');
             });
-            document.getElementById('bulkService').selectedIndex = 0;
+            const bulkServiceSelect = document.getElementById('bulkService');
+            if (bulkServiceSelect) {
+                Array.from(bulkServiceSelect.options).forEach((opt, idx) => opt.selected = idx === 0);
+            }
             const bulkProject = document.getElementById('bulkProject');
             if (bulkProject) { bulkProject.value = ''; filterProjectSelectByClient('bulkProject', selectedBulkClientId); }
             document.querySelectorAll('.bulk-day').forEach(cb => cb.checked = false);
@@ -1717,6 +1929,12 @@
             }
         }
 
+        function getMultiSelectValues(selectId) {
+            const select = document.getElementById(selectId);
+            if (!select) return '';
+            return Array.from(select.selectedOptions).map(opt => opt.value).filter(Boolean).join(', ');
+        }
+
         function collectBulkCustomFields() {
             const values = {};
             let valid = true;
@@ -1739,7 +1957,7 @@
         }
 
         function saveBulkBooking() {
-            const service = document.getElementById('bulkService').value;
+            const service = getMultiSelectValues('bulkService');
             const startDate = document.getElementById('bulkStartDate').value;
             const endDate = document.getElementById('bulkEndDate').value;
             const time = document.getElementById('bulkTime').value;
@@ -1749,6 +1967,7 @@
             let days = [];
             document.querySelectorAll('.bulk-day:checked').forEach(cb => days.push(cb.value));
 
+            if(!service) return alert("Please select at least one service.");
             if(days.length === 0) return alert("Please select at least one Contract Day (e.g. Monday).");
             if(!startDate || !endDate) return alert("Start and End dates are required.");
             if(startDate > endDate) return alert("End Date must be after Start Date.");
@@ -1825,6 +2044,237 @@
                 btn.innerText = "Generate Dates";
                 btn.disabled = false;
             });
+        }
+
+        // ==========================================
+        // BULK MANAGE BOOKINGS LOGIC
+        // ==========================================
+        let bulkManageRows = [];
+
+        function openBulkManageBookingsModal() {
+            const today = new Date();
+            const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+            const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+            document.getElementById('bulkManageStartDate').value = localISODate(firstDay);
+            document.getElementById('bulkManageEndDate').value = localISODate(lastDay);
+            document.getElementById('bulkManageClient').value = '';
+            document.getElementById('bulkManageProjectFilter').value = 'no_project';
+            document.getElementById('bulkManageInvoicedFilter').value = 'uninvoiced';
+            document.getElementById('bulkManageServiceFilter').value = '';
+            document.getElementById('bulkManageEmployeeFilter').value = '';
+            document.getElementById('bulkManageSkipInvoiced').checked = true;
+            document.getElementById('bulkManageUpdateProject').checked = false;
+            document.getElementById('bulkManageUpdateService').checked = false;
+            const bulkManageServiceSelect = document.getElementById('bulkManageService');
+            if (bulkManageServiceSelect) {
+                Array.from(bulkManageServiceSelect.options).forEach((opt, idx) => opt.selected = idx === 0);
+            }
+            document.getElementById('bulkManageUpdateTime').checked = false;
+            document.getElementById('bulkManageUpdateNotes').checked = false;
+            document.getElementById('bulkManageProject').value = '';
+            document.getElementById('bulkManageTime').value = '08:00';
+            document.getElementById('bulkManageNotes').value = '';
+            document.querySelectorAll('.bulk-manage-custom-check').forEach(cb => cb.checked = false);
+            document.querySelectorAll('.bulk-manage-custom-control').forEach(field => {
+                if (field.type === 'checkbox') field.checked = false;
+                else field.value = '';
+            });
+            bulkManageRows = [];
+            renderBulkManageBookings();
+            bulkManageClientChanged();
+            bulkManageBookingsModal.show();
+        }
+
+        function bulkManageClientChanged() {
+            const clientId = document.getElementById('bulkManageClient').value || '';
+            filterProjectSelectByClient('bulkManageProject', clientId);
+        }
+
+        function bulkManageRefreshAfterChange() {
+            if (calendar && typeof calendar.refetchEvents === 'function') calendar.refetchEvents();
+            loadDashboardLists();
+            loadBulkManageBookings(false);
+            if (window.EasyAdminRefresh && typeof window.EasyAdminRefresh.refreshNow === 'function') {
+                window.EasyAdminRefresh.refreshNow('bulk-bookings-change');
+            }
+        }
+
+        async function loadBulkManageBookings(showLoading = true) {
+            const btn = document.getElementById('bulkManageLoadBtn');
+            const payload = {
+                client_id: document.getElementById('bulkManageClient').value,
+                start_date: document.getElementById('bulkManageStartDate').value,
+                end_date: document.getElementById('bulkManageEndDate').value,
+                project_filter: document.getElementById('bulkManageProjectFilter').value,
+                invoiced_filter: document.getElementById('bulkManageInvoicedFilter').value,
+                service: document.getElementById('bulkManageServiceFilter').value,
+                employee: document.getElementById('bulkManageEmployeeFilter').value
+            };
+            if (!payload.client_id) return alert('Please select a client.');
+            if (!payload.start_date || !payload.end_date) return alert('Please select start and end dates.');
+            if (payload.start_date > payload.end_date) return alert('End date must be after start date.');
+            if (showLoading) {
+                btn.disabled = true;
+                btn.innerText = 'Loading...';
+            }
+            try {
+                const res = await fetch('/api/bulk_bookings/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await parseJsonOrError(res);
+                bulkManageRows = data.bookings || [];
+                renderBulkManageBookings();
+                if (data.limited) alert('The result was limited to 750 bookings. Narrow your date range if you need more.');
+            } catch (err) {
+                alert(err.message || 'Could not load bookings.');
+            } finally {
+                if (showLoading) {
+                    btn.disabled = false;
+                    btn.innerText = 'Load Matching {{ booking_label }}s';
+                }
+            }
+        }
+
+        function renderBulkManageBookings() {
+            const body = document.getElementById('bulkManageBookingsBody');
+            const countEl = document.getElementById('bulkManageCount');
+            const selectAll = document.getElementById('bulkManageSelectAll');
+            if (!bulkManageRows.length) {
+                body.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No matching bookings loaded.</td></tr>';
+                countEl.innerText = 'No bookings loaded.';
+                selectAll.checked = false;
+                updateBulkManageSelectedCount();
+                return;
+            }
+            body.innerHTML = bulkManageRows.map(row => {
+                const projectDisplay = row.project_name ? `${escapeHtml(row.project_name)}${row.project_code ? ' (' + escapeHtml(row.project_code) + ')' : ''}` : '<span class="text-muted">No project</span>';
+                const invoiceBadge = row.is_invoiced ? '<span class="badge bg-dark">Invoiced</span>' : '<span class="badge bg-success">Uninvoiced</span>';
+                const statusBadge = `<span class="badge ${bookingJobStatusClass(row.mobile_status)}">${escapeHtml(row.mobile_status || 'Scheduled')}</span>`;
+                const fileBadge = row.attachment_count ? `<span class="badge bg-secondary ms-1">${row.attachment_count} file(s)</span>` : '';
+                const notes = row.booking_notes ? escapeHtml(row.booking_notes).slice(0, 80) : '<span class="text-muted">No notes</span>';
+                return `
+                    <tr>
+                        <td><input type="checkbox" class="bulk-manage-row-check" value="${row.id}" onchange="updateBulkManageSelectedCount()"></td>
+                        <td class="fw-bold">${escapeHtml(row.date)}</td>
+                        <td>${escapeHtml(row.time)}</td>
+                        <td>${escapeHtml(row.client)}</td>
+                        <td>${escapeHtml(row.employee)}</td>
+                        <td>${escapeHtml(row.booking_type)}</td>
+                        <td>${projectDisplay}</td>
+                        <td>${invoiceBadge}<br>${statusBadge}</td>
+                        <td><div class="small">${notes} ${fileBadge}</div></td>
+                    </tr>`;
+            }).join('');
+            countEl.innerText = `${bulkManageRows.length} booking(s) loaded.`;
+            selectAll.checked = false;
+            updateBulkManageSelectedCount();
+        }
+
+        function selectedBulkManageIds() {
+            return Array.from(document.querySelectorAll('.bulk-manage-row-check:checked')).map(cb => cb.value);
+        }
+
+        function updateBulkManageSelectedCount() {
+            const selected = selectedBulkManageIds().length;
+            const total = document.querySelectorAll('.bulk-manage-row-check').length;
+            document.getElementById('bulkManageSelectedCount').innerText = `${selected} selected`;
+            const selectAll = document.getElementById('bulkManageSelectAll');
+            selectAll.checked = total > 0 && selected === total;
+        }
+
+        function setBulkManageSelection(checked) {
+            document.querySelectorAll('.bulk-manage-row-check').forEach(cb => cb.checked = checked);
+            document.getElementById('bulkManageSelectAll').checked = checked && document.querySelectorAll('.bulk-manage-row-check').length > 0;
+            updateBulkManageSelectedCount();
+        }
+
+        function collectBulkManageCustomFields() {
+            const values = {};
+            const controls = Array.from(document.querySelectorAll('.bulk-manage-custom-control'));
+            document.querySelectorAll('.bulk-manage-custom-check:checked').forEach(cb => {
+                const key = cb.dataset.fieldKey;
+                const field = controls.find(ctrl => ctrl.dataset.fieldKey === key);
+                if (!field) return;
+                values[key] = field.type === 'checkbox' ? (field.checked ? 'Yes' : '') : (field.value || '').trim();
+            });
+            return values;
+        }
+
+        async function updateBulkManageBookings() {
+            const ids = selectedBulkManageIds();
+            if (!ids.length) return alert('Please select at least one booking to update.');
+            const customFields = collectBulkManageCustomFields();
+            const payload = {
+                booking_ids: ids,
+                update_project: document.getElementById('bulkManageUpdateProject').checked,
+                project_id: document.getElementById('bulkManageProject').value,
+                update_service: document.getElementById('bulkManageUpdateService').checked,
+                booking_type: getMultiSelectValues('bulkManageService'),
+                update_time: document.getElementById('bulkManageUpdateTime').checked,
+                time: document.getElementById('bulkManageTime').value,
+                update_notes: document.getElementById('bulkManageUpdateNotes').checked,
+                booking_notes: document.getElementById('bulkManageNotes').value,
+                skip_invoiced: document.getElementById('bulkManageSkipInvoiced').checked,
+                custom_fields: customFields
+            };
+            if (!payload.update_project && !payload.update_service && !payload.update_time && !payload.update_notes && Object.keys(customFields).length === 0) {
+                return alert('Please tick at least one field to update.');
+            }
+            if (!confirm(`Apply bulk update to ${ids.length} selected booking(s)?`)) return;
+            const btn = document.getElementById('bulkManageUpdateBtn');
+            btn.disabled = true;
+            btn.innerText = 'Updating...';
+            try {
+                const res = await fetch('/api/bulk_bookings/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await parseJsonOrError(res);
+                alert(data.message || 'Bulk update complete.');
+                bulkManageRefreshAfterChange();
+            } catch (err) {
+                alert(err.message || 'Bulk update failed.');
+            } finally {
+                btn.disabled = false;
+                btn.innerText = 'Apply Bulk Update';
+            }
+        }
+
+        async function deleteBulkManageBookings() {
+            const ids = selectedBulkManageIds();
+            if (!ids.length) return alert('Please select at least one booking to delete.');
+            const selectedRows = bulkManageRows.filter(row => ids.includes(String(row.id)));
+            const invoicedCount = selectedRows.filter(row => row.is_invoiced).length;
+            const startedCount = selectedRows.filter(row => ['in progress', 'completed'].includes(String(row.mobile_status || '').toLowerCase())).length;
+            const attachmentCount = selectedRows.reduce((sum, row) => sum + (parseInt(row.attachment_count || 0, 10) || 0), 0);
+            let warning = `You are about to delete ${ids.length} selected booking(s). This cannot be undone.`;
+            if (invoicedCount) warning += `\n\n${invoicedCount} invoiced booking(s) will be skipped.`;
+            if (startedCount) warning += `\n${startedCount} booking(s) already in progress/completed will be skipped.`;
+            if (attachmentCount) warning += `\n${attachmentCount} attached file record(s) on deleted bookings will also be removed.`;
+            if (!confirm(warning)) return;
+            const confirmWord = prompt('Type DELETE to confirm bulk deletion:');
+            if (confirmWord !== 'DELETE') return;
+            const btn = document.getElementById('bulkManageDeleteBtn');
+            btn.disabled = true;
+            btn.innerText = 'Deleting...';
+            try {
+                const res = await fetch('/api/bulk_bookings/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ booking_ids: ids })
+                });
+                const data = await parseJsonOrError(res);
+                alert(data.message || 'Bulk delete complete.');
+                bulkManageRefreshAfterChange();
+            } catch (err) {
+                alert(err.message || 'Bulk delete failed.');
+            } finally {
+                btn.disabled = false;
+                btn.innerText = 'Delete Selected Safe Bookings';
+            }
         }
 
 

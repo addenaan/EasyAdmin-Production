@@ -23,6 +23,7 @@
             <div class="header-actions">
                 <button id="installBtn" class="ghost-btn hidden" type="button">Install App</button>
                 <a href="/hub" class="ghost-btn">Desktop</a>
+                <a href="{{ url_for('change_password') }}" class="ghost-btn">Change Password</a>
                 <a href="/logout" class="ghost-btn danger">Logout</a>
             </div>
         </header>
@@ -102,5 +103,6 @@
 
     <script defer src="/static/mobile.js?v=20260622"></script>
     <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+    <script defer src="/static/pwa-update.js?v=20260706-update-prompt-password-route-fix"></script>
 </body>
 </html>

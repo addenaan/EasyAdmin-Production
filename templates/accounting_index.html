@@ -33,7 +33,9 @@
             </div>
             <div>
                 <button class="btn btn-outline-light me-2 fw-bold" onclick="loadAll()">Refresh</button>
-                <a href="/hub" class="btn btn-light fw-bold text-dark">Back to Hub</a>
+                <a href="/hub" class="btn btn-light fw-bold text-dark me-2">Back to Hub</a>
+                <a href="{{ url_for('change_password') }}" class="btn btn-outline-light fw-bold me-2">Change Password</a>
+                <a href="/logout" class="btn btn-outline-light fw-bold">Logout</a>
             </div>
         </div>
     </div>

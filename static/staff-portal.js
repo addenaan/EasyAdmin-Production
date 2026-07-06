@@ -1,5 +1,5 @@
 (function () {
-    const state = { dashboard: null, bookings: [], payslips: [], currentTab: 'home', currentBooking: null, deferredPrompt: null };
+    const state = { dashboard: null, bookings: [], payslips: [], notifications: [], currentTab: 'home', currentBooking: null, deferredPrompt: null };
     const $ = (id) => document.getElementById(id);
     const fmtDate = (value) => (window.EasyAdminFormat ? window.EasyAdminFormat.date(value) : String(value || '').slice(0, 10));
     const fmtMoney = (value) => (window.EasyAdminFormat ? window.EasyAdminFormat.money(value) : Number(value || 0).toFixed(2));
@@ -84,6 +84,20 @@
     }
 
 
+    function notificationCard(n) {
+        const status = n.sent_status ? `Status: ${n.sent_status}` : '';
+        return `<article class="item-card notification-card">
+            <div class="item-top">
+                <div>
+                    <div class="item-title">${safe(n.title || 'Notification')}</div>
+                    <div class="item-meta">${safe(n.message || '')}<br>${safe(fmtDate(n.created_at || ''))}${status ? ' • ' + safe(status) : ''}</div>
+                </div>
+                <span class="badge dark">${safe(n.notification_type || 'Message')}</span>
+            </div>
+        </article>`;
+    }
+
+
     function renderProfile(data) {
         const e = data.employee || {};
         $('profileCard').classList.remove('loading-card');
@@ -102,6 +116,7 @@
             $('todayBookings').classList.remove('loading-card');
             $('todayBookings').innerHTML = data.today_bookings.length ? data.today_bookings.map(bookingCard).join('') : empty('No bookings scheduled for today.');
             $('upcomingBookings').innerHTML = data.upcoming_bookings.length ? data.upcoming_bookings.map(bookingCard).join('') : empty('No upcoming bookings in the next two weeks.');
+            await loadNotifications();
             $('leaveHistory').classList.remove('loading-card');
             $('leaveHistory').innerHTML = data.leave_requests.length ? data.leave_requests.map(leaveCard).join('') : empty('No leave requests submitted yet.');
         } catch (err) {
@@ -147,6 +162,69 @@
         } catch (err) {
             list.innerHTML = empty(err.message);
         }
+    }
+
+
+    async function loadNotifications() {
+        const list = $('notificationsList');
+        if (!list) return;
+        try {
+            const data = await api('/api/staff/notifications');
+            state.notifications = data.notifications || [];
+            list.innerHTML = state.notifications.length ? state.notifications.slice(0, 5).map(notificationCard).join('') : empty('No notifications yet.');
+        } catch (err) {
+            list.innerHTML = empty(err.message);
+        }
+    }
+
+    function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
+        return outputArray;
+    }
+
+    async function enableNotifications() {
+        const btn = $('enableNotificationsBtn');
+        if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+            showToast('This browser does not support staff push notifications.', 'error');
+            return;
+        }
+        try {
+            const keyData = await api('/api/staff/push/public_key');
+            if (!keyData.public_key) throw new Error(keyData.message || 'Push notifications are not configured yet.');
+            const permission = await Notification.requestPermission();
+            if (permission !== 'granted') throw new Error('Notification permission was not granted.');
+            const registration = await navigator.serviceWorker.register('/service-worker.js');
+            let subscription = await registration.pushManager.getSubscription();
+            if (!subscription) {
+                subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(keyData.public_key) });
+            }
+            const data = await api('/api/staff/push/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(subscription.toJSON())
+            });
+            if (btn) {
+                btn.textContent = 'Notifications Enabled';
+                btn.classList.add('success-enabled');
+            }
+            showToast(data.message || 'Notifications enabled.', 'success');
+            await loadNotifications();
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    }
+
+    async function prepareNotificationsButton() {
+        const btn = $('enableNotificationsBtn');
+        if (!btn) return;
+        if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+        btn.classList.remove('hidden');
+        if (Notification.permission === 'granted') btn.textContent = 'Notifications Enabled';
+        btn.addEventListener('click', enableNotifications);
     }
 
 
@@ -341,6 +419,7 @@
         document.querySelectorAll('[data-jump]').forEach((btn) => btn.addEventListener('click', () => setTab(btn.dataset.jump)));
         $('loadBookingsBtn').addEventListener('click', loadBookings);
         if ($('loadPayslipsBtn')) $('loadPayslipsBtn').addEventListener('click', loadPayslips);
+        if ($('refreshNotificationsBtn')) $('refreshNotificationsBtn').addEventListener('click', loadNotifications);
         $('leaveForm').addEventListener('submit', submitLeave);
         document.addEventListener('click', (event) => {
             const closeEl = event.target.closest('[data-close-sheet]');
@@ -392,7 +471,14 @@
         bindEvents();
         bindInstall();
         registerServiceWorker();
+        prepareNotificationsButton();
         if (!navigator.onLine) $('offlineNotice').classList.remove('hidden');
-        loadDashboard();
+        loadDashboard().then(() => {
+            const params = new URLSearchParams(window.location.search);
+            const tab = params.get('tab');
+            if (tab && document.querySelector(`[data-tab="${tab}"]`)) setTab(tab);
+            const bookingId = params.get('booking_id');
+            if (bookingId) openBookingDetail(bookingId);
+        });
     });
 })();

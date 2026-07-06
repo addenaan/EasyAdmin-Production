@@ -7,7 +7,7 @@
     <title>Staff Portal | {{ session.get('company_name', 'Easy Admin') }}</title>
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/static/pwa-icon-192.png">
-    <link rel="stylesheet" href="/static/staff-portal.css?v=20260624-payslips">
+    <link rel="stylesheet" href="/static/staff-portal.css?v=20260706-stafftabs">
 </head>
 <body>
     <div class="staff-shell">
@@ -22,6 +22,8 @@
             </div>
             <div class="header-actions">
                 <button id="installBtn" class="ghost-btn hidden" type="button">Install App</button>
+                <button id="enableNotificationsBtn" class="ghost-btn hidden" type="button">Enable Notifications</button>
+                <a href="{{ url_for('change_password') }}" class="ghost-btn">Change Password</a>
                 <a href="/logout" class="ghost-btn danger">Logout</a>
             </div>
         </header>
@@ -44,6 +46,8 @@
                 <div id="todayBookings" class="card-list loading-card">Loading bookings...</div>
                 <div class="section-heading"><h2>Upcoming bookings</h2></div>
                 <div id="upcomingBookings" class="card-list"></div>
+                <div class="section-heading"><h2>Notifications</h2><button id="refreshNotificationsBtn" class="small-link" type="button">Refresh</button></div>
+                <div id="notificationsList" class="card-list"></div>
             </section>
 
             <section id="bookingsView" class="view">
@@ -110,6 +114,7 @@
     </div>
 
     <script src="/static/easyadmin-formatters.js?v=20260622-format"></script>
-    <script defer src="/static/staff-portal.js?v=20260624-payslips"></script>
+    <script defer src="/static/staff-portal.js?v=20260706-stafftabs"></script>
+    <script defer src="/static/pwa-update.js?v=20260706-update-prompt-password-route-fix"></script>
 </body>
 </html>

@@ -36,6 +36,12 @@ from google_auth_oauthlib.flow import InstalledAppFlow, Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+try:
+    from pywebpush import webpush, WebPushException
+except Exception:
+    webpush = None
+    WebPushException = Exception
+
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 app.secret_key = os.environ.get('SECRET_KEY', 'change-me-for-render-testing')
@@ -547,6 +553,40 @@ def normalise_import_value(value):
     if value is None:
         return ''
     return str(value).strip()
+
+
+IMPORT_NUMERIC_FIELDS = {
+    'clients': {'discount_percent': 0},
+    'employees': {'gross_salary': None, 'workday_hours': None},
+    'services': {'client_price': None, 'company_cost': None},
+    'bookings': {'overtime_hours': 0, 'is_invoiced': 0},
+    'expenses': {'amount': None},
+    'leave_records': {'employee_id': None, 'days': None},
+}
+
+
+def coerce_import_value_for_db(import_type, field, value):
+    """Convert blank CSV values into database-safe values before insert.
+
+    PostgreSQL rejects an empty string for numeric/real/integer columns. This keeps
+    imports tolerant of blank optional template columns such as client discount %.
+    """
+    raw = normalise_import_value(value)
+    numeric_defaults = IMPORT_NUMERIC_FIELDS.get(import_type, {})
+    if field not in numeric_defaults:
+        return raw
+
+    default = numeric_defaults.get(field)
+    if raw == '':
+        return default
+
+    cleaned = raw.replace('R', '').replace('r', '').replace(' ', '').replace(',', '.')
+    try:
+        if field in {'employee_id', 'is_invoiced'}:
+            return int(float(cleaned))
+        return float(cleaned)
+    except Exception:
+        return raw
 
 
 def get_import_template_rows(import_type):
@@ -1650,6 +1690,62 @@ def init_db():
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_users_staff_employee ON users(company_id, employee_id, is_staff)')
     except sqlite3.OperationalError: pass
 
+
+    conn.execute('''CREATE TABLE IF NOT EXISTS staff_push_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER,
+        employee_id INTEGER,
+        user_id INTEGER,
+        endpoint TEXT,
+        keys_json TEXT,
+        user_agent TEXT,
+        device_name TEXT,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT,
+        updated_at TEXT,
+        last_used_at TEXT
+    )''')
+    for c_name, c_type in [
+        ('company_id', 'INTEGER'), ('employee_id', 'INTEGER'), ('user_id', 'INTEGER'), ('endpoint', 'TEXT'),
+        ('keys_json', 'TEXT'), ('user_agent', 'TEXT'), ('device_name', 'TEXT'), ('is_active', 'INTEGER DEFAULT 1'),
+        ('created_at', 'TEXT'), ('updated_at', 'TEXT'), ('last_used_at', 'TEXT')
+    ]:
+        try: conn.execute(f'ALTER TABLE staff_push_subscriptions ADD COLUMN {c_name} {c_type}')
+        except sqlite3.OperationalError: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_staff_push_employee ON staff_push_subscriptions(company_id, employee_id, is_active)')
+    except sqlite3.OperationalError: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_staff_push_endpoint ON staff_push_subscriptions(endpoint)')
+    except sqlite3.OperationalError: pass
+
+    conn.execute('''CREATE TABLE IF NOT EXISTS staff_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER,
+        employee_id INTEGER,
+        user_id INTEGER,
+        notification_type TEXT,
+        title TEXT,
+        message TEXT,
+        related_booking_id INTEGER,
+        related_leave_request_id INTEGER,
+        data_json TEXT,
+        sent_status TEXT,
+        sent_at TEXT,
+        read_at TEXT,
+        created_by TEXT,
+        created_at TEXT,
+        error_message TEXT
+    )''')
+    for c_name, c_type in [
+        ('company_id', 'INTEGER'), ('employee_id', 'INTEGER'), ('user_id', 'INTEGER'), ('notification_type', 'TEXT'),
+        ('title', 'TEXT'), ('message', 'TEXT'), ('related_booking_id', 'INTEGER'), ('related_leave_request_id', 'INTEGER'),
+        ('data_json', 'TEXT'), ('sent_status', 'TEXT'), ('sent_at', 'TEXT'), ('read_at', 'TEXT'),
+        ('created_by', 'TEXT'), ('created_at', 'TEXT'), ('error_message', 'TEXT')
+    ]:
+        try: conn.execute(f'ALTER TABLE staff_notifications ADD COLUMN {c_name} {c_type}')
+        except sqlite3.OperationalError: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_staff_notifications_employee ON staff_notifications(company_id, employee_id, created_at)')
+    except sqlite3.OperationalError: pass
+
     # Payroll compliance migrations: age-based PAYE rebates and employee date of birth.
     rebate_cols = [
         ('secondary_rebate', 'REAL DEFAULT 0'),
@@ -2542,6 +2638,32 @@ def analyse_employee_hours_for_period(conn, company_id, employee, start_date, en
     warning = get_bcea_hours_warning(hours['ordinary_hours'], hours['overtime_hours'], employee['emp_type'])
     return hours, warning
 
+def is_employee_booked_on_date(conn, company_id, employee_name, target_date, exclude_booking_id=None):
+    """Return True when an employee already has a booking on the selected date.
+
+    Bookings can contain one staff name or a comma-separated staff list, so this
+    check compares cleaned names rather than relying on a broad SQL LIKE match.
+    """
+    try:
+        target_date_only = as_date(target_date)
+        target_date_str = target_date_only.strftime('%Y-%m-%d')
+    except Exception:
+        return False
+    target_name = (employee_name or '').strip().lower()
+    if not target_name:
+        return False
+    rows = conn.execute('''SELECT id, employee FROM bookings
+                           WHERE company_id=? AND substr(start, 1, 10)=?''',
+                        (company_id, target_date_str)).fetchall()
+    exclude_id = str(exclude_booking_id or '').strip()
+    for row in rows:
+        if exclude_id and str(row['id']) == exclude_id:
+            continue
+        names = [n.strip().lower() for n in (row['employee'] or '').split(',') if n.strip()]
+        if target_name in names:
+            return True
+    return False
+
 def get_booking_staff_hours_summary(conn, company_id, employee, target_date, proposed_overtime=0, exclude_booking_id=None, include_proposed=False):
     target_date_only = as_date(target_date)
     week_start, week_end = get_week_bounds(target_date_only)
@@ -2580,6 +2702,7 @@ def get_booking_staff_hours_summary(conn, company_id, employee, target_date, pro
         'workday_hours': get_employee_workday_hours(employee),
         'requested_date': target_date_only.strftime('%Y-%m-%d'),
         'is_on_leave': target_date_only.strftime('%Y-%m-%d') in leave_dates,
+        'is_booked_on_date': is_employee_booked_on_date(conn, company_id, employee['name'], target_date_only, exclude_booking_id),
         'week_start': week_start.strftime('%Y-%m-%d'),
         'week_end': week_end.strftime('%Y-%m-%d'),
         'week_hours': round(week_hours['total_hours'], 2),
@@ -2875,6 +2998,26 @@ def inject_session_timeout_script(response):
     return response
 
 
+
+@app.after_request
+def inject_easyadmin_live_refresh_script(response):
+    if 'logged_in' not in session:
+        return response
+    if response.status_code != 200 or response.is_streamed or response.mimetype != 'text/html':
+        return response
+    try:
+        body = response.get_data(as_text=True)
+    except Exception:
+        return response
+    if '</body>' not in body or 'easyadmin-live-refresh.js' in body:
+        return response
+    script = '\n<script defer src="/static/easyadmin-live-refresh.js?v=20260706-full-live-refresh"></script>\n'
+    body = body.replace('</body>', script + '</body>', 1)
+    response.set_data(body)
+    response.headers['Content-Length'] = str(len(response.get_data()))
+    return response
+
+
 @app.after_request
 def prevent_dynamic_response_caching(response):
     """Keep live application data fresh across desktop, mobile PWA and staff portal.
@@ -2945,7 +3088,7 @@ def restrict_access():
     path = request.path
 
     if session.get('is_staff'):
-        allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/staff/download_payslip/', '/api/staff/', '/api/session/', '/logout')
+        allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/staff/download_payslip/', '/api/staff/', '/api/session/', '/change_password', '/change-password', '/password/change', '/logout')
         if path == '/mobile':
             return redirect(url_for('staff_mobile'))
         if path == '/hub':
@@ -2973,7 +3116,7 @@ def restrict_access():
     if path == '/update_client':
         if not (session.get('can_booking') or session.get('can_invoicing')):
             return "Access Denied: You do not have permissions to manage clients.", 403
-    if path == '/booking' or path in ['/bookings', '/add', '/edit_booking', '/delete_booking', '/client_report', '/daily_route', '/export', '/generate_recurring', '/booking_staff_hours', '/export_bookings_range', '/api/booking_ops_report', '/export_booking_ops_report'] or path.startswith('/api/projects') or path.startswith('/api/attachments') or path.startswith('/download_attachment'):
+    if path == '/booking' or path in ['/bookings', '/add', '/edit_booking', '/delete_booking', '/client_report', '/daily_route', '/export', '/generate_recurring', '/booking_staff_hours', '/export_bookings_range', '/api/booking_ops_report', '/export_booking_ops_report'] or path.startswith('/api/projects') or path.startswith('/api/attachments') or path.startswith('/api/bulk_bookings') or path.startswith('/download_attachment'):
         if not session.get('can_booking'): return "Access Denied: You do not have permissions to access Booking & Operations.", 403
     if path in ['/update_service', '/delete_service', '/api/services']:
         if not (session.get('can_finance') or session.get('can_invoicing')):
@@ -3093,6 +3236,47 @@ def forgot_password():
             finally:
                 conn.close()
     return render_template('forgot_password.html', success_msg=success_msg, error_msg=error_msg)
+
+@app.route('/change_password', methods=['GET', 'POST'])
+@app.route('/change-password', methods=['GET', 'POST'])
+@app.route('/password/change', methods=['GET', 'POST'])
+def change_password():
+    success_msg = None
+    error_msg = None
+    if 'logged_in' not in session or 'username' not in session:
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        current_password = request.form.get('current_password') or ''
+        new_password = request.form.get('new_password') or ''
+        confirm_password = request.form.get('confirm_password') or ''
+
+        if not current_password or not new_password or not confirm_password:
+            error_msg = 'Please complete all password fields.'
+        elif new_password != confirm_password:
+            error_msg = 'New password and confirm password do not match.'
+        elif len(new_password) < 8:
+            error_msg = 'New password must be at least 8 characters long.'
+        else:
+            conn = get_db_connection()
+            try:
+                user = conn.execute('SELECT * FROM users WHERE username=?', (session.get('username'),)).fetchone()
+                if not user or not check_password_hash(user['password_hash'], current_password):
+                    error_msg = 'Current password is incorrect.'
+                else:
+                    conn.execute('UPDATE users SET password_hash=? WHERE id=?', (generate_password_hash(new_password), user['id']))
+                    conn.commit()
+                    success_msg = 'Password changed successfully.'
+                    try:
+                        log_action('System', 'Change Password', f"User {session.get('username')} changed their password.")
+                    except Exception:
+                        pass
+            except Exception as exc:
+                error_msg = f'Password could not be changed: {exc}'
+            finally:
+                conn.close()
+
+    return render_template('change_password.html', success_msg=success_msg, error_msg=error_msg, session=session)
 
 @app.route('/logout')
 def logout(): 
@@ -3638,6 +3822,192 @@ def _build_staff_payslip_pdf(row, employee, company):
     return io.BytesIO(pdf_bytes)
 
 
+# ==========================================================
+# STAFF PUSH NOTIFICATIONS
+# ==========================================================
+def _push_vapid_public_key():
+    return (os.environ.get('VAPID_PUBLIC_KEY') or os.environ.get('WEB_PUSH_PUBLIC_KEY') or '').strip()
+
+
+def _push_vapid_private_key():
+    return (os.environ.get('VAPID_PRIVATE_KEY') or os.environ.get('WEB_PUSH_PRIVATE_KEY') or '').strip()
+
+
+def _push_vapid_subject():
+    return (os.environ.get('VAPID_SUBJECT') or os.environ.get('WEB_PUSH_SUBJECT') or 'mailto:info@afyenterprises.com').strip()
+
+
+def _push_is_configured():
+    return bool(webpush and _push_vapid_public_key() and _push_vapid_private_key())
+
+
+def _notification_payload(title, message, target_url='/staff/mobile', notification_type='message', extra=None):
+    data = dict(extra or {})
+    data.setdefault('url', target_url or '/staff/mobile')
+    data.setdefault('type', notification_type or 'message')
+    return {
+        'title': title or 'Easy Admin',
+        'message': message or '',
+        'body': message or '',
+        'icon': '/static/pwa-icon-192.png',
+        'badge': '/static/pwa-icon-192.png',
+        'url': data.get('url'),
+        'data': data,
+    }
+
+
+def _insert_staff_notification(conn, company_id, employee_id, notification_type, title, message, related_booking_id=None, related_leave_request_id=None, data=None, created_by='System'):
+    user = conn.execute('''SELECT id FROM users
+                           WHERE company_id=? AND employee_id=? AND COALESCE(is_staff,0)=1
+                           ORDER BY id ASC LIMIT 1''', (company_id, employee_id)).fetchone()
+    user_id = user['id'] if user else None
+    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cur = conn.execute('''INSERT INTO staff_notifications
+                          (company_id, employee_id, user_id, notification_type, title, message,
+                           related_booking_id, related_leave_request_id, data_json, sent_status,
+                           created_by, created_at)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)''',
+                       (company_id, employee_id, user_id, notification_type, title, message,
+                        related_booking_id, related_leave_request_id, json.dumps(data or {}), created_by, created_at))
+    return getattr(cur, 'lastrowid', None)
+
+
+def _update_staff_notification_status(conn, notification_id, status, error_message=''):
+    if not notification_id:
+        return
+    try:
+        conn.execute('''UPDATE staff_notifications SET sent_status=?, sent_at=?, error_message=? WHERE id=?''',
+                     (status, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), error_message[:1000] if error_message else '', notification_id))
+    except Exception:
+        pass
+
+
+def _send_push_to_subscription(subscription, payload):
+    if not _push_is_configured():
+        raise RuntimeError('Push notifications are not configured. Set VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT in Render.')
+    keys = json.loads(subscription['keys_json'] or '{}')
+    subscription_info = {'endpoint': subscription['endpoint'], 'keys': keys}
+    webpush(
+        subscription_info=subscription_info,
+        data=json.dumps(payload),
+        vapid_private_key=_push_vapid_private_key(),
+        vapid_claims={'sub': _push_vapid_subject()}
+    )
+
+
+def _send_staff_notification_to_employee_ids(company_id, employee_ids, notification_type, title, message, related_booking_id=None, related_leave_request_id=None, target_url='/staff/mobile', data=None, created_by='System'):
+    employee_ids = sorted({int(eid) for eid in (employee_ids or []) if str(eid or '').isdigit()})
+    if not employee_ids:
+        return {'sent': 0, 'failed': 0, 'logged': 0, 'message': 'No employee recipients.'}
+    conn = get_db_connection()
+    sent = failed = logged = 0
+    try:
+        for employee_id in employee_ids:
+            payload = _notification_payload(title, message, target_url, notification_type, data)
+            notification_id = _insert_staff_notification(conn, company_id, employee_id, notification_type, title, message, related_booking_id, related_leave_request_id, payload.get('data'), created_by)
+            logged += 1
+            subs = conn.execute('''SELECT * FROM staff_push_subscriptions
+                                   WHERE company_id=? AND employee_id=? AND COALESCE(is_active,1)=1
+                                   ORDER BY updated_at DESC, id DESC''', (company_id, employee_id)).fetchall()
+            if not subs:
+                _update_staff_notification_status(conn, notification_id, 'no_subscription')
+                continue
+            if not _push_is_configured():
+                _update_staff_notification_status(conn, notification_id, 'not_configured', 'VAPID keys or pywebpush are not configured.')
+                continue
+            sub_sent = 0
+            sub_errors = []
+            for sub in subs:
+                try:
+                    _send_push_to_subscription(sub, payload)
+                    sub_sent += 1
+                    conn.execute('UPDATE staff_push_subscriptions SET last_used_at=? WHERE id=?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), sub['id']))
+                except Exception as exc:
+                    sub_errors.append(str(exc))
+                    failed += 1
+                    if any(code in str(exc) for code in ('410', '404', 'ExpiredSubscription')):
+                        conn.execute('UPDATE staff_push_subscriptions SET is_active=0, updated_at=? WHERE id=?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), sub['id']))
+            if sub_sent:
+                sent += sub_sent
+                _update_staff_notification_status(conn, notification_id, 'sent')
+            elif sub_errors:
+                _update_staff_notification_status(conn, notification_id, 'failed', '; '.join(sub_errors)[:1000])
+        conn.commit()
+    finally:
+        conn.close()
+    return {'sent': sent, 'failed': failed, 'logged': logged}
+
+
+def _employee_ids_from_booking_employee_names(conn, company_id, employee_names):
+    ids = []
+    if isinstance(employee_names, str):
+        names = [n.strip() for n in employee_names.split(',') if n.strip()]
+    else:
+        names = [str(n or '').strip() for n in (employee_names or []) if str(n or '').strip()]
+    if not names:
+        return ids
+    employees = conn.execute('SELECT id, name FROM employees WHERE company_id=?', (company_id,)).fetchall()
+    combined = ', '.join(names)
+    for emp in employees:
+        if employee_name_matches(combined, emp['name']):
+            ids.append(emp['id'])
+    return sorted(set(ids))
+
+
+def _notify_staff_booking_event_worker(company_id, booking_id, notification_type, title, message):
+    conn = get_db_connection()
+    row = None
+    try:
+        row = conn.execute('SELECT id, employee, start, title, booking_type FROM bookings WHERE id=? AND company_id=?', (booking_id, company_id)).fetchone()
+        if not row:
+            return
+        employee_ids = _employee_ids_from_booking_employee_names(conn, company_id, row['employee'] or '')
+    finally:
+        conn.close()
+    target_url = f'/staff/mobile?tab=bookings&booking_id={booking_id}'
+    detail = ''
+    try:
+        booking_date = format_display_date(row['start'] or '')
+        if booking_date:
+            detail = f' for {booking_date}'
+    except Exception:
+        detail = ''
+    _send_staff_notification_to_employee_ids(company_id, employee_ids, notification_type, title, (message or '').replace('{date}', detail).strip(), related_booking_id=booking_id, target_url=target_url, created_by='System')
+
+
+def notify_staff_booking_event_async(company_id, booking_id, notification_type, title, message):
+    try:
+        threading.Thread(target=_notify_staff_booking_event_worker, args=(company_id, booking_id, notification_type, title, message), daemon=True).start()
+    except Exception:
+        pass
+
+
+def notify_staff_employee_names_async(company_id, employee_names, notification_type, title, message, target_url='/staff/mobile'):
+    def worker():
+        conn = get_db_connection()
+        try:
+            employee_ids = _employee_ids_from_booking_employee_names(conn, company_id, employee_names)
+        finally:
+            conn.close()
+        _send_staff_notification_to_employee_ids(company_id, employee_ids, notification_type, title, message, target_url=target_url, created_by='System')
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+    except Exception:
+        pass
+
+
+def notify_staff_leave_status_async(company_id, employee_id, request_id, status, leave_type, start_date, end_date):
+    title = 'Leave approved' if status == 'Approved' else 'Leave declined'
+    message = f'Your {leave_type} request from {format_display_date(start_date)} to {format_display_date(end_date)} was {status.lower()}.'
+    try:
+        threading.Thread(target=_send_staff_notification_to_employee_ids,
+                         args=(company_id, [employee_id], 'leave_status', title, message),
+                         kwargs={'related_leave_request_id': request_id, 'target_url': '/staff/mobile?tab=leave', 'created_by': 'System'},
+                         daemon=True).start()
+    except Exception:
+        pass
+
+
 @app.route('/staff')
 def staff_portal():
     if not _staff_is_user():
@@ -3984,6 +4354,102 @@ def api_staff_leave_requests():
         conn.close()
 
 
+@app.route('/api/staff/push/public_key')
+def api_staff_push_public_key():
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    return jsonify({
+        'status': 'success',
+        'enabled': _push_is_configured(),
+        'public_key': _push_vapid_public_key(),
+        'message': '' if _push_is_configured() else 'Push notifications are not configured on the server yet.'
+    })
+
+
+@app.route('/api/staff/push/subscribe', methods=['POST'])
+def api_staff_push_subscribe():
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    if not _push_vapid_public_key():
+        return _staff_json_error('Push notifications are not configured on the server yet.', 400)
+    data = request.get_json(silent=True) or {}
+    endpoint = (data.get('endpoint') or '').strip()
+    keys = data.get('keys') or {}
+    if not endpoint or not isinstance(keys, dict) or not keys.get('p256dh') or not keys.get('auth'):
+        return _staff_json_error('Invalid push subscription received.', 400)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        existing = conn.execute('SELECT id FROM staff_push_subscriptions WHERE endpoint=?', (endpoint,)).fetchone()
+        ua = request.headers.get('User-Agent', '')[:500]
+        if existing:
+            conn.execute('''UPDATE staff_push_subscriptions
+                            SET company_id=?, employee_id=?, user_id=?, keys_json=?, user_agent=?, is_active=1, updated_at=?
+                            WHERE id=?''', (cid, employee['id'], session.get('user_id'), json.dumps(keys), ua, now, existing['id']))
+        else:
+            conn.execute('''INSERT INTO staff_push_subscriptions
+                            (company_id, employee_id, user_id, endpoint, keys_json, user_agent, is_active, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)''',
+                         (cid, employee['id'], session.get('user_id'), endpoint, json.dumps(keys), ua, now, now))
+        conn.commit()
+        return jsonify({'status': 'success', 'message': 'Notifications enabled for this device.'})
+    except Exception as exc:
+        return _staff_json_error(f'Push subscription could not be saved: {exc}', 500)
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/push/unsubscribe', methods=['POST'])
+def api_staff_push_unsubscribe():
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    data = request.get_json(silent=True) or {}
+    endpoint = (data.get('endpoint') or '').strip()
+    if not endpoint:
+        return jsonify({'status': 'success', 'message': 'Notifications disabled.'})
+    conn = get_db_connection()
+    try:
+        conn.execute('UPDATE staff_push_subscriptions SET is_active=0, updated_at=? WHERE endpoint=? AND company_id=?',
+                     (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), endpoint, session.get('company_id')))
+        conn.commit()
+        return jsonify({'status': 'success', 'message': 'Notifications disabled for this device.'})
+    finally:
+        conn.close()
+
+
+@app.route('/api/staff/notifications')
+def api_staff_notifications():
+    if not _staff_is_user():
+        return _staff_json_error('Staff portal access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        employee = _staff_employee_row(conn)
+        if not employee:
+            return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
+        rows = conn.execute('''SELECT * FROM staff_notifications
+                               WHERE company_id=? AND employee_id=?
+                               ORDER BY created_at DESC, id DESC LIMIT 50''', (cid, employee['id'])).fetchall()
+        items = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d['data'] = json.loads(d.get('data_json') or '{}')
+            except Exception:
+                d['data'] = {}
+            d.pop('data_json', None)
+            items.append(d)
+        return jsonify({'status': 'success', 'notifications': items})
+    except Exception as exc:
+        return _staff_json_error(f'Notifications could not be loaded: {exc}', 500)
+    finally:
+        conn.close()
+
+
 @app.route('/api/staff/admin/employees')
 def api_staff_admin_employees():
     if not _staff_is_admin():
@@ -4080,6 +4546,85 @@ def api_staff_admin_leave_requests():
         conn.close()
 
 
+@app.route('/api/staff/admin/notifications/send', methods=['POST'])
+def api_staff_admin_send_notification():
+    if not _staff_is_admin():
+        return _staff_json_error('Staff Portal administration access is required.', 403)
+    data = request.get_json(silent=True) or {}
+    title = (data.get('title') or '').strip()
+    message = (data.get('message') or '').strip()
+    broadcast = bool(data.get('broadcast'))
+    employee_ids_payload = data.get('employee_ids')
+    employee_id = data.get('employee_id')
+    if not title or not message:
+        return _staff_json_error('Please enter both a notification title and message.', 400)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        if isinstance(employee_ids_payload, list):
+            requested_ids = []
+            for raw_id in employee_ids_payload:
+                try:
+                    parsed_id = int(raw_id or 0)
+                    if parsed_id > 0 and parsed_id not in requested_ids:
+                        requested_ids.append(parsed_id)
+                except Exception:
+                    continue
+            if not requested_ids:
+                return _staff_json_error('Please tick at least one staff member.', 400)
+            placeholders = ','.join(['?'] * len(requested_ids))
+            rows = conn.execute(f'''SELECT DISTINCT e.id FROM employees e
+                                    JOIN users u ON u.company_id=e.company_id AND u.employee_id=e.id AND COALESCE(u.is_staff,0)=1
+                                    WHERE e.company_id=? AND e.id IN ({placeholders}) AND COALESCE(e.status,'Active') != 'Inactive'
+                                    ORDER BY e.name ASC''', [cid] + requested_ids).fetchall()
+            employee_ids = [r['id'] for r in rows]
+            if not employee_ids:
+                return _staff_json_error('Please tick at least one valid active staff portal user.', 400)
+        elif broadcast:
+            rows = conn.execute('''SELECT e.id FROM employees e
+                                   JOIN users u ON u.company_id=e.company_id AND u.employee_id=e.id AND COALESCE(u.is_staff,0)=1
+                                   WHERE e.company_id=? AND COALESCE(e.status,'Active') != 'Inactive'
+                                   ORDER BY e.name ASC''', (cid,)).fetchall()
+            employee_ids = [r['id'] for r in rows]
+        else:
+            try:
+                employee_id = int(employee_id or 0)
+            except Exception:
+                employee_id = 0
+            row = conn.execute('''SELECT e.id FROM employees e
+                                  JOIN users u ON u.company_id=e.company_id AND u.employee_id=e.id AND COALESCE(u.is_staff,0)=1
+                                  WHERE e.id=? AND e.company_id=? AND COALESCE(e.status,'Active') != 'Inactive' ''', (employee_id, cid)).fetchone()
+            if not row:
+                return _staff_json_error('Please select a valid active staff portal user.', 400)
+            employee_ids = [employee_id]
+    finally:
+        conn.close()
+    if not employee_ids:
+        return _staff_json_error('No active staff portal users were selected.', 400)
+    result = _send_staff_notification_to_employee_ids(cid, employee_ids, 'admin_message', title, message, target_url='/staff/mobile', created_by=session.get('username','Admin'))
+    log_action('Staff Portal', 'Sent Staff Notification', f"{session.get('username','Admin')} sent staff notification to {len(employee_ids)} employee(s).")
+    return jsonify({'status': 'success', 'message': f"Notification logged for {len(employee_ids)} employee(s). Sent to {result.get('sent', 0)} device(s).", 'result': result})
+
+
+@app.route('/api/staff/admin/notifications/history')
+def api_staff_admin_notifications_history():
+    if not _staff_is_admin():
+        return _staff_json_error('Staff Portal administration access is required.', 403)
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('''SELECT n.*, e.name AS employee_name
+                               FROM staff_notifications n
+                               LEFT JOIN employees e ON e.id=n.employee_id AND e.company_id=n.company_id
+                               WHERE n.company_id=?
+                               ORDER BY n.created_at DESC, n.id DESC LIMIT 100''', (cid,)).fetchall()
+        return jsonify({'status': 'success', 'notifications': [dict(r) for r in rows]})
+    except Exception as exc:
+        return _staff_json_error(f'Notification history could not be loaded: {exc}', 500)
+    finally:
+        conn.close()
+
+
 @app.route('/api/staff/admin/leave_requests/<int:request_id>/review', methods=['POST'])
 def api_staff_admin_review_leave(request_id):
     if not _staff_is_admin():
@@ -4113,6 +4658,7 @@ def api_staff_admin_review_leave(request_id):
                         WHERE id=? AND company_id=?''',
                      (new_status, session.get('username', ''), reviewed_at, admin_note, leave_record_id, request_id, cid))
         conn.commit()
+        notify_staff_leave_status_async(cid, req['employee_id'], request_id, new_status, req['leave_type'], req['start_date'], req['end_date'])
         log_action('Staff Portal', f'{new_status} Leave Request', f"{new_status} leave request for {req['employee_name']}.")
         return jsonify({'status': 'success', 'message': f'Leave request {new_status.lower()}.'})
     except Exception as exc:
@@ -5659,7 +6205,7 @@ def admin_import_company_data():
             cols = [c for c in row.keys() if c in table_cols]
             if 'company_id' in table_cols:
                 cols.append('company_id')
-            values = [row[c] for c in row.keys() if c in table_cols]
+            values = [coerce_import_value_for_db(import_type, c, row[c]) for c in row.keys() if c in table_cols]
             if 'company_id' in table_cols:
                 values.append(cid)
             placeholders = ','.join(['?'] * len(cols))
@@ -6022,6 +6568,361 @@ def normalise_booking_project_id(conn, company_id, project_id):
         raise ValueError('Cancelled projects cannot be linked to new bookings.')
     return project_id
 
+def _booking_date_part(start_value):
+    raw = str(start_value or '')
+    return raw[:10] if raw else ''
+
+
+def _booking_time_part(start_value):
+    raw = str(start_value or '')
+    if 'T' in raw:
+        return raw.split('T', 1)[1][:5]
+    if len(raw) >= 16:
+        return raw[11:16]
+    return '00:00'
+
+
+def _db_truthy(value):
+    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'y')
+
+
+def _normalise_service_selection(raw_value):
+    """Return a comma-separated service list from either a string or list payload."""
+    if isinstance(raw_value, list):
+        seen = set()
+        values = []
+        for item in raw_value:
+            text = str(item or '').strip()
+            key = text.lower()
+            if text and key not in seen:
+                values.append(text)
+                seen.add(key)
+        return ', '.join(values)
+    return str(raw_value or '').strip()
+
+
+def _normalise_id_list(raw_ids):
+    clean = []
+    seen = set()
+    for raw in raw_ids or []:
+        try:
+            val = int(raw)
+        except Exception:
+            continue
+        if val > 0 and val not in seen:
+            clean.append(val)
+            seen.add(val)
+    return clean
+
+
+def _delete_attachment_files_for_rows(rows):
+    uploads_root = os.path.abspath(app.config['UPLOAD_FOLDER'])
+    for row in rows or []:
+        try:
+            abs_path = os.path.abspath(os.path.join(app.config['UPLOAD_FOLDER'], row['file_path']))
+            if abs_path.startswith(uploads_root) and os.path.exists(abs_path):
+                os.remove(abs_path)
+        except Exception as exc:
+            print(f'Bulk booking attachment delete warning: {exc}')
+
+
+@app.route('/api/bulk_bookings/search', methods=['POST'])
+def api_bulk_bookings_search():
+    data = request.get_json(silent=True) or {}
+    cid = session['company_id']
+    try:
+        client_id = int(data.get('client_id') or 0)
+    except Exception:
+        client_id = 0
+    start_date = str(data.get('start_date') or '').strip()[:10]
+    end_date = str(data.get('end_date') or '').strip()[:10]
+    if not client_id:
+        return jsonify({'status': 'error', 'message': 'Please select a client.'}), 400
+    if not start_date or not end_date:
+        return jsonify({'status': 'error', 'message': 'Please select a start and end date.'}), 400
+    if start_date > end_date:
+        return jsonify({'status': 'error', 'message': 'End date must be after start date.'}), 400
+
+    conn = get_db_connection()
+    client = conn.execute('SELECT * FROM clients WHERE id=? AND company_id=?', (client_id, cid)).fetchone()
+    if not client:
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'Client not found for this company.'}), 404
+
+    where = ["b.company_id=?", "b.client_id=?", "SUBSTR(COALESCE(b.start, ''), 1, 10) >= ?", "SUBSTR(COALESCE(b.start, ''), 1, 10) <= ?"]
+    params = [cid, client_id, start_date, end_date]
+
+    project_filter = str(data.get('project_filter') or 'all').strip().lower()
+    if project_filter == 'no_project':
+        where.append('(b.project_id IS NULL OR b.project_id=0)')
+    elif project_filter == 'linked':
+        where.append('(b.project_id IS NOT NULL AND b.project_id<>0)')
+
+    invoiced_filter = str(data.get('invoiced_filter') or 'all').strip().lower()
+    if invoiced_filter == 'uninvoiced':
+        where.append('COALESCE(b.is_invoiced, 0)=0')
+    elif invoiced_filter == 'invoiced':
+        where.append('COALESCE(b.is_invoiced, 0)<>0')
+
+    service_filter = str(data.get('service') or '').strip()
+    if service_filter:
+        where.append("COALESCE(b.booking_type, '') LIKE ?")
+        params.append(f'%{service_filter}%')
+
+    employee_filter = str(data.get('employee') or '').strip()
+    if employee_filter:
+        where.append("COALESCE(b.employee, '') LIKE ?")
+        params.append(f'%{employee_filter}%')
+
+    rows = conn.execute(f'''SELECT b.id, b.title, b.start, b.employee, b.booking_type, b.transport,
+                                  b.booking_notes, b.overtime_hours, b.is_invoiced, b.project_id,
+                                  b.google_event_id, b.mobile_status,
+                                  p.project_name, p.project_code,
+                                  c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name,
+                                  (SELECT COUNT(*) FROM attachments a WHERE a.company_id=b.company_id AND a.linked_type='booking' AND a.linked_id=b.id) AS attachment_count
+                           FROM bookings b
+                           LEFT JOIN projects p ON p.id=b.project_id AND p.company_id=b.company_id
+                           LEFT JOIN clients c ON c.id=b.client_id AND c.company_id=b.company_id
+                           WHERE {' AND '.join(where)}
+                           ORDER BY b.start ASC, b.id ASC
+                           LIMIT 750''', params).fetchall()
+    result = []
+    for row in rows:
+        r = dict(row)
+        client_name = ' '.join([x for x in [r.get('client_first_name'), r.get('client_surname')] if x]).strip() or r.get('client_company_name') or r.get('title') or ''
+        result.append({
+            'id': r.get('id'),
+            'date': _booking_date_part(r.get('start')),
+            'time': _booking_time_part(r.get('start')),
+            'client': client_name,
+            'employee': r.get('employee') or 'Unassigned',
+            'booking_type': r.get('booking_type') or '',
+            'transport': r.get('transport') or '',
+            'booking_notes': r.get('booking_notes') or '',
+            'overtime_hours': float(r.get('overtime_hours') or 0),
+            'project_id': r.get('project_id') or '',
+            'project_name': r.get('project_name') or '',
+            'project_code': r.get('project_code') or '',
+            'is_invoiced': _db_truthy(r.get('is_invoiced')),
+            'mobile_status': r.get('mobile_status') or 'Scheduled',
+            'attachment_count': int(r.get('attachment_count') or 0)
+        })
+    conn.close()
+    return jsonify({'status': 'success', 'bookings': result, 'count': len(result), 'limited': len(result) >= 750})
+
+
+@app.route('/api/bulk_bookings/update', methods=['POST'])
+def api_bulk_bookings_update():
+    data = request.get_json(silent=True) or {}
+    cid = session['company_id']
+    booking_ids = _normalise_id_list(data.get('booking_ids'))
+    if not booking_ids:
+        return jsonify({'status': 'error', 'message': 'Please select at least one booking to update.'}), 400
+    if len(booking_ids) > 750:
+        return jsonify({'status': 'error', 'message': 'Please update no more than 750 bookings at a time.'}), 400
+
+    update_project = bool(data.get('update_project'))
+    update_service = bool(data.get('update_service'))
+    update_time = bool(data.get('update_time'))
+    update_notes = bool(data.get('update_notes'))
+    skip_invoiced = data.get('skip_invoiced', True) is not False
+    custom_updates = data.get('custom_fields') if isinstance(data.get('custom_fields'), dict) else {}
+
+    if not any([update_project, update_service, update_time, update_notes, bool(custom_updates)]):
+        return jsonify({'status': 'error', 'message': 'Please tick at least one field to update.'}), 400
+
+    conn = get_db_connection()
+    try:
+        project_id = None
+        if update_project:
+            project_id = normalise_booking_project_id(conn, cid, data.get('project_id'))
+            if project_id:
+                placeholders = ','.join(['?'] * len(booking_ids))
+                target_clients = conn.execute(f'SELECT DISTINCT client_id FROM bookings WHERE company_id=? AND id IN ({placeholders})', [cid] + booking_ids).fetchall()
+                client_ids = {dict(r).get('client_id') for r in target_clients if dict(r).get('client_id')}
+                project = conn.execute('SELECT client_id FROM projects WHERE id=? AND company_id=?', (project_id, cid)).fetchone()
+                project_client_id = dict(project).get('client_id') if project else None
+                if project_client_id and client_ids and any(int(c) != int(project_client_id) for c in client_ids):
+                    conn.close()
+                    return jsonify({'status': 'error', 'message': 'Selected project belongs to a different client.'}), 400
+
+        service_value = _normalise_service_selection(data.get('booking_type'))
+        if update_service and not service_value:
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'Please select a booking service/type.'}), 400
+
+        time_value = str(data.get('time') or '').strip()
+        if update_time:
+            try:
+                datetime.strptime(time_value, '%H:%M')
+            except Exception:
+                conn.close()
+                return jsonify({'status': 'error', 'message': 'Please enter a valid time.'}), 400
+
+        custom_config = get_tenant_custom_fields(conn, cid, 'booking', visible_only=True)
+        custom_by_key = {f['field_key']: f for f in custom_config}
+        clean_custom_updates = {}
+        for key, raw_value in custom_updates.items():
+            if key not in custom_by_key:
+                continue
+            field = custom_by_key[key]
+            if isinstance(raw_value, bool):
+                clean_value = 'Yes' if raw_value else ''
+            else:
+                clean_value = '' if raw_value is None else str(raw_value).strip()
+            if field.get('required') and field.get('field_type') != 'checkbox' and not clean_value:
+                conn.close()
+                return jsonify({'status': 'error', 'message': f"{field.get('field_label') or key} is required."}), 400
+            clean_custom_updates[key] = clean_value
+
+        placeholders = ','.join(['?'] * len(booking_ids))
+        rows = conn.execute(f'''SELECT b.*, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
+                               FROM bookings b
+                               LEFT JOIN clients c ON c.id=b.client_id AND c.company_id=b.company_id
+                               WHERE b.company_id=? AND b.id IN ({placeholders})
+                               ORDER BY b.start ASC, b.id ASC''', [cid] + booking_ids).fetchall()
+        updated_ids = []
+        skipped_invoiced = 0
+        google_sync_payload = []
+
+        for row in rows:
+            r = dict(row)
+            if skip_invoiced and _db_truthy(r.get('is_invoiced')):
+                skipped_invoiced += 1
+                continue
+            set_parts = []
+            params = []
+            new_start = r.get('start') or ''
+            new_booking_type = r.get('booking_type') or ''
+            if update_project:
+                set_parts.append('project_id=?')
+                params.append(project_id)
+            if update_service:
+                set_parts.append('booking_type=?')
+                params.append(service_value)
+                new_booking_type = service_value
+            if update_time:
+                new_start = f"{_booking_date_part(r.get('start'))}T{time_value}"
+                set_parts.append('start=?')
+                params.append(new_start)
+            if update_notes:
+                set_parts.append('booking_notes=?')
+                params.append(str(data.get('booking_notes') or ''))
+            if set_parts:
+                params.extend([r.get('id'), cid])
+                conn.execute(f"UPDATE bookings SET {', '.join(set_parts)} WHERE id=? AND company_id=?", params)
+            for key, value in clean_custom_updates.items():
+                conn.execute("DELETE FROM custom_field_values WHERE company_id=? AND module_name='booking' AND record_id=? AND field_key=?", (cid, r.get('id'), key))
+                if value:
+                    conn.execute("INSERT INTO custom_field_values (company_id, module_name, record_id, field_key, field_value) VALUES (?, 'booking', ?, ?, ?)", (cid, r.get('id'), key, value))
+            updated_ids.append(r.get('id'))
+            if session.get('comp_google_calendar') and r.get('google_event_id') and (update_service or update_time):
+                client_name = ' '.join([x for x in [r.get('client_first_name'), r.get('client_surname')] if x]).strip() or r.get('client_company_name') or r.get('title') or ''
+                google_sync_payload.append({
+                    'google_event_id': r.get('google_event_id'),
+                    'client_name': client_name,
+                    'date': _booking_date_part(new_start),
+                    'time': _booking_time_part(new_start),
+                    'employee': r.get('employee') or '',
+                    'booking_type': new_booking_type,
+                    'transport': r.get('transport') or ''
+                })
+
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({'status': 'error', 'message': f'Bulk update failed: {exc}'}), 500
+
+    for item in google_sync_payload:
+        try:
+            update_google_event(item['google_event_id'], item['client_name'], item['date'], item['time'], item['employee'], item['booking_type'], item['transport'], session['company_name'], session.get('company_id'))
+        except Exception as exc:
+            print(f"Google Sync Error on bulk booking update: {_format_google_calendar_error(exc)}")
+    for booking_id in updated_ids:
+        notify_staff_booking_event_async(session.get('company_id'), booking_id, 'booking_updated', 'Booking updated', 'One of your bookings was modified{date}.')
+
+    log_action('Booking & Ops', 'Bulk Updated Bookings', f"Updated {len(updated_ids)} bookings; skipped invoiced: {skipped_invoiced}")
+    return jsonify({'status': 'success', 'updated': len(updated_ids), 'skipped_invoiced': skipped_invoiced, 'message': f"Updated {len(updated_ids)} booking(s)." + (f" Skipped {skipped_invoiced} invoiced booking(s)." if skipped_invoiced else '')})
+
+
+@app.route('/api/bulk_bookings/delete', methods=['POST'])
+def api_bulk_bookings_delete():
+    data = request.get_json(silent=True) or {}
+    cid = session['company_id']
+    booking_ids = _normalise_id_list(data.get('booking_ids'))
+    if not booking_ids:
+        return jsonify({'status': 'error', 'message': 'Please select at least one booking to delete.'}), 400
+    if len(booking_ids) > 750:
+        return jsonify({'status': 'error', 'message': 'Please delete no more than 750 bookings at a time.'}), 400
+
+    conn = get_db_connection()
+    placeholders = ','.join(['?'] * len(booking_ids))
+    rows = conn.execute(f'''SELECT id, title, start, employee, google_event_id, is_invoiced, mobile_status,
+                                  (SELECT COUNT(*) FROM attachments a WHERE a.company_id=bookings.company_id AND a.linked_type='booking' AND a.linked_id=bookings.id) AS attachment_count
+                           FROM bookings
+                           WHERE company_id=? AND id IN ({placeholders})
+                           ORDER BY start ASC, id ASC''', [cid] + booking_ids).fetchall()
+
+    deleted = []
+    skipped_invoiced = 0
+    skipped_mobile = 0
+    google_ids = []
+    attachment_rows_to_remove = []
+    employee_notices = []
+
+    try:
+        for row in rows:
+            r = dict(row)
+            if _db_truthy(r.get('is_invoiced')):
+                skipped_invoiced += 1
+                continue
+            mobile_status = str(r.get('mobile_status') or 'Scheduled').strip().lower()
+            if mobile_status in ('in progress', 'completed'):
+                skipped_mobile += 1
+                continue
+            if r.get('google_event_id'):
+                google_ids.append(r.get('google_event_id'))
+            att_rows = conn.execute("SELECT * FROM attachments WHERE company_id=? AND linked_type='booking' AND linked_id=?", (cid, r.get('id'))).fetchall()
+            attachment_rows_to_remove.extend(att_rows)
+            conn.execute("DELETE FROM custom_field_values WHERE company_id=? AND module_name='booking' AND record_id=?", (cid, r.get('id')))
+            conn.execute("DELETE FROM attachments WHERE company_id=? AND linked_type='booking' AND linked_id=?", (cid, r.get('id')))
+            conn.execute('DELETE FROM bookings WHERE id=? AND company_id=?', (r.get('id'), cid))
+            deleted.append(r.get('id'))
+            if r.get('employee'):
+                employee_notices.append((r.get('employee'), format_display_date(r.get('start'))))
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({'status': 'error', 'message': f'Bulk delete failed: {exc}'}), 500
+
+    _delete_attachment_files_for_rows(attachment_rows_to_remove)
+    if session.get('comp_google_calendar'):
+        for google_id in google_ids:
+            try:
+                delete_google_event(google_id, session.get('company_id'))
+            except Exception as exc:
+                print(f"Google Sync Error on bulk booking delete: {_format_google_calendar_error(exc)}")
+    for employee_names, booking_date in employee_notices:
+        notify_staff_employee_names_async(session.get('company_id'), employee_names, 'booking_deleted', 'Booking cancelled', f'Your booking for {booking_date} was cancelled.', '/staff/mobile?tab=bookings')
+
+    log_action('Booking & Ops', 'Bulk Deleted Bookings', f"Deleted {len(deleted)} bookings; skipped invoiced: {skipped_invoiced}; skipped mobile started/completed: {skipped_mobile}")
+    msg = f"Deleted {len(deleted)} booking(s)."
+    if skipped_invoiced:
+        msg += f" Skipped {skipped_invoiced} invoiced booking(s)."
+    if skipped_mobile:
+        msg += f" Skipped {skipped_mobile} booking(s) already in progress or completed."
+    return jsonify({'status': 'success', 'deleted': len(deleted), 'skipped_invoiced': skipped_invoiced, 'skipped_mobile': skipped_mobile, 'message': msg})
+
 @app.route('/add', methods=['POST'])
 def add_booking():
     data = request.get_json()
@@ -6038,6 +6939,10 @@ def add_booking():
     except ValueError as e:
         conn.close()
         return jsonify({"status": "error", "message": str(e)}), 400
+    booking_type_value = _normalise_service_selection(data.get('booking_type'))
+    if not booking_type_value:
+        conn.close()
+        return jsonify({"status": "error", "message": "Please select at least one service."}), 400
     dt_str = f"{data['date']}T{data['time']}"
     try:
         booking_date = datetime.strptime(data['date'], '%Y-%m-%d')
@@ -6063,28 +6968,30 @@ def add_booking():
             google_id = None
             if session.get('comp_google_calendar'):
                 try: 
-                    google_id = create_google_event(client_name, data['date'], data['time'], req['employee'], data.get('booking_type'), req.get('transport'), session['company_name'], session.get('company_id'))
+                    google_id = create_google_event(client_name, data['date'], data['time'], req['employee'], booking_type_value, req.get('transport'), session['company_name'], session.get('company_id'))
                 except Exception as e: 
                     print(f"Google Sync Error: {_format_google_calendar_error(e)}")
 
             cur = conn.execute('INSERT INTO bookings (company_id, client_id, title, start, employee, google_event_id, booking_type, transport, booking_notes, overtime_hours, is_invoiced, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                         (session['company_id'], client_id, client_name, dt_str, req['employee'], google_id, data.get('booking_type'), req.get('transport'), data.get('booking_notes', ''), float(req.get('overtime_hours', 0)), 0, project_id))
+                         (session['company_id'], client_id, client_name, dt_str, req['employee'], google_id, booking_type_value, req.get('transport'), data.get('booking_notes', ''), float(req.get('overtime_hours', 0)), 0, project_id))
             booking_ids.append(cur.lastrowid)
             save_custom_field_values(conn, session['company_id'], 'booking', cur.lastrowid, custom_fields)
     else:
         google_id = None
         if session.get('comp_google_calendar'):
-            try: google_id = create_google_event(client_name, data['date'], data['time'], data['employee'], data.get('booking_type'), data.get('transport'), session['company_name'], session.get('company_id'))
+            try: google_id = create_google_event(client_name, data['date'], data['time'], data['employee'], booking_type_value, data.get('transport'), session['company_name'], session.get('company_id'))
             except Exception as e: print(f"Google Sync Error: {_format_google_calendar_error(e)}")
                 
         cur = conn.execute('INSERT INTO bookings (company_id, client_id, title, start, employee, google_event_id, booking_type, transport, booking_notes, overtime_hours, is_invoiced, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
-                     (session['company_id'], client_id, client_name, dt_str, data['employee'], google_id, data.get('booking_type'), data.get('transport'), data.get('booking_notes', ''), float(data.get('overtime_hours', 0)), 0, project_id))
+                     (session['company_id'], client_id, client_name, dt_str, data['employee'], google_id, booking_type_value, data.get('transport'), data.get('booking_notes', ''), float(data.get('overtime_hours', 0)), 0, project_id))
         booking_ids.append(cur.lastrowid)
         save_custom_field_values(conn, session['company_id'], 'booking', cur.lastrowid, custom_fields)
                      
     conn.commit()
     conn.close()
     
+    for _booking_id in booking_ids:
+        notify_staff_booking_event_async(session.get('company_id'), _booking_id, 'booking_new', 'New booking assigned', 'You have a new booking scheduled{date}.')
     log_action('Booking & Ops', 'Created Booking', f"Client: {client_name}, Date: {data['date']}")
     return jsonify({"status": "success", "booking_ids": booking_ids})
 
@@ -6097,7 +7004,7 @@ def edit_booking():
         return jsonify({"status": "error", "message": "Missing booking data: " + ", ".join(missing_payload)}), 400
 
     conn = get_db_connection()
-    b = conn.execute("SELECT google_event_id FROM bookings WHERE id=? AND company_id=?", (data['id'], session['company_id'])).fetchone()
+    b = conn.execute("SELECT google_event_id, employee, start, title FROM bookings WHERE id=? AND company_id=?", (data['id'], session['company_id'])).fetchone()
     if not b:
         conn.close()
         return jsonify({"status": "error", "message": "Booking not found for this company."}), 404
@@ -6147,7 +7054,11 @@ def edit_booking():
     conn.execute('UPDATE bookings SET client_id=?, title=?, start=?, employee=?, google_event_id=?, booking_type=?, transport=?, booking_notes=?, overtime_hours=?, project_id=? WHERE id=? AND company_id=?', (client_id, client_name, dt_str, data['employee'], new_google_event_id, data['booking_type'], data.get('transport'), data.get('booking_notes', ''), overtime_hours, project_id, data['id'], session['company_id']))
     if custom_fields_submitted:
         save_custom_field_values(conn, session['company_id'], 'booking', data['id'], custom_fields)
+    old_employee_names = b['employee'] if b else ''
     conn.commit(); conn.close()
+    notify_staff_booking_event_async(session.get('company_id'), int(data['id']), 'booking_updated', 'Booking updated', 'One of your bookings was modified{date}.')
+    if old_employee_names and old_employee_names != data.get('employee'):
+        notify_staff_employee_names_async(session.get('company_id'), old_employee_names, 'booking_updated', 'Booking updated', 'A booking previously assigned to you was modified or reassigned.', '/staff/mobile?tab=bookings')
     
     log_action('Booking & Ops', 'Updated Booking', f"Updated assignment for {client_name} on {data['date']}.")
     return jsonify({"status": "success", "booking_id": int(data['id'])})
@@ -6156,7 +7067,7 @@ def edit_booking():
 def delete_booking():
     id = request.get_json()['id']
     conn = get_db_connection()
-    b = conn.execute("SELECT google_event_id, title, start FROM bookings WHERE id=? AND company_id=?", (id, session['company_id'])).fetchone()
+    b = conn.execute("SELECT google_event_id, title, start, employee FROM bookings WHERE id=? AND company_id=?", (id, session['company_id'])).fetchone()
     
     if session.get('comp_google_calendar'):
         try:
@@ -6165,7 +7076,11 @@ def delete_booking():
             
     conn.execute("DELETE FROM custom_field_values WHERE company_id=? AND module_name='booking' AND record_id=?", (session['company_id'], id))
     conn.execute('DELETE FROM bookings WHERE id=? AND company_id=?', (id, session['company_id']))
+    employee_names_for_notice = b['employee'] if b else ''
+    booking_date_for_notice = format_display_date(b['start']) if b else ''
     conn.commit(); conn.close()
+    if employee_names_for_notice:
+        notify_staff_employee_names_async(session.get('company_id'), employee_names_for_notice, 'booking_deleted', 'Booking cancelled', f'Your booking for {booking_date_for_notice} was cancelled.', '/staff/mobile?tab=bookings')
     
     if b: log_action('Booking & Ops', 'Deleted Booking', f"Removed assignment for {b['title']} on {b['start'][:10]}")
     return jsonify({"status": "success"})
@@ -6201,6 +7116,10 @@ def generate_recurring():
         conn.close()
         return jsonify({"status": "error", "message": str(e)}), 400
     dates_to_schedule = []
+    booking_type_value = _normalise_service_selection(data.get('booking_type'))
+    if not booking_type_value:
+        conn.close()
+        return jsonify({"status": "error", "message": "Please select at least one service."}), 400
     
     start_str = data.get('start_date')
     end_str = data.get('end_date')
@@ -6259,7 +7178,7 @@ def generate_recurring():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
             ''', (
                 session['company_id'], client_id, client_name, dt_str, req.get('employee'), 
-                data.get('booking_type'), req.get('transport'), data.get('booking_notes', ''), 
+                booking_type_value, req.get('transport'), data.get('booking_notes', ''), 
                 float(req.get('overtime_hours', 0)), project_id
             ))
             db_id = cursor.lastrowid
@@ -6267,7 +7186,7 @@ def generate_recurring():
             
             sync_payload.append({
                 'db_id': db_id, 'client': client_name, 'date': d, 'time': data.get('time', '08:00'),
-                'employee': req.get('employee'), 'booking_type': data.get('booking_type'),
+                'employee': req.get('employee'), 'booking_type': booking_type_value,
                 'transport': req.get('transport')
             })
         
@@ -6276,6 +7195,9 @@ def generate_recurring():
     
     if session.get('comp_google_calendar'):
         threading.Thread(target=async_google_sync, args=(sync_payload, session.get('company_name'), session.get('company_id'))).start()
+    for _item in sync_payload:
+        if _item.get('db_id'):
+            notify_staff_booking_event_async(session.get('company_id'), _item.get('db_id'), 'booking_new', 'New booking assigned', 'You have a new booking scheduled{date}.')
     
     log_action('Booking & Ops', 'Created Contract', f"Auto-scheduled {len(dates_to_schedule)} days for {client_name}")
     
@@ -10585,7 +11507,7 @@ def client_statement():
         return jsonify({"message": "Forbidden"}), 403
 
     data = request.json or {}
-    client_name = data.get('client_name') or ''
+    client_name = (data.get('client_name') or '').strip()
     start_date = data.get('start_date')
     end_date = data.get('end_date')
     try:
@@ -10594,35 +11516,59 @@ def client_statement():
         client_id = 0
     cid = session['company_id']
 
+    if not start_date or not end_date:
+        return jsonify({"message": "Start date and end date are required."}), 400
+
     conn = get_db_connection()
     try:
         client = get_client_by_id(conn, cid, client_id) if client_id else find_client_by_display_name(conn, cid, client_name)
+        client_full = client_name
+        client_email = ''
+        client_dict = {}
+        match_name = client_name
+
         if client:
             client_id = client['id']
-            client_name = client_display_name(client)
-            invoice_rows = conn.execute(
-                "SELECT * FROM invoices WHERE client_id=? AND company_id=? AND date >= ? AND date <= ? ORDER BY date ASC, id ASC",
-                (client_id, cid, start_date, end_date)
-            ).fetchall()
+            client_dict = dict(client)
+            client_full = client_display_name(client)
+            match_name = client_full
+            if client_dict.get('email'):
+                client_email = client_dict.get('email') or ''
+
+        # Historical invoices may have been saved before client_id existed/backfilled.
+        # Match by client_id where available, with a client-name fallback for older records.
+        if client:
+            invoice_rows = conn.execute('''
+                SELECT * FROM invoices
+                WHERE company_id=?
+                  AND date >= ? AND date <= ?
+                  AND (client_id=? OR client_name=?)
+                ORDER BY date ASC, id ASC
+            ''', (cid, start_date, end_date, client_id, match_name)).fetchall()
             credit_rows = conn.execute('''
                 SELECT cn.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
                 FROM invoice_credit_notes cn
                 JOIN invoices i ON i.id = cn.invoice_id AND i.company_id = cn.company_id
-                WHERE cn.company_id=? AND i.client_id=? AND cn.credit_date >= ? AND cn.credit_date <= ?
+                WHERE cn.company_id=?
+                  AND cn.credit_date >= ? AND cn.credit_date <= ?
+                  AND (i.client_id=? OR i.client_name=?)
                 ORDER BY cn.credit_date ASC, cn.id ASC
-            ''', (cid, client_id, start_date, end_date)).fetchall()
+            ''', (cid, start_date, end_date, client_id, match_name)).fetchall()
             payment_rows = conn.execute('''
                 SELECT p.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
                 FROM invoice_payments p
                 JOIN invoices i ON i.id = p.invoice_id AND i.company_id = p.company_id
-                WHERE p.company_id=? AND i.client_id=? AND p.payment_date >= ? AND p.payment_date <= ?
+                WHERE p.company_id=?
+                  AND p.payment_date >= ? AND p.payment_date <= ?
+                  AND (i.client_id=? OR i.client_name=?)
                 ORDER BY p.payment_date ASC, p.id ASC
-            ''', (cid, client_id, start_date, end_date)).fetchall()
+            ''', (cid, start_date, end_date, client_id, match_name)).fetchall()
         else:
-            invoice_rows = conn.execute(
-                "SELECT * FROM invoices WHERE client_name=? AND company_id=? AND date >= ? AND date <= ? ORDER BY date ASC, id ASC",
-                (client_name, cid, start_date, end_date)
-            ).fetchall()
+            invoice_rows = conn.execute('''
+                SELECT * FROM invoices
+                WHERE client_name=? AND company_id=? AND date >= ? AND date <= ?
+                ORDER BY date ASC, id ASC
+            ''', (client_name, cid, start_date, end_date)).fetchall()
             credit_rows = conn.execute('''
                 SELECT cn.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
                 FROM invoice_credit_notes cn
@@ -10650,7 +11596,10 @@ def client_statement():
             try:
                 return f"{inv_prefix}{int(inv_start) + int(invoice_id) - 1:04d}"
             except Exception:
-                return f"{inv_prefix}{int(invoice_id):04d}"
+                try:
+                    return f"{inv_prefix}{int(invoice_id):04d}"
+                except Exception:
+                    return f"{inv_prefix}{invoice_id}"
 
         statement_items = []
         total_invoiced = 0.0
@@ -10659,12 +11608,12 @@ def client_statement():
 
         for inv in invoice_rows:
             d = dict(inv)
-            amt = float(d.get('total') or 0)
-            total_invoiced += amt
+            amount = float(d.get('total') or 0)
+            total_invoiced += amount
             statement_items.append({
                 "date": d.get('date'),
                 "description": f"Tax Invoice #{_invoice_number(d.get('id'))}",
-                "amount": round(amt, 2),
+                "amount": round(amount, 2),
                 "status": d.get('status') or '',
                 "type": "invoice",
                 "sort_id": int(d.get('id') or 0)
@@ -10673,7 +11622,7 @@ def client_statement():
         for cn in credit_rows:
             c = dict(cn)
             amount = float(c.get('amount') or 0)
-            total_credited += amount
+            total_credited += abs(amount)
             inv_no = _invoice_number(c.get('invoice_id') or c.get('source_invoice_id'))
             reason = (c.get('reason') or '').strip()
             description = f"Credit Note against #{inv_no}"
@@ -10691,7 +11640,7 @@ def client_statement():
         for pay in payment_rows:
             p = dict(pay)
             amount = float(p.get('amount') or 0)
-            total_paid += amount
+            total_paid += abs(amount)
             inv_no = _invoice_number(p.get('invoice_id') or p.get('source_invoice_id'))
             ref = (p.get('reference') or '').strip()
             description = f"Payment received for #{inv_no}"
@@ -10706,18 +11655,12 @@ def client_statement():
                 "sort_id": int(p.get('id') or 0)
             })
 
-        statement_items.sort(key=lambda item: (str(item.get('date') or ''), item.get('type') != 'invoice', int(item.get('sort_id') or 0)))
+        statement_items.sort(key=lambda item: (
+            str(item.get('date') or ''),
+            0 if item.get('type') == 'invoice' else 1 if item.get('type') == 'credit_note' else 2,
+            int(item.get('sort_id') or 0)
+        ))
         total_due = round(total_invoiced - total_credited - total_paid, 2)
-
-        client_full = client_name
-        client_email = ''
-        client_dict = {}
-        if client:
-            client_dict = dict(client)
-            if 'surname' in client_dict and client_dict['surname']:
-                client_full = f"{client_dict['name']} {client_dict['surname']}"
-            if 'email' in client_dict and client_dict['email']:
-                client_email = client_dict['email']
 
         return jsonify({
             "client_full_name": client_full,
