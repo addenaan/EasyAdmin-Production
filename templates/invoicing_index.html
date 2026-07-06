@@ -804,6 +804,7 @@
                             <div class="totals-box" style="float: right; width: 45%; margin-top: 0;">
                                 <table>
                                     <tr class="text-muted"><td>Total Invoiced</td><td class="amount-col" id="stmtTotalInvoiced"></td></tr>
+                                    <tr class="text-muted" id="stmtCreditedRow" style="display:none;"><td>Credit Notes Applied</td><td class="amount-col text-danger" id="stmtTotalCredited"></td></tr>
                                     <tr class="text-muted"><td>Total Paid</td><td class="amount-col text-success" id="stmtTotalPaid"></td></tr>
                                     <tr class="grand-total border-dark text-dark"><td>BALANCE DUE</td><td class="amount-col" id="stmtTotalDue"></td></tr>
                                 </table>
@@ -978,20 +979,29 @@
                     data.items.forEach(item => {
                         let amountStr = money(item.amount);
                         let badge = '';
-                        if(item.status === 'Paid') badge = '<span style="color: #198754; font-weight: bold;">Paid</span>';
+                        const rowType = item.type || '';
+                        if(rowType === 'credit_note') badge = '<span style="color: #dc3545; font-weight: bold;">Credit Note</span>';
+                        else if(rowType === 'payment') badge = '<span style="color: #198754; font-weight: bold;">Payment</span>';
+                        else if(item.status === 'Paid') badge = '<span style="color: #198754; font-weight: bold;">Paid</span>';
                         else if(item.status === 'Unpaid') badge = '<span style="color: #dc3545; font-weight: bold;">Unpaid</span>';
                         else badge = `<span style="color: #6c757d; font-weight: bold;">${item.status}</span>`;
+                        const amountClass = Number(item.amount || 0) < 0 ? 'amount-col pe-2 text-danger' : 'amount-col pe-2';
                         
                         tbody.innerHTML += `<tr>
                             <td class="ps-2">${fmtDate(item.date)}</td>
                             <td>${item.description}</td>
                             <td class="text-center">${badge}</td>
-                            <td class="amount-col pe-2">${amountStr}</td>
+                            <td class="${amountClass}">${amountStr}</td>
                         </tr>`;
                     });
                 }
 
                 document.getElementById('stmtTotalInvoiced').innerText = money(data.total_invoiced);
+                const stmtCredited = Number(data.total_credited || 0);
+                const stmtCreditedRow = document.getElementById('stmtCreditedRow');
+                if(stmtCreditedRow) stmtCreditedRow.style.display = stmtCredited > 0 ? '' : 'none';
+                const stmtTotalCredited = document.getElementById('stmtTotalCredited');
+                if(stmtTotalCredited) stmtTotalCredited.innerText = money(-Math.abs(stmtCredited));
                 document.getElementById('stmtTotalPaid').innerText = money(data.total_paid);
                 document.getElementById('stmtTotalDue').innerText = money(data.total_due);
 

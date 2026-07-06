@@ -2542,32 +2542,6 @@ def analyse_employee_hours_for_period(conn, company_id, employee, start_date, en
     warning = get_bcea_hours_warning(hours['ordinary_hours'], hours['overtime_hours'], employee['emp_type'])
     return hours, warning
 
-def is_employee_booked_on_date(conn, company_id, employee_name, target_date, exclude_booking_id=None):
-    """Return True when an employee already has a booking on the selected date.
-
-    Bookings can contain one staff name or a comma-separated staff list, so this
-    check compares cleaned names rather than relying on a broad SQL LIKE match.
-    """
-    try:
-        target_date_only = as_date(target_date)
-        target_date_str = target_date_only.strftime('%Y-%m-%d')
-    except Exception:
-        return False
-    target_name = (employee_name or '').strip().lower()
-    if not target_name:
-        return False
-    rows = conn.execute('''SELECT id, employee FROM bookings
-                           WHERE company_id=? AND substr(start, 1, 10)=?''',
-                        (company_id, target_date_str)).fetchall()
-    exclude_id = str(exclude_booking_id or '').strip()
-    for row in rows:
-        if exclude_id and str(row['id']) == exclude_id:
-            continue
-        names = [n.strip().lower() for n in (row['employee'] or '').split(',') if n.strip()]
-        if target_name in names:
-            return True
-    return False
-
 def get_booking_staff_hours_summary(conn, company_id, employee, target_date, proposed_overtime=0, exclude_booking_id=None, include_proposed=False):
     target_date_only = as_date(target_date)
     week_start, week_end = get_week_bounds(target_date_only)
@@ -2606,7 +2580,6 @@ def get_booking_staff_hours_summary(conn, company_id, employee, target_date, pro
         'workday_hours': get_employee_workday_hours(employee),
         'requested_date': target_date_only.strftime('%Y-%m-%d'),
         'is_on_leave': target_date_only.strftime('%Y-%m-%d') in leave_dates,
-        'is_booked_on_date': is_employee_booked_on_date(conn, company_id, employee['name'], target_date_only, exclude_booking_id),
         'week_start': week_start.strftime('%Y-%m-%d'),
         'week_end': week_end.strftime('%Y-%m-%d'),
         'week_hours': round(week_hours['total_hours'], 2),
@@ -2896,25 +2869,6 @@ def inject_session_timeout_script(response):
         return response
     script = ('\n<script defer src="/static/session-timeout.js?v=20260625-timeout15-desktop" '
               'data-easyadmin-session-timeout data-timeout-seconds="%s"></script>\n') % DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS
-    body = body.replace('</body>', script + '</body>', 1)
-    response.set_data(body)
-    response.headers['Content-Length'] = str(len(response.get_data()))
-    return response
-
-
-@app.after_request
-def inject_easyadmin_live_refresh_script(response):
-    if 'logged_in' not in session:
-        return response
-    if response.status_code != 200 or response.is_streamed or response.mimetype != 'text/html':
-        return response
-    try:
-        body = response.get_data(as_text=True)
-    except Exception:
-        return response
-    if '</body>' not in body or 'easyadmin-live-refresh.js' in body:
-        return response
-    script = '\n<script defer src="/static/easyadmin-live-refresh.js?v=20260630-live-refresh"></script>\n'
     body = body.replace('</body>', script + '</body>', 1)
     response.set_data(body)
     response.headers['Content-Length'] = str(len(response.get_data()))
@@ -10627,10 +10581,11 @@ def email_document():
 # --- NEW: CLIENT STATEMENT ROUTE ---
 @app.route('/api/client_statement', methods=['POST'])
 def client_statement():
-    if not session.get('can_invoicing') and not session.get('is_superadmin'): return jsonify({"message": "Forbidden"}), 403
-    
-    data = request.json
-    client_name = data.get('client_name')
+    if not session.get('can_invoicing') and not session.get('is_superadmin'):
+        return jsonify({"message": "Forbidden"}), 403
+
+    data = request.json or {}
+    client_name = data.get('client_name') or ''
     start_date = data.get('start_date')
     end_date = data.get('end_date')
     try:
@@ -10638,81 +10593,149 @@ def client_statement():
     except Exception:
         client_id = 0
     cid = session['company_id']
-    
+
     conn = get_db_connection()
-    client = get_client_by_id(conn, cid, client_id) if client_id else find_client_by_display_name(conn, cid, client_name)
-    if client:
-        client_id = client['id']
-        client_name = client_display_name(client)
-        query = "SELECT * FROM invoices WHERE client_id=? AND company_id=? AND date >= ? AND date <= ? ORDER BY date ASC"
-        invoices = conn.execute(query, (client_id, cid, start_date, end_date)).fetchall()
-    else:
-        query = "SELECT * FROM invoices WHERE client_name=? AND company_id=? AND date >= ? AND date <= ? ORDER BY date ASC"
-        invoices = conn.execute(query, (client_name, cid, start_date, end_date)).fetchall()
-    
-    settings_rows = conn.execute("SELECT key, value FROM settings WHERE company_id=?", (cid,)).fetchall()
-    s_dict = {s['key']: s['value'] for s in settings_rows}
-    inv_prefix = s_dict.get('invoice_prefix', 'INV-')
     try:
-        inv_start = int(s_dict.get('invoice_start', '1'))
-    except:
-        inv_start = 1
-        
-    statement_items = []
-    total_invoiced = 0.0
-    total_paid = 0.0
-    
-    for inv in invoices:
-        d = dict(inv)
-        if d['status'] == 'Credited':
-            continue
-            
+        client = get_client_by_id(conn, cid, client_id) if client_id else find_client_by_display_name(conn, cid, client_name)
+        if client:
+            client_id = client['id']
+            client_name = client_display_name(client)
+            invoice_rows = conn.execute(
+                "SELECT * FROM invoices WHERE client_id=? AND company_id=? AND date >= ? AND date <= ? ORDER BY date ASC, id ASC",
+                (client_id, cid, start_date, end_date)
+            ).fetchall()
+            credit_rows = conn.execute('''
+                SELECT cn.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
+                FROM invoice_credit_notes cn
+                JOIN invoices i ON i.id = cn.invoice_id AND i.company_id = cn.company_id
+                WHERE cn.company_id=? AND i.client_id=? AND cn.credit_date >= ? AND cn.credit_date <= ?
+                ORDER BY cn.credit_date ASC, cn.id ASC
+            ''', (cid, client_id, start_date, end_date)).fetchall()
+            payment_rows = conn.execute('''
+                SELECT p.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
+                FROM invoice_payments p
+                JOIN invoices i ON i.id = p.invoice_id AND i.company_id = p.company_id
+                WHERE p.company_id=? AND i.client_id=? AND p.payment_date >= ? AND p.payment_date <= ?
+                ORDER BY p.payment_date ASC, p.id ASC
+            ''', (cid, client_id, start_date, end_date)).fetchall()
+        else:
+            invoice_rows = conn.execute(
+                "SELECT * FROM invoices WHERE client_name=? AND company_id=? AND date >= ? AND date <= ? ORDER BY date ASC, id ASC",
+                (client_name, cid, start_date, end_date)
+            ).fetchall()
+            credit_rows = conn.execute('''
+                SELECT cn.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
+                FROM invoice_credit_notes cn
+                JOIN invoices i ON i.id = cn.invoice_id AND i.company_id = cn.company_id
+                WHERE cn.company_id=? AND i.client_name=? AND cn.credit_date >= ? AND cn.credit_date <= ?
+                ORDER BY cn.credit_date ASC, cn.id ASC
+            ''', (cid, client_name, start_date, end_date)).fetchall()
+            payment_rows = conn.execute('''
+                SELECT p.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
+                FROM invoice_payments p
+                JOIN invoices i ON i.id = p.invoice_id AND i.company_id = p.company_id
+                WHERE p.company_id=? AND i.client_name=? AND p.payment_date >= ? AND p.payment_date <= ?
+                ORDER BY p.payment_date ASC, p.id ASC
+            ''', (cid, client_name, start_date, end_date)).fetchall()
+
+        settings_rows = conn.execute("SELECT key, value FROM settings WHERE company_id=?", (cid,)).fetchall()
+        s_dict = {s['key']: s['value'] for s in settings_rows}
+        inv_prefix = s_dict.get('invoice_prefix', 'INV-')
         try:
-            formatted_num = f"{inv_prefix}{int(inv_start) + d['id'] - 1:04d}"
-        except:
-            formatted_num = f"{inv_prefix}{d['id']:04d}"
-            
-        amt = float(d['total'])
-        
-        total_invoiced += amt
-        if d['status'] == 'Paid':
-            total_paid += amt
-            
-        statement_items.append({
-            "date": d['date'],
-            "description": f"Tax Invoice #{formatted_num}",
-            "amount": amt,
-            "status": d['status']
+            inv_start = int(s_dict.get('invoice_start', '1'))
+        except Exception:
+            inv_start = 1
+
+        def _invoice_number(invoice_id):
+            try:
+                return f"{inv_prefix}{int(inv_start) + int(invoice_id) - 1:04d}"
+            except Exception:
+                return f"{inv_prefix}{int(invoice_id):04d}"
+
+        statement_items = []
+        total_invoiced = 0.0
+        total_paid = 0.0
+        total_credited = 0.0
+
+        for inv in invoice_rows:
+            d = dict(inv)
+            amt = float(d.get('total') or 0)
+            total_invoiced += amt
+            statement_items.append({
+                "date": d.get('date'),
+                "description": f"Tax Invoice #{_invoice_number(d.get('id'))}",
+                "amount": round(amt, 2),
+                "status": d.get('status') or '',
+                "type": "invoice",
+                "sort_id": int(d.get('id') or 0)
+            })
+
+        for cn in credit_rows:
+            c = dict(cn)
+            amount = float(c.get('amount') or 0)
+            total_credited += amount
+            inv_no = _invoice_number(c.get('invoice_id') or c.get('source_invoice_id'))
+            reason = (c.get('reason') or '').strip()
+            description = f"Credit Note against #{inv_no}"
+            if reason:
+                description += f" - {reason}"
+            statement_items.append({
+                "date": c.get('credit_date'),
+                "description": description,
+                "amount": round(-abs(amount), 2),
+                "status": "Credit Note",
+                "type": "credit_note",
+                "sort_id": int(c.get('id') or 0)
+            })
+
+        for pay in payment_rows:
+            p = dict(pay)
+            amount = float(p.get('amount') or 0)
+            total_paid += amount
+            inv_no = _invoice_number(p.get('invoice_id') or p.get('source_invoice_id'))
+            ref = (p.get('reference') or '').strip()
+            description = f"Payment received for #{inv_no}"
+            if ref:
+                description += f" - {ref}"
+            statement_items.append({
+                "date": p.get('payment_date'),
+                "description": description,
+                "amount": round(-abs(amount), 2),
+                "status": "Payment",
+                "type": "payment",
+                "sort_id": int(p.get('id') or 0)
+            })
+
+        statement_items.sort(key=lambda item: (str(item.get('date') or ''), item.get('type') != 'invoice', int(item.get('sort_id') or 0)))
+        total_due = round(total_invoiced - total_credited - total_paid, 2)
+
+        client_full = client_name
+        client_email = ''
+        client_dict = {}
+        if client:
+            client_dict = dict(client)
+            if 'surname' in client_dict and client_dict['surname']:
+                client_full = f"{client_dict['name']} {client_dict['surname']}"
+            if 'email' in client_dict and client_dict['email']:
+                client_email = client_dict['email']
+
+        return jsonify({
+            "client_full_name": client_full,
+            "client_email": client_email,
+            "client_address": client_dict.get('address') if client_dict.get('address') else '',
+            "client_company": client_dict.get('company_name') if client_dict.get('company_name') else '',
+            "client_reg": client_dict.get('registration_number') if client_dict.get('registration_number') else '',
+            "client_vat": client_dict.get('vat_number') if client_dict.get('vat_number') else '',
+            "items": statement_items,
+            "total_invoiced": round(total_invoiced, 2),
+            "total_credited": round(total_credited, 2),
+            "total_paid": round(total_paid, 2),
+            "total_due": total_due,
+            "start_date": start_date,
+            "end_date": end_date
         })
-        
-    total_due = total_invoiced - total_paid
-    
-    client_full = client_name
-    client_email = ''
-    client_dict = {}
-    if client:
-        client_dict = dict(client)
-        if 'surname' in client_dict and client_dict['surname']:
-            client_full = f"{client_dict['name']} {client_dict['surname']}"
-        if 'email' in client_dict and client_dict['email']:
-            client_email = client_dict['email']
-            
-    conn.close()
-    
-    return jsonify({
-        "client_full_name": client_full,
-        "client_email": client_email,
-        "client_address": client_dict.get('address') if client_dict.get('address') else '',
-        "client_company": client_dict.get('company_name') if client_dict.get('company_name') else '',
-        "client_reg": client_dict.get('registration_number') if client_dict.get('registration_number') else '',
-        "client_vat": client_dict.get('vat_number') if client_dict.get('vat_number') else '',
-        "items": statement_items,
-        "total_invoiced": total_invoiced,
-        "total_paid": total_paid,
-        "total_due": total_due,
-        "start_date": start_date,
-        "end_date": end_date
-    })
+    finally:
+        conn.close()
 
 
 # ==========================================================
