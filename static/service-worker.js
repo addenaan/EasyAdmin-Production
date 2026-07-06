@@ -1,4 +1,4 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v16-multi-service-select';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v17-staff-notification-fix';
 const APP_SHELL = [
   '/mobile/offline',
   '/static/mobile.css?v=20260622',
@@ -7,7 +7,7 @@ const APP_SHELL = [
   '/static/pwa-update.js?v=20260706-update-prompt-password-route-fix',
   '/static/session-timeout.js?v=20260625-timeout15-desktop',
   '/static/staff-portal.css?v=20260706-staffnotify-search',
-  '/static/staff-portal.js?v=20260706-staffnotify-checkbox',
+  '/static/staff-portal.js?v=20260706-notify500-fix',
   '/static/easy_admin_logo.png',
   '/static/pwa-icon-192.png',
   '/static/pwa-icon-512.png',

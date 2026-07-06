@@ -3841,6 +3841,121 @@ def _push_is_configured():
     return bool(webpush and _push_vapid_public_key() and _push_vapid_private_key())
 
 
+def _safe_json_dumps(value):
+    try:
+        return json.dumps(value or {})
+    except Exception:
+        return '{}'
+
+
+def _safe_json_loads(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode('utf-8')
+        except Exception:
+            return {}
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _ensure_staff_notification_schema(conn):
+    """Ensure staff notification/push tables exist before subscribe/send/history actions.
+
+    Render/PostgreSQL deployments can continue running with an older schema until
+    the next restart. Calling this before write/read actions prevents staff
+    notification routes from failing with a generic 500 if the table or one of
+    the newer columns is missing.
+    """
+    try:
+        conn.execute('''CREATE TABLE IF NOT EXISTS staff_push_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER,
+            employee_id INTEGER,
+            user_id INTEGER,
+            endpoint TEXT,
+            keys_json TEXT,
+            user_agent TEXT,
+            device_name TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT,
+            updated_at TEXT,
+            last_used_at TEXT
+        )''')
+    except Exception:
+        pass
+    for c_name, c_type in [
+        ('company_id', 'INTEGER'), ('employee_id', 'INTEGER'), ('user_id', 'INTEGER'), ('endpoint', 'TEXT'),
+        ('keys_json', 'TEXT'), ('user_agent', 'TEXT'), ('device_name', 'TEXT'), ('is_active', 'INTEGER DEFAULT 1'),
+        ('created_at', 'TEXT'), ('updated_at', 'TEXT'), ('last_used_at', 'TEXT')
+    ]:
+        try:
+            conn.execute(f'ALTER TABLE staff_push_subscriptions ADD COLUMN {c_name} {c_type}')
+        except Exception:
+            pass
+    try:
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_staff_push_employee ON staff_push_subscriptions(company_id, employee_id, is_active)')
+    except Exception:
+        pass
+    try:
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_staff_push_endpoint ON staff_push_subscriptions(endpoint)')
+    except Exception:
+        pass
+
+    try:
+        conn.execute('''CREATE TABLE IF NOT EXISTS staff_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER,
+            employee_id INTEGER,
+            user_id INTEGER,
+            notification_type TEXT,
+            title TEXT,
+            message TEXT,
+            related_booking_id INTEGER,
+            related_leave_request_id INTEGER,
+            data_json TEXT,
+            sent_status TEXT,
+            sent_at TEXT,
+            read_at TEXT,
+            created_by TEXT,
+            created_at TEXT,
+            error_message TEXT
+        )''')
+    except Exception:
+        pass
+    for c_name, c_type in [
+        ('company_id', 'INTEGER'), ('employee_id', 'INTEGER'), ('user_id', 'INTEGER'), ('notification_type', 'TEXT'),
+        ('title', 'TEXT'), ('message', 'TEXT'), ('related_booking_id', 'INTEGER'), ('related_leave_request_id', 'INTEGER'),
+        ('data_json', 'TEXT'), ('sent_status', 'TEXT'), ('sent_at', 'TEXT'), ('read_at', 'TEXT'),
+        ('created_by', 'TEXT'), ('created_at', 'TEXT'), ('error_message', 'TEXT')
+    ]:
+        try:
+            conn.execute(f'ALTER TABLE staff_notifications ADD COLUMN {c_name} {c_type}')
+        except Exception:
+            pass
+    try:
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_staff_notifications_employee ON staff_notifications(company_id, employee_id, created_at)')
+    except Exception:
+        pass
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _safe_log_action(app_name, action, details):
+    try:
+        log_action(app_name, action, details)
+    except Exception:
+        pass
+
+
 def _notification_payload(title, message, target_url='/staff/mobile', notification_type='message', extra=None):
     data = dict(extra or {})
     data.setdefault('url', target_url or '/staff/mobile')
@@ -3857,6 +3972,7 @@ def _notification_payload(title, message, target_url='/staff/mobile', notificati
 
 
 def _insert_staff_notification(conn, company_id, employee_id, notification_type, title, message, related_booking_id=None, related_leave_request_id=None, data=None, created_by='System'):
+    _ensure_staff_notification_schema(conn)
     user = conn.execute('''SELECT id FROM users
                            WHERE company_id=? AND employee_id=? AND COALESCE(is_staff,0)=1
                            ORDER BY id ASC LIMIT 1''', (company_id, employee_id)).fetchone()
@@ -3868,7 +3984,7 @@ def _insert_staff_notification(conn, company_id, employee_id, notification_type,
                            created_by, created_at)
                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)''',
                        (company_id, employee_id, user_id, notification_type, title, message,
-                        related_booking_id, related_leave_request_id, json.dumps(data or {}), created_by, created_at))
+                        related_booking_id, related_leave_request_id, _safe_json_dumps(data or {}), created_by, created_at))
     return getattr(cur, 'lastrowid', None)
 
 
@@ -3885,8 +4001,11 @@ def _update_staff_notification_status(conn, notification_id, status, error_messa
 def _send_push_to_subscription(subscription, payload):
     if not _push_is_configured():
         raise RuntimeError('Push notifications are not configured. Set VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT in Render.')
-    keys = json.loads(subscription['keys_json'] or '{}')
-    subscription_info = {'endpoint': subscription['endpoint'], 'keys': keys}
+    endpoint = (subscription['endpoint'] or '').strip()
+    keys = _safe_json_loads(subscription['keys_json'])
+    if not endpoint or not keys.get('p256dh') or not keys.get('auth'):
+        raise RuntimeError('Stored push subscription is incomplete. Ask the employee to disable and enable notifications again on the phone.')
+    subscription_info = {'endpoint': endpoint, 'keys': keys}
     webpush(
         subscription_info=subscription_info,
         data=json.dumps(payload),
@@ -3901,42 +4020,65 @@ def _send_staff_notification_to_employee_ids(company_id, employee_ids, notificat
         return {'sent': 0, 'failed': 0, 'logged': 0, 'message': 'No employee recipients.'}
     conn = get_db_connection()
     sent = failed = logged = 0
+    employee_errors = []
     try:
+        _ensure_staff_notification_schema(conn)
         for employee_id in employee_ids:
-            payload = _notification_payload(title, message, target_url, notification_type, data)
-            notification_id = _insert_staff_notification(conn, company_id, employee_id, notification_type, title, message, related_booking_id, related_leave_request_id, payload.get('data'), created_by)
-            logged += 1
-            subs = conn.execute('''SELECT * FROM staff_push_subscriptions
-                                   WHERE company_id=? AND employee_id=? AND COALESCE(is_active,1)=1
-                                   ORDER BY updated_at DESC, id DESC''', (company_id, employee_id)).fetchall()
-            if not subs:
-                _update_staff_notification_status(conn, notification_id, 'no_subscription')
-                continue
-            if not _push_is_configured():
-                _update_staff_notification_status(conn, notification_id, 'not_configured', 'VAPID keys or pywebpush are not configured.')
-                continue
-            sub_sent = 0
-            sub_errors = []
-            for sub in subs:
+            try:
+                payload = _notification_payload(title, message, target_url, notification_type, data)
+                notification_id = _insert_staff_notification(conn, company_id, employee_id, notification_type, title, message, related_booking_id, related_leave_request_id, payload.get('data'), created_by)
+                logged += 1
+                subs = conn.execute("""SELECT * FROM staff_push_subscriptions
+                                       WHERE company_id=? AND employee_id=? AND COALESCE(is_active,1)=1
+                                       ORDER BY updated_at DESC, id DESC""", (company_id, employee_id)).fetchall()
+                if not subs:
+                    _update_staff_notification_status(conn, notification_id, 'no_subscription')
+                    continue
+                if not _push_is_configured():
+                    _update_staff_notification_status(conn, notification_id, 'not_configured', 'VAPID keys or pywebpush are not configured.')
+                    continue
+                sub_sent = 0
+                sub_errors = []
+                for sub in subs:
+                    try:
+                        _send_push_to_subscription(sub, payload)
+                        sub_sent += 1
+                        conn.execute('UPDATE staff_push_subscriptions SET last_used_at=? WHERE id=?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), sub['id']))
+                    except Exception as exc:
+                        error_text = str(exc) or exc.__class__.__name__
+                        sub_errors.append(error_text)
+                        failed += 1
+                        if any(code in error_text for code in ('410', '404', 'ExpiredSubscription', 'Gone')):
+                            conn.execute('UPDATE staff_push_subscriptions SET is_active=0, updated_at=? WHERE id=?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), sub['id']))
+                if sub_sent:
+                    sent += sub_sent
+                    _update_staff_notification_status(conn, notification_id, 'sent')
+                elif sub_errors:
+                    _update_staff_notification_status(conn, notification_id, 'failed', '; '.join(sub_errors)[:1000])
+            except Exception as exc:
+                failed += 1
+                employee_errors.append(f'Employee {employee_id}: {str(exc)[:250]}')
                 try:
-                    _send_push_to_subscription(sub, payload)
-                    sub_sent += 1
-                    conn.execute('UPDATE staff_push_subscriptions SET last_used_at=? WHERE id=?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), sub['id']))
-                except Exception as exc:
-                    sub_errors.append(str(exc))
-                    failed += 1
-                    if any(code in str(exc) for code in ('410', '404', 'ExpiredSubscription')):
-                        conn.execute('UPDATE staff_push_subscriptions SET is_active=0, updated_at=? WHERE id=?', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), sub['id']))
-            if sub_sent:
-                sent += sub_sent
-                _update_staff_notification_status(conn, notification_id, 'sent')
-            elif sub_errors:
-                _update_staff_notification_status(conn, notification_id, 'failed', '; '.join(sub_errors)[:1000])
-        conn.commit()
+                    conn.rollback()
+                except Exception:
+                    pass
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    except Exception as exc:
+        failed += max(1, len(employee_ids) - logged)
+        employee_errors.append(str(exc)[:500])
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     finally:
         conn.close()
-    return {'sent': sent, 'failed': failed, 'logged': logged}
-
+    result = {'sent': sent, 'failed': failed, 'logged': logged}
+    if employee_errors:
+        result['error'] = '; '.join(employee_errors)[:1000]
+    return result
 
 def _employee_ids_from_booking_employee_names(conn, company_id, employee_names):
     ids = []
@@ -4036,6 +4178,7 @@ def api_staff_dashboard():
     cid = session.get('company_id')
     conn = get_db_connection()
     try:
+        _ensure_staff_notification_schema(conn)
         employee = _staff_employee_row(conn)
         if not employee:
             return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
@@ -4380,6 +4523,7 @@ def api_staff_push_subscribe():
     cid = session.get('company_id')
     conn = get_db_connection()
     try:
+        _ensure_staff_notification_schema(conn)
         employee = _staff_employee_row(conn)
         if not employee:
             return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
@@ -4413,6 +4557,7 @@ def api_staff_push_unsubscribe():
         return jsonify({'status': 'success', 'message': 'Notifications disabled.'})
     conn = get_db_connection()
     try:
+        _ensure_staff_notification_schema(conn)
         conn.execute('UPDATE staff_push_subscriptions SET is_active=0, updated_at=? WHERE endpoint=? AND company_id=?',
                      (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), endpoint, session.get('company_id')))
         conn.commit()
@@ -4428,6 +4573,7 @@ def api_staff_notifications():
     cid = session.get('company_id')
     conn = get_db_connection()
     try:
+        _ensure_staff_notification_schema(conn)
         employee = _staff_employee_row(conn)
         if not employee:
             return _staff_json_error('Your staff account is not linked to an active employee record.', 404)
@@ -4561,6 +4707,7 @@ def api_staff_admin_send_notification():
     cid = session.get('company_id')
     conn = get_db_connection()
     try:
+        _ensure_staff_notification_schema(conn)
         if isinstance(employee_ids_payload, list):
             requested_ids = []
             for raw_id in employee_ids_payload:
@@ -4597,13 +4744,33 @@ def api_staff_admin_send_notification():
             if not row:
                 return _staff_json_error('Please select a valid active staff portal user.', 400)
             employee_ids = [employee_id]
+    except Exception as exc:
+        return _staff_json_error(f'Staff notification recipients could not be validated: {exc}', 500)
     finally:
         conn.close()
     if not employee_ids:
         return _staff_json_error('No active staff portal users were selected.', 400)
-    result = _send_staff_notification_to_employee_ids(cid, employee_ids, 'admin_message', title, message, target_url='/staff/mobile', created_by=session.get('username','Admin'))
-    log_action('Staff Portal', 'Sent Staff Notification', f"{session.get('username','Admin')} sent staff notification to {len(employee_ids)} employee(s).")
-    return jsonify({'status': 'success', 'message': f"Notification logged for {len(employee_ids)} employee(s). Sent to {result.get('sent', 0)} device(s).", 'result': result})
+    try:
+        result = _send_staff_notification_to_employee_ids(cid, employee_ids, 'admin_message', title, message, target_url='/staff/mobile', created_by=session.get('username','Admin'))
+    except Exception as exc:
+        result = {'sent': 0, 'failed': len(employee_ids), 'logged': 0, 'error': str(exc)[:1000]}
+    _safe_log_action('Staff Portal', 'Sent Staff Notification', f"{session.get('username','Admin')} sent staff notification to {len(employee_ids)} employee(s).")
+
+    sent_count = int(result.get('sent') or 0)
+    logged_count = int(result.get('logged') or 0)
+    failed_count = int(result.get('failed') or 0)
+    error_text = (result.get('error') or '').strip()
+    if sent_count > 0:
+        message_text = f"Notification logged for {len(employee_ids)} employee(s). Sent to {sent_count} device(s)."
+    elif logged_count > 0:
+        message_text = f"Notification was saved in the staff portal for {logged_count} employee(s), but no push message was delivered."
+        if error_text:
+            message_text += f" Last delivery error: {error_text[:300]}"
+    else:
+        return _staff_json_error(f"Notification could not be sent or saved. {error_text}".strip(), 500)
+    if failed_count and sent_count:
+        message_text += f" {failed_count} push attempt(s) failed."
+    return jsonify({'status': 'success', 'message': message_text, 'result': result})
 
 
 @app.route('/api/staff/admin/notifications/history')
@@ -4613,6 +4780,7 @@ def api_staff_admin_notifications_history():
     cid = session.get('company_id')
     conn = get_db_connection()
     try:
+        _ensure_staff_notification_schema(conn)
         rows = conn.execute('''SELECT n.*, e.name AS employee_name
                                FROM staff_notifications n
                                LEFT JOIN employees e ON e.id=n.employee_id AND e.company_id=n.company_id

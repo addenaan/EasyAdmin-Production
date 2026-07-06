@@ -194,7 +194,7 @@
         }
         try {
             const keyData = await api('/api/staff/push/public_key');
-            if (!keyData.public_key) throw new Error(keyData.message || 'Push notifications are not configured yet.');
+            if (!keyData.enabled || !keyData.public_key) throw new Error(keyData.message || 'Push notifications are not configured yet.');
             const permission = await Notification.requestPermission();
             if (permission !== 'granted') throw new Error('Notification permission was not granted.');
             const registration = await navigator.serviceWorker.register('/service-worker.js');
