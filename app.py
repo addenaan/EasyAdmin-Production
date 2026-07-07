@@ -2890,17 +2890,32 @@ def calculate_financials(start_date, end_date):
     t_policy = comp['transport_policy'] if comp else 'standard'
     transport_amount_per_lift = float(dict(comp).get('transport_amount_per_lift') or 25) if comp else 25.0
     
-    bookings = conn.execute("SELECT booking_type, transport, employee FROM bookings WHERE company_id=? AND substr(start, 1, 10) BETWEEN ? AND ?", (cid, start_date, end_date)).fetchall()
+    bookings = conn.execute("""SELECT b.booking_type, b.transport, b.employee, b.project_id,
+                                      COALESCE(p.fixed_price, 0) AS project_fixed_price
+                               FROM bookings b
+                               LEFT JOIN projects p ON p.id=b.project_id AND p.company_id=b.company_id
+                               WHERE b.company_id=? AND substr(b.start, 1, 10) BETWEEN ? AND ?""", (cid, start_date, end_date)).fetchall()
     services_db = conn.execute("SELECT * FROM services WHERE company_id=?", (cid,)).fetchall()
     employees_db = conn.execute("SELECT name, emp_type FROM employees WHERE company_id=?", (cid,)).fetchall()
     s_dict = { (s['name'] or '').strip(): {'price': float(s['client_price'] or 0), 'cost': float(s['company_cost'] or 0)} for s in services_db }
     e_dict = { (e['name'] or '').strip(): (e['emp_type'] or 'Full-time (5 Days)') for e in employees_db }
     
     rev, e_cost, p_cost = 0.0, 0.0, 0.0
+    project_revenue_counted = set()
     for b in bookings:
-        b_rev, b_cost = sum(s_dict[t]['price'] for t in (b['booking_type'] or '').split(', ') if t in s_dict), sum(s_dict[t]['cost'] for t in (b['booking_type'] or '').split(', ') if t in s_dict)
-        rev += b_rev
-        staff = [s.strip() for s in (b['employee'] or '').split(', ') if s.strip()]
+        booking_services = [t.strip() for t in (b['booking_type'] or '').split(',') if t.strip()]
+        b_rev = sum(s_dict[t]['price'] for t in booking_services if t in s_dict)
+        b_cost = sum(s_dict[t]['cost'] for t in booking_services if t in s_dict)
+
+        project_id = b['project_id'] if 'project_id' in b.keys() else None
+        if project_id:
+            if project_id not in project_revenue_counted:
+                rev += float(b['project_fixed_price'] or 0)
+                project_revenue_counted.add(project_id)
+        else:
+            rev += b_rev
+
+        staff = [s.strip() for s in (b['employee'] or '').split(',') if s.strip()]
         
         t_allw = 0
         if t_policy in ['standard', 'yes']:
