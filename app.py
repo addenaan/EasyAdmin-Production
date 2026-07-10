@@ -541,7 +541,7 @@ def safe_table_name(name):
 
 COMPANY_IMPORT_TABLES = {
     'clients': ['name', 'surname', 'company_name', 'registration_number', 'vat_number', 'building_number', 'street_name', 'suburb', 'postal_code', 'address', 'phone', 'email', 'client_type', 'discount_percent'],
-    'employees': ['name', 'emp_number', 'id_passport', 'date_of_birth', 'job_title', 'status', 'emp_type', 'gross_salary', 'start_date', 'inactive_date', 'phone', 'email', 'address', 'emergency_contact', 'tax_number', 'paye_ref', 'bank_name', 'account_holder', 'account_number', 'branch_code', 'account_type', 'payment_reference', 'workday_hours', 'overtime_pay_treatment'],
+    'employees': ['name', 'emp_number', 'id_passport', 'date_of_birth', 'job_title', 'status', 'emp_type', 'gross_salary', 'start_date', 'inactive_date', 'phone', 'email', 'address', 'emergency_contact', 'tax_number', 'paye_ref', 'bank_name', 'account_holder', 'account_number', 'branch_code', 'account_type', 'payment_reference', 'workday_hours', 'overtime_pay_treatment', 'notes'],
     'services': ['name', 'client_price', 'company_cost'],
     'bookings': ['title', 'start', 'employee', 'booking_type', 'transport', 'booking_notes', 'overtime_hours', 'is_invoiced'],
     'expenses': ['date', 'category', 'supplier', 'description', 'amount', 'invoice_file'],
@@ -1665,7 +1665,7 @@ def init_db():
         'clients': [('surname', 'TEXT'), ('address', 'TEXT'), ('building_number', 'TEXT'), ('street_name', 'TEXT'), ('suburb', 'TEXT'), ('postal_code', 'TEXT'), ('phone', 'TEXT'), ('email', 'TEXT'), ('client_type', 'TEXT DEFAULT "Ad hoc"'), ('discount_percent', 'REAL DEFAULT 0'), ('company_name', 'TEXT'), ('registration_number', 'TEXT'), ('vat_number', 'TEXT')],
         'invoices': [('client_id', 'INTEGER')],
         'quotes': [('client_id', 'INTEGER')],
-        'employees': [('start_date', 'TEXT'), ('inactive_date', 'TEXT'), ('gross_salary', 'REAL DEFAULT 0'), ('emp_number', 'TEXT'), ('id_passport', 'TEXT'), ('job_title', 'TEXT'), ('status', 'TEXT DEFAULT "Active"'), ('phone', 'TEXT'), ('email', 'TEXT'), ('address', 'TEXT'), ('emergency_contact', 'TEXT'), ('tax_number', 'TEXT'), ('paye_ref', 'TEXT'), ('bank_details', 'TEXT'), ('bank_name', 'TEXT'), ('account_holder', 'TEXT'), ('account_number', 'TEXT'), ('branch_code', 'TEXT'), ('account_type', 'TEXT'), ('payment_reference', 'TEXT'), ('google_event_id', 'TEXT'), ('emp_type', 'TEXT DEFAULT "Full-time (5 Days)"'), ('cv_file', 'TEXT'), ('id_file', 'TEXT'), ('contract_file', 'TEXT'), ('additional_leave', 'REAL DEFAULT 0'), ('workday_hours', 'REAL DEFAULT 7'), ('overtime_pay_treatment', 'TEXT DEFAULT "irregular"'), ('uif_contributor', 'TEXT DEFAULT "Yes"'), ('uif_non_contributor_reason', 'TEXT'), ('uif_termination_code', 'TEXT')],
+        'employees': [('start_date', 'TEXT'), ('inactive_date', 'TEXT'), ('gross_salary', 'REAL DEFAULT 0'), ('emp_number', 'TEXT'), ('id_passport', 'TEXT'), ('job_title', 'TEXT'), ('status', 'TEXT DEFAULT "Active"'), ('phone', 'TEXT'), ('email', 'TEXT'), ('address', 'TEXT'), ('emergency_contact', 'TEXT'), ('tax_number', 'TEXT'), ('paye_ref', 'TEXT'), ('bank_details', 'TEXT'), ('bank_name', 'TEXT'), ('account_holder', 'TEXT'), ('account_number', 'TEXT'), ('branch_code', 'TEXT'), ('account_type', 'TEXT'), ('payment_reference', 'TEXT'), ('google_event_id', 'TEXT'), ('emp_type', 'TEXT DEFAULT "Full-time (5 Days)"'), ('cv_file', 'TEXT'), ('id_file', 'TEXT'), ('contract_file', 'TEXT'), ('additional_leave', 'REAL DEFAULT 0'), ('notes', 'TEXT'), ('workday_hours', 'REAL DEFAULT 7'), ('overtime_pay_treatment', 'TEXT DEFAULT "irregular"'), ('uif_contributor', 'TEXT DEFAULT "Yes"'), ('uif_non_contributor_reason', 'TEXT'), ('uif_termination_code', 'TEXT')],
         'payslips': [('transport', 'REAL DEFAULT 0'), ('overtime', 'REAL DEFAULT 0'), ('bonus', 'REAL DEFAULT 0'), ('reimbursable_expenses', 'REAL DEFAULT 0'), ('loan_repayment', 'REAL DEFAULT 0'), ('payslip_type', 'TEXT DEFAULT "regular"'), ('adjustment_of_payslip_id', 'INTEGER'), ('adjustment_reason', 'TEXT'), ('created_at', 'TEXT')],
         'leave_records': [('leave_type', 'TEXT DEFAULT "Annual Leave"'), ('document_file', 'TEXT')],
         'expenses': [('invoice_file', 'TEXT')]
@@ -8805,7 +8805,7 @@ def update_employee():
             conn.close()
             return jsonify({"status": "error", "message": "Upload Signed Contract and Upload ID/Passport Copy are required."}), 400
         
-        conn.execute('''UPDATE employees SET name=?, job_title=?, emp_type=?, status=?, start_date=?, inactive_date=?, date_of_birth=?, gross_salary=?, id_passport=?, phone=?, email=?, emergency_contact=?, tax_number=?, paye_ref=?, bank_details=?, bank_name=?, account_holder=?, account_number=?, branch_code=?, account_type=?, payment_reference=?, address=?, cv_file=?, id_file=?, contract_file=?, additional_leave=?, workday_hours=?, overtime_pay_treatment=?, uif_contributor=?, uif_non_contributor_reason=?, uif_termination_code=? WHERE id=? AND company_id=?''', (data.get('name'), data.get('job_title'), data.get('emp_type'), data.get('status'), data.get('start_date'), inactive_date, data.get('date_of_birth'), data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), final_cv, final_id, final_contract, emp_add_leave, emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or '', emp_id, cid))
+        conn.execute('''UPDATE employees SET name=?, job_title=?, emp_type=?, status=?, start_date=?, inactive_date=?, date_of_birth=?, gross_salary=?, id_passport=?, phone=?, email=?, emergency_contact=?, tax_number=?, paye_ref=?, bank_details=?, bank_name=?, account_holder=?, account_number=?, branch_code=?, account_type=?, payment_reference=?, address=?, cv_file=?, id_file=?, contract_file=?, additional_leave=?, notes=?, workday_hours=?, overtime_pay_treatment=?, uif_contributor=?, uif_non_contributor_reason=?, uif_termination_code=? WHERE id=? AND company_id=?''', (data.get('name'), data.get('job_title'), data.get('emp_type'), data.get('status'), data.get('start_date'), inactive_date, data.get('date_of_birth'), data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), final_cv, final_id, final_contract, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or '', emp_id, cid))
         action_msg = ('HR & Payroll', 'Updated Employee', f"Updated profile information for {data.get('name')}")
     else:
         count = conn.execute("SELECT COUNT(*) FROM employees WHERE company_id=?", (cid,)).fetchone()[0]
@@ -8813,7 +8813,7 @@ def update_employee():
         if not id_filename or not contract_filename:
             conn.close()
             return jsonify({"status": "error", "message": "Upload Signed Contract and Upload ID/Passport Copy are required."}), 400
-        conn.execute('''INSERT INTO employees (company_id, name, emp_number, job_title, emp_type, status, start_date, inactive_date, date_of_birth, gross_salary, id_passport, phone, email, emergency_contact, tax_number, paye_ref, bank_details, bank_name, account_holder, account_number, branch_code, account_type, payment_reference, address, cv_file, id_file, contract_file, additional_leave, workday_hours, overtime_pay_treatment, uif_contributor, uif_non_contributor_reason, uif_termination_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (cid, data.get('name'), emp_num, data.get('job_title'), data.get('emp_type'), data.get('status'), data.get('start_date'), inactive_date, data.get('date_of_birth'), data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), cv_filename, id_filename, contract_filename, emp_add_leave, emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or ''))
+        conn.execute('''INSERT INTO employees (company_id, name, emp_number, job_title, emp_type, status, start_date, inactive_date, date_of_birth, gross_salary, id_passport, phone, email, emergency_contact, tax_number, paye_ref, bank_details, bank_name, account_holder, account_number, branch_code, account_type, payment_reference, address, cv_file, id_file, contract_file, additional_leave, notes, workday_hours, overtime_pay_treatment, uif_contributor, uif_non_contributor_reason, uif_termination_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (cid, data.get('name'), emp_num, data.get('job_title'), data.get('emp_type'), data.get('status'), data.get('start_date'), inactive_date, data.get('date_of_birth'), data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), cv_filename, id_filename, contract_filename, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or ''))
         action_msg = ('HR & Payroll', 'Created Employee', f"Onboarded new employee: {data.get('name')}")
     conn.commit()
     conn.close()
@@ -10283,14 +10283,27 @@ def get_uninvoiced():
     res = []
     for b in bookings:
         booking_type = b['booking_type'] or 'Service'
-        price = sum(s_dict.get(t.strip(), 0) for t in booking_type.split(',') if t.strip())
+        service_names = [t.strip() for t in booking_type.split(',') if t.strip()] or ['Service']
+        service_lines = []
+        total_price = 0.0
+
+        for service_name in service_names:
+            service_price = float(s_dict.get(service_name, 0) or 0)
+            total_price += service_price
+            service_lines.append({
+                "service": service_name,
+                "description": build_invoice_service_description(service_name, b['employee']),
+                "price": service_price
+            })
+
         res.append({
             "id": b['id'],
             "date": b['start'][:10],
             "type": booking_type,
             "employee_first_names": get_employee_first_names_for_invoice(b['employee']),
             "description": build_invoice_service_description(booking_type, b['employee']),
-            "price": price
+            "price": total_price,
+            "service_lines": service_lines
         })
     conn.close()
     return jsonify(res)

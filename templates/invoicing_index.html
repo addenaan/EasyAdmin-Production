@@ -1415,16 +1415,25 @@
                     tbody.innerHTML = '<tr><td colspan="6" class="text-center text-success py-3 fw-bold">All past bookings for this client have been billed!</td></tr>';
                 } else {
                     data.forEach(b => {
-                        tbody.innerHTML += `
-                            <tr class="checklist-row">
-                                <td class="align-middle text-center"><input type="checkbox" class="form-check-input inv-cb border-info" value="${b.id}" onclick="calculateInvTotals()"></td>
-                                <td><input type="date" class="table-input item-date" value="${b.date}"></td>
-                                <td><input type="text" class="table-input item-desc" value="${b.description || b.type}"></td>
-                                <td><input type="number" class="table-input item-qty text-end" min="0.01" step="0.01" value="1" oninput="clearManualLineTotal(this); calculateInvTotals()"></td>
-                                <td><input type="number" class="table-input item-price text-end" value="${b.price.toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()"></td>
-                                <td><input type="number" class="table-input item-line-total line-total-display text-end" min="0" step="0.01" value="${b.price.toFixed(2)}" oninput="setManualInvoiceLineTotal(this)"></td>
-                            </tr>
-                        `;
+                        const serviceLines = Array.isArray(b.service_lines) && b.service_lines.length ? b.service_lines : [{ description: b.description || b.type, price: b.price || 0 }];
+                        serviceLines.forEach((line, index) => {
+                            const linePrice = parseFloat(line.price || 0) || 0;
+                            const checkboxCell = index === 0 ? `
+                                <td class="align-middle text-center" rowspan="${serviceLines.length}">
+                                    <input type="checkbox" class="form-check-input inv-cb border-info" value="${b.id}" data-booking-id="${b.id}" onclick="calculateInvTotals()">
+                                </td>` : '';
+                            const multiBadge = serviceLines.length > 1 && index === 0 ? '<div class="small text-muted mt-1">Multiple services on one booking</div>' : '';
+                            tbody.innerHTML += `
+                                <tr class="checklist-row" data-booking-id="${b.id}">
+                                    ${checkboxCell}
+                                    <td><input type="date" class="table-input item-date" value="${b.date}"></td>
+                                    <td><input type="text" class="table-input item-desc" value="${escapeAttr(line.description || b.description || b.type)}">${multiBadge}</td>
+                                    <td><input type="number" class="table-input item-qty text-end" min="0.01" step="0.01" value="1" oninput="clearManualLineTotal(this); calculateInvTotals()"></td>
+                                    <td><input type="number" class="table-input item-price text-end" value="${linePrice.toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()"></td>
+                                    <td><input type="number" class="table-input item-line-total line-total-display text-end" min="0" step="0.01" value="${linePrice.toFixed(2)}" oninput="setManualInvoiceLineTotal(this)"></td>
+                                </tr>
+                            `;
+                        });
                     });
                 }
                 calculateInvTotals();
@@ -1537,11 +1546,16 @@
             return { quantity, unitPrice, amount };
         }
 
+        function getSelectedInvoiceBookingIds() {
+            return new Set(Array.from(document.querySelectorAll('.inv-cb:checked')).map(cb => String(cb.dataset.bookingId || cb.value || '')));
+        }
+
         function calculateInvTotals() {
             let subtotal = 0;
+            const selectedBookingIds = getSelectedInvoiceBookingIds();
             document.querySelectorAll('.checklist-row').forEach(row => {
-                const cb = row.querySelector('.inv-cb');
-                if(cb && cb.checked) {
+                const bookingId = String(row.dataset.bookingId || '');
+                if(bookingId && selectedBookingIds.has(bookingId)) {
                     subtotal += lineTotalFromRow(row, '.item-qty', '.item-price');
                 }
             });
@@ -1595,12 +1609,13 @@
             if(invoiceType === 'project' && !projectId) return alert('Select a project to invoice.');
 
             const items = [];
+            const selectedBookingIds = getSelectedInvoiceBookingIds();
             document.querySelectorAll('.checklist-row').forEach(row => {
-                const cb = row.querySelector('.inv-cb');
-                if(cb && cb.checked) {
+                const bookingId = String(row.dataset.bookingId || '');
+                if(bookingId && selectedBookingIds.has(bookingId)) {
                     const lineValues = getInvoiceLineValues(row, '.item-qty', '.item-price');
                     items.push({ 
-                        booking_id: cb.value, 
+                        booking_id: bookingId, 
                         service_date: row.querySelector('.item-date').value,
                         description: row.querySelector('.item-desc').value,
                         quantity: lineValues.quantity,

@@ -495,6 +495,11 @@
                                 <input type="number" step="0.5" class="form-control border-info" id="empAddLeave" name="additional_leave" placeholder="e.g. 5">
                                 <div class="form-text small">Extra leave given by company on top of the legal BCEA minimum.</div>
                             </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="small fw-bold">Notes</label>
+                                <textarea class="form-control" id="empNotes" name="notes" rows="3" placeholder="Add internal employee notes..."></textarea>
+                                <div class="form-text small">Internal notes for this employee profile.</div>
+                            </div>
 
                             <!-- Document Uploads -->
                             <div class="col-12 mt-3"><h6 class="border-bottom pb-2 text-secondary fw-bold">Digital Document File</h6></div>
@@ -1477,6 +1482,7 @@
             document.getElementById('empPaymentReference').value = emp ? (emp.payment_reference || 'Salary') : 'Salary';
             document.getElementById('empAddress').value = emp ? emp.address : '';
             document.getElementById('empAddLeave').value = emp ? (emp.additional_leave || 0) : 0;
+            document.getElementById('empNotes').value = emp ? (emp.notes || '') : '';
             
             if(emp && emp.cv_file) document.getElementById('currCv').innerHTML = `<a href="/uploads/cvs/${emp.cv_file}" target="_blank">📄 View Current CV</a>`; else document.getElementById('currCv').innerHTML = '';
             if(emp && emp.id_file) document.getElementById('currId').innerHTML = `<a href="/uploads/ids/${emp.id_file}" target="_blank">📄 View Current ID</a>`; else document.getElementById('currId').innerHTML = '';
