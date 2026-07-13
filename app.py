@@ -1269,6 +1269,12 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE users ADD COLUMN email TEXT')
     except sqlite3.OperationalError: pass
+    user_cols_before_hiring = set(compat_table_columns(conn, 'users'))
+    try: conn.execute('ALTER TABLE users ADD COLUMN can_hiring INTEGER DEFAULT 0')
+    except sqlite3.OperationalError: pass
+    if 'can_hiring' not in user_cols_before_hiring:
+        try: conn.execute('UPDATE users SET can_hiring=1 WHERE can_payroll=1')
+        except sqlite3.OperationalError: pass
 
     conn.execute('''CREATE TABLE IF NOT EXISTS system_email_settings (
         setting_key TEXT PRIMARY KEY,
@@ -1279,8 +1285,8 @@ def init_db():
 
     if conn.execute('SELECT COUNT(*) FROM users WHERE is_superadmin=1').fetchone()[0] == 0:
         default_hash = generate_password_hash('Fawaaz!23')
-        conn.execute('''INSERT INTO users (username, password_hash, company_id, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, is_superadmin, is_company_admin) 
-                        VALUES (?, ?, ?, 1, 1, 1, 1, 1, 1, 1)''', ('Marvellous', default_hash, default_company_id))
+        conn.execute('''INSERT INTO users (username, password_hash, company_id, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, is_superadmin, is_company_admin) 
+                        VALUES (?, ?, ?, 1, 1, 1, 1, 1, 1, 1, 1)''', ('Marvellous', default_hash, default_company_id))
 
     conn.execute('''CREATE TABLE IF NOT EXISTS invoices (
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_id INTEGER, client_name TEXT, 
@@ -3076,6 +3082,18 @@ def prevent_dynamic_response_caching(response):
 # ==========================================================
 # 0. GLOBAL SECURITY
 # ==========================================================
+def _session_has_payroll_admin_access():
+    return bool(session.get('can_payroll') or session.get('is_superadmin'))
+
+
+def _session_has_hiring_access():
+    return bool(session.get('can_hiring') or session.get('is_superadmin'))
+
+
+def _session_has_hr_module_access():
+    return bool(_session_has_payroll_admin_access() or _session_has_hiring_access())
+
+
 @app.before_request
 def restrict_access():
     public_endpoints = ['landing', 'login', 'forgot_password', 'static', 'manifest_webmanifest', 'service_worker', 'mobile_offline', 'health_check']
@@ -3140,8 +3158,14 @@ def restrict_access():
         if not session.get('can_finance'): return "Access Denied: You do not have permissions to access Finance.", 403
     if path == '/accounting' or path.startswith('/api/accounting'):
         if not session.get('can_accounting'): return "Access Denied: You do not have permissions to access Accounting.", 403
-    if path == '/payroll' or path in ['/update_employee', '/generate_payslip', '/api/save_payslip', '/generate_irp5', '/generate_emp201', '/api/ui19_settings', '/api/ui19_data', '/export_ui19', '/email_payslip', '/record_leave', '/update_leave', '/delete_leave', '/generate_report', '/save_interview', '/delete_interview'] or path.startswith('/export_emp501') or path.startswith('/export_payroll_bank_file') or path.startswith('/uploads/'):
-        if not session.get('can_payroll'): return "Access Denied: You do not have permissions to access Payroll & HR.", 403
+    if path == '/payroll':
+        if not _session_has_hr_module_access(): return "Access Denied: You do not have permissions to access HR, Payroll or Interviews & Hiring.", 403
+    if path in ['/save_interview', '/delete_interview']:
+        if not _session_has_hiring_access(): return "Access Denied: You do not have permissions to access Interviews & Hiring.", 403
+    if path in ['/update_employee', '/generate_payslip', '/api/save_payslip', '/generate_irp5', '/generate_emp201', '/api/ui19_settings', '/api/ui19_data', '/export_ui19', '/email_payslip', '/record_leave', '/update_leave', '/delete_leave', '/generate_report'] or path.startswith('/export_emp501') or path.startswith('/export_payroll_bank_file'):
+        if not _session_has_payroll_admin_access(): return "Access Denied: You do not have permissions to access Employee Administration or Payroll & Leave.", 403
+    if path.startswith('/uploads/'):
+        if not _session_has_hr_module_access(): return "Access Denied: You do not have permissions to access HR documents.", 403
     if path == '/invoicing' or path.startswith('/api/uninvoiced') or path.startswith('/api/save_invoice') or path.startswith('/api/invoice') or path.startswith('/api/save_quote') or path.startswith('/api/quote') or path.startswith('/download/invoice') or path.startswith('/download/quote') or path.startswith('/api/email_invoice_pdf') or path.startswith('/api/email_quote_pdf') or path == '/api/save_invoice_settings' or path == '/api/email_document' or path == '/api/client_statement' or path.startswith('/api/credit_note'):
         if not session.get('can_invoicing'): return "Access Denied: You do not have permissions to access Invoicing & Quotes.", 403
     
@@ -3187,6 +3211,7 @@ def login():
             session['can_booking'] = bool(user['can_booking'])
             session['can_finance'] = bool(user['can_finance'])
             session['can_payroll'] = bool(user['can_payroll'])
+            session['can_hiring'] = bool(dict(user).get('can_hiring', 0))
             session['can_invoicing'] = bool(dict(user).get('can_invoicing', 0))
             session['can_accounting'] = bool(dict(user).get('can_accounting', 0))
             
@@ -4656,17 +4681,17 @@ def api_staff_admin_account_save():
             if existing:
                 employee_email = (dict(employee).get('email') or '').strip()
                 if password:
-                    conn.execute('''UPDATE users SET username=?, email=?, password_hash=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_invoicing=0, can_accounting=0, is_company_admin=0
+                    conn.execute('''UPDATE users SET username=?, email=?, password_hash=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_hiring=0, can_invoicing=0, can_accounting=0, is_company_admin=0
                                     WHERE id=? AND company_id=?''',
                                  (username or existing['username'], employee_email, generate_password_hash(password), employee_id, 1 if enabled else 0, existing['id'], cid))
                 else:
-                    conn.execute('''UPDATE users SET username=?, email=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_invoicing=0, can_accounting=0, is_company_admin=0
+                    conn.execute('''UPDATE users SET username=?, email=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_hiring=0, can_invoicing=0, can_accounting=0, is_company_admin=0
                                     WHERE id=? AND company_id=?''',
                                  (username or existing['username'], employee_email, employee_id, 1 if enabled else 0, existing['id'], cid))
             elif enabled:
                 employee_email = (dict(employee).get('email') or '').strip()
-                conn.execute('''INSERT INTO users (username, email, company_id, password_hash, employee_id, is_staff, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, is_superadmin, is_company_admin)
-                                VALUES (?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 0)''',
+                conn.execute('''INSERT INTO users (username, email, company_id, password_hash, employee_id, is_staff, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, is_superadmin, is_company_admin)
+                                VALUES (?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 0, 0)''',
                              (username, employee_email, cid, generate_password_hash(password or 'Password123'), employee_id))
             conn.commit()
         except sqlite3.IntegrityError:
@@ -5282,6 +5307,7 @@ def api_mobile_dashboard():
                 'invoicing': _mobile_has_invoicing_access(),
                 'finance': bool(session.get('can_finance') or session.get('is_superadmin')),
                 'payroll': bool(session.get('can_payroll') or session.get('is_superadmin')),
+                'hiring': bool(session.get('can_hiring') or session.get('is_superadmin')),
                 'accounting': bool(session.get('can_accounting') or session.get('is_superadmin')),
             },
             'today': today,
@@ -6490,6 +6516,7 @@ def save_user():
         can_b = 1 if data.get('can_booking') and comp_dict.get('can_booking') else 0
         can_f = 1 if data.get('can_finance') and comp_dict.get('can_finance') else 0
         can_p = 1 if data.get('can_payroll') and comp_dict.get('can_payroll') else 0
+        can_h = 1 if data.get('can_hiring') and comp_dict.get('can_payroll') else 0
         can_i = 1 if data.get('can_invoicing') and comp_dict.get('can_invoicing') else 0
         can_a = 1 if data.get('can_accounting') and comp_dict.get('can_accounting') else 0
     else:
@@ -6498,17 +6525,18 @@ def save_user():
         can_b = 1 if data.get('can_booking') else 0
         can_f = 1 if data.get('can_finance') else 0
         can_p = 1 if data.get('can_payroll') else 0
+        can_h = 1 if data.get('can_hiring') else 0
         can_i = 1 if data.get('can_invoicing') else 0
         can_a = 1 if data.get('can_accounting') else 0
 
     action_msg = None
     try:
         if data.get('id'):
-            if data.get('password'): conn.execute('UPDATE users SET username=?, email=?, company_id=?, password_hash=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], user_email, cid, generate_password_hash(data['password']), can_b, can_f, can_p, can_i, can_a, is_comp_admin, data['id']))
-            else: conn.execute('UPDATE users SET username=?, email=?, company_id=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], user_email, cid, can_b, can_f, can_p, can_i, can_a, is_comp_admin, data['id']))
+            if data.get('password'): conn.execute('UPDATE users SET username=?, email=?, company_id=?, password_hash=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], user_email, cid, generate_password_hash(data['password']), can_b, can_f, can_p, can_h, can_i, can_a, is_comp_admin, data['id']))
+            else: conn.execute('UPDATE users SET username=?, email=?, company_id=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], user_email, cid, can_b, can_f, can_p, can_h, can_i, can_a, is_comp_admin, data['id']))
             action_msg = ('System Admin', 'Updated User', f"Updated settings for user: {data['username']}")
         else:
-            conn.execute('INSERT INTO users (username, email, company_id, password_hash, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, is_superadmin, is_company_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)', (data['username'], user_email, cid, generate_password_hash(data['password'] or 'Password123'), can_b, can_f, can_p, can_i, can_a, is_comp_admin))
+            conn.execute('INSERT INTO users (username, email, company_id, password_hash, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, is_superadmin, is_company_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)', (data['username'], user_email, cid, generate_password_hash(data['password'] or 'Password123'), can_b, can_f, can_p, can_h, can_i, can_a, is_comp_admin))
             action_msg = ('System Admin', 'Created User', f"Created new user account: {data['username']}")
         conn.commit()
     except sqlite3.IntegrityError: return jsonify({"status": "error", "message": "Username already exists."})
@@ -6522,11 +6550,11 @@ def get_users():
     if not session.get('is_superadmin') and not session.get('is_company_admin'): return "Forbidden", 403
     conn = get_db_connection()
     if session.get('is_superadmin'):
-        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 ORDER BY u.is_superadmin DESC, u.username ASC''').fetchall()
     else:
-        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 WHERE u.company_id = ? ORDER BY u.is_company_admin DESC, u.username ASC''', (session['company_id'],)).fetchall()
     conn.close()
@@ -8300,6 +8328,8 @@ def finance_report():
 def payroll_index():
     conn = get_db_connection()
     cid = session['company_id']
+    can_hr_payroll = _session_has_payroll_admin_access()
+    can_hiring = _session_has_hiring_access()
 
     # Ensure older/existing tenants have their setup defaults available before rendering HR screens.
     # Patch 5.3 introduced tenant scorecards, but the payroll page must explicitly load the
@@ -8310,70 +8340,83 @@ def payroll_index():
 
     payroll_page, payroll_per_page, payroll_offset = get_page_args(request.args, prefix='payroll_', default_per_page=50, max_per_page=100)
     payroll_q = (request.args.get('payroll_q') or '').strip()
-    emp_where = "company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL)"
-    emp_params = [cid]
-    if payroll_q:
-        like = f"%{payroll_q}%"
-        emp_where += " AND (COALESCE(name,'') LIKE ? OR COALESCE(emp_number,'') LIKE ? OR COALESCE(job_title,'') LIKE ? OR COALESCE(status,'') LIKE ? OR COALESCE(emp_type,'') LIKE ?)"
-        emp_params.extend([like, like, like, like, like])
-    employee_total = conn.execute(f"SELECT COUNT(*) FROM employees WHERE {emp_where}", emp_params).fetchone()[0]
-    employees = conn.execute(f"SELECT * FROM employees WHERE {emp_where} ORDER BY name ASC LIMIT ? OFFSET ?", emp_params + [payroll_per_page, payroll_offset]).fetchall()
-    employee_pagination = pagination_meta(employee_total, payroll_page, payroll_per_page)
-    
+    employee_total = 0
+    employees = []
+    employee_pagination = pagination_meta(0, payroll_page, payroll_per_page)
     current_month = datetime.now().strftime('%Y-%m')
     current_month_label = datetime.now().strftime('%B %Y')
     current_month_ref_date = datetime.now().strftime('%Y-%m-%d')
-
-    all_payroll_employees = conn.execute("""SELECT id, name, start_date, emp_type, status, inactive_date
-                                            FROM employees
-                                            WHERE company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL)
-                                            ORDER BY name ASC""", (cid,)).fetchall()
-    finalized_rows = conn.execute("""SELECT employee_id, MAX(date) AS finalised_date
-                                   FROM payslips
-                                   WHERE company_id=?
-                                     AND date LIKE ?
-                                     AND COALESCE(payslip_type, 'regular')='regular'
-                                   GROUP BY employee_id""", (cid, f"{current_month}%")).fetchall()
-    current_month_finalized_map = {int(r['employee_id']): (r['finalised_date'] or '') for r in finalized_rows if r['employee_id'] is not None}
-
-    current_month_expected_ids = []
-    current_month_missing_names = []
-    for payroll_emp in all_payroll_employees:
-        _m_start, _m_end, _inactive, payroll_cutoff = get_employee_payroll_cutoff(payroll_emp, current_month_ref_date)
-        if payroll_cutoff is None:
-            continue
-        emp_id_int = int(payroll_emp['id'])
-        current_month_expected_ids.append(emp_id_int)
-        if emp_id_int not in current_month_finalized_map:
-            current_month_missing_names.append(payroll_emp['name'] or f"Employee #{emp_id_int}")
-
-    current_month_finalized_count = sum(1 for emp_id in current_month_expected_ids if emp_id in current_month_finalized_map)
-    current_month_expected_count = len(current_month_expected_ids)
-    current_month_missing_count = max(current_month_expected_count - current_month_finalized_count, 0)
     payroll_current_month_status = {
         'month': current_month,
         'month_label': current_month_label,
-        'expected_count': current_month_expected_count,
-        'finalized_count': current_month_finalized_count,
-        'missing_count': current_month_missing_count,
-        'is_complete': current_month_expected_count > 0 and current_month_finalized_count == current_month_expected_count,
-        'missing_names': current_month_missing_names[:12],
-        'more_missing_count': max(len(current_month_missing_names) - 12, 0),
+        'expected_count': 0,
+        'finalized_count': 0,
+        'missing_count': 0,
+        'is_complete': False,
+        'missing_names': [],
+        'more_missing_count': 0,
     }
-
     emp_data = []
-    for emp in employees:
-        d = dict(emp)
-        d['leave_balance'] = calculate_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'])
-        d['sick_leave_balance'] = calculate_sick_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'])
-        d['hours_worked'] = round(conn.execute("SELECT COUNT(*) as c FROM bookings WHERE company_id=? AND start LIKE ? AND employee LIKE ?", (cid, f"{current_month}%", f"%{emp['name']}%")).fetchone()['c'] * get_employee_workday_hours(emp), 2)
-        _m_start, _m_end, _inactive, payroll_cutoff = get_employee_payroll_cutoff(emp, current_month_ref_date)
-        d['current_month_payroll_applicable'] = payroll_cutoff is not None
-        d['current_month_payroll_finalized'] = int(emp['id']) in current_month_finalized_map
-        d['current_month_payroll_date'] = current_month_finalized_map.get(int(emp['id']), '')
-        emp_data.append(d)
 
-    interviews = conn.execute("SELECT * FROM interviews WHERE company_id=? ORDER BY interview_datetime DESC", (cid,)).fetchall()
+    if can_hr_payroll:
+        emp_where = "company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL)"
+        emp_params = [cid]
+        if payroll_q:
+            like = f"%{payroll_q}%"
+            emp_where += " AND (COALESCE(name,'') LIKE ? OR COALESCE(emp_number,'') LIKE ? OR COALESCE(job_title,'') LIKE ? OR COALESCE(status,'') LIKE ? OR COALESCE(emp_type,'') LIKE ?)"
+            emp_params.extend([like, like, like, like, like])
+        employee_total = conn.execute(f"SELECT COUNT(*) FROM employees WHERE {emp_where}", emp_params).fetchone()[0]
+        employees = conn.execute(f"SELECT * FROM employees WHERE {emp_where} ORDER BY name ASC LIMIT ? OFFSET ?", emp_params + [payroll_per_page, payroll_offset]).fetchall()
+        employee_pagination = pagination_meta(employee_total, payroll_page, payroll_per_page)
+        all_payroll_employees = conn.execute("""SELECT id, name, start_date, emp_type, status, inactive_date
+                                                FROM employees
+                                                WHERE company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL)
+                                                ORDER BY name ASC""", (cid,)).fetchall()
+        finalized_rows = conn.execute("""SELECT employee_id, MAX(date) AS finalised_date
+                                       FROM payslips
+                                       WHERE company_id=?
+                                         AND date LIKE ?
+                                         AND COALESCE(payslip_type, 'regular')='regular'
+                                       GROUP BY employee_id""", (cid, f"{current_month}%")).fetchall()
+        current_month_finalized_map = {int(r['employee_id']): (r['finalised_date'] or '') for r in finalized_rows if r['employee_id'] is not None}
+
+        current_month_expected_ids = []
+        current_month_missing_names = []
+        for payroll_emp in all_payroll_employees:
+            _m_start, _m_end, _inactive, payroll_cutoff = get_employee_payroll_cutoff(payroll_emp, current_month_ref_date)
+            if payroll_cutoff is None:
+                continue
+            emp_id_int = int(payroll_emp['id'])
+            current_month_expected_ids.append(emp_id_int)
+            if emp_id_int not in current_month_finalized_map:
+                current_month_missing_names.append(payroll_emp['name'] or f"Employee #{emp_id_int}")
+
+        current_month_finalized_count = sum(1 for emp_id in current_month_expected_ids if emp_id in current_month_finalized_map)
+        current_month_expected_count = len(current_month_expected_ids)
+        current_month_missing_count = max(current_month_expected_count - current_month_finalized_count, 0)
+        payroll_current_month_status = {
+            'month': current_month,
+            'month_label': current_month_label,
+            'expected_count': current_month_expected_count,
+            'finalized_count': current_month_finalized_count,
+            'missing_count': current_month_missing_count,
+            'is_complete': current_month_expected_count > 0 and current_month_finalized_count == current_month_expected_count,
+            'missing_names': current_month_missing_names[:12],
+            'more_missing_count': max(len(current_month_missing_names) - 12, 0),
+        }
+
+        for emp in employees:
+            d = dict(emp)
+            d['leave_balance'] = calculate_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'])
+            d['sick_leave_balance'] = calculate_sick_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'])
+            d['hours_worked'] = round(conn.execute("SELECT COUNT(*) as c FROM bookings WHERE company_id=? AND start LIKE ? AND employee LIKE ?", (cid, f"{current_month}%", f"%{emp['name']}%")).fetchone()['c'] * get_employee_workday_hours(emp), 2)
+            _m_start, _m_end, _inactive, payroll_cutoff = get_employee_payroll_cutoff(emp, current_month_ref_date)
+            d['current_month_payroll_applicable'] = payroll_cutoff is not None
+            d['current_month_payroll_finalized'] = int(emp['id']) in current_month_finalized_map
+            d['current_month_payroll_date'] = current_month_finalized_map.get(int(emp['id']), '')
+            emp_data.append(d)
+
+    interviews = conn.execute("SELECT * FROM interviews WHERE company_id=? ORDER BY interview_datetime DESC", (cid,)).fetchall() if can_hiring else []
     interview_scorecard = get_tenant_scorecard_template(conn, cid)
     interview_scorecard_max_score = get_scorecard_max_score(interview_scorecard)
     
@@ -8387,6 +8430,8 @@ def payroll_index():
         employee_pagination=employee_pagination,
         payroll_q=payroll_q,
         payroll_current_month_status=payroll_current_month_status,
+        can_hr_payroll=can_hr_payroll,
+        can_hiring=can_hiring,
         session=session
     )
 
@@ -8823,7 +8868,7 @@ def update_employee():
 
 @app.route('/save_interview', methods=['POST'])
 def save_interview():
-    if not session.get('can_payroll') and not session.get('is_superadmin'): return "Forbidden", 403
+    if not _session_has_hiring_access(): return "Forbidden", 403
     data = request.form
     int_id = data.get('id')
     cid = session['company_id']
@@ -8858,7 +8903,7 @@ def save_interview():
 
 @app.route('/delete_interview', methods=['POST'])
 def delete_interview():
-    if not session.get('can_payroll') and not session.get('is_superadmin'): return "Forbidden", 403
+    if not _session_has_hiring_access(): return "Forbidden", 403
     conn = get_db_connection()
     conn.execute('DELETE FROM interviews WHERE id=? AND company_id=?', (request.get_json().get('id'), session['company_id']))
     conn.commit()

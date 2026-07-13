@@ -131,20 +131,20 @@
             </div>
             {% endif %}
 
-            {% if session.get('can_payroll') or session.get('is_superadmin') %}
+            {% if session.get('can_payroll') or session.get('can_hiring') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center" onclick="window.location.href='/payroll'">
                     <div class="card-body p-4">
                         <div class="app-icon text-success">👥</div>
                         <h5 class="fw-bold text-dark">HR & Payroll</h5>
-                        <p class="text-muted small">Manage employees, payslips, EMP201s, and bulk IRP5s.</p>
+                        <p class="text-muted small">Manage employee admin, payroll, leave and hiring workflows.</p>
                         <span class="btn btn-outline-success mt-2 w-100 fw-bold">Launch App</span>
                     </div>
                 </div>
             </div>
             {% endif %}
 
-            {% if not session.get('can_booking') and not session.get('can_finance') and not session.get('can_payroll') and not session.get('can_invoicing') and not session.get('can_accounting') and not session.get('is_superadmin') %}
+            {% if not session.get('can_booking') and not session.get('can_finance') and not session.get('can_payroll') and not session.get('can_hiring') and not session.get('can_invoicing') and not session.get('can_accounting') and not session.get('is_superadmin') %}
             <div class="col-12">
                 <div class="alert alert-warning text-center shadow-sm">
                     You do not currently have access to any applications. Please contact your Company Admin.
@@ -676,9 +676,13 @@
                         <input class="form-check-input border-dark" type="checkbox" id="userCanAccounting">
                         <label class="form-check-label" for="userCanAccounting">Accounting Access</label>
                     </div>
-                    <div class="form-check mb-3" id="wrapperCanPayroll">
+                    <div class="form-check" id="wrapperCanPayroll">
                         <input class="form-check-input border-success" type="checkbox" id="userCanPayroll">
-                        <label class="form-check-label" for="userCanPayroll">HR & Payroll Access</label>
+                        <label class="form-check-label" for="userCanPayroll">Employee Administration + Payroll & Leave Access</label>
+                    </div>
+                    <div class="form-check mb-3" id="wrapperCanHiring">
+                        <input class="form-check-input border-primary" type="checkbox" id="userCanHiring">
+                        <label class="form-check-label" for="userCanHiring">Interviews & Hiring Access</label>
                     </div>
 
                     {% if session.get('is_superadmin') %}
@@ -843,7 +847,11 @@
             if(isCompanyAdmin && !isSuperAdmin) {
                 if(!companyHasBooking) document.getElementById('wrapperCanBooking').style.display = 'none';
                 if(!companyHasFinance) document.getElementById('wrapperCanFinance').style.display = 'none';
-                if(!companyHasPayroll) document.getElementById('wrapperCanPayroll').style.display = 'none';
+                if(!companyHasPayroll) {
+                    document.getElementById('wrapperCanPayroll').style.display = 'none';
+                    const hiringWrapper = document.getElementById('wrapperCanHiring');
+                    if(hiringWrapper) hiringWrapper.style.display = 'none';
+                }
                 if(!companyHasInvoicing) document.getElementById('wrapperCanInvoicing').style.display = 'none';
                 if(!companyHasAccounting) document.getElementById('wrapperCanAccounting').style.display = 'none';
                 if(!companyHasBooking && !companyHasFinance && !companyHasPayroll && !companyHasInvoicing && !companyHasAccounting) {
@@ -1675,7 +1683,8 @@
                     if(u.can_invoicing) apps.push('<span class="badge bg-info text-dark">Invoicing</span>');
                     if(u.can_finance) apps.push('<span class="badge bg-warning text-dark">Finance</span>');
                     if(u.can_accounting) apps.push('<span class="badge bg-dark">Accounting</span>');
-                    if(u.can_payroll) apps.push('<span class="badge bg-success">Payroll</span>');
+                    if(u.can_payroll) apps.push('<span class="badge bg-success">Employee Admin + Payroll</span>');
+                    if(u.can_hiring) apps.push('<span class="badge bg-primary">Hiring</span>');
 
                     let actions = u.is_superadmin ? '' : `
                         <button class="btn btn-sm btn-outline-primary fw-bold" onclick='openUserForm(${JSON.stringify(u).replace(/'/g, "&#39;")})'>Edit</button>
@@ -1711,6 +1720,8 @@
             document.getElementById('userCanFinance').checked = user ? user.can_finance : false;
             document.getElementById('userCanAccounting').checked = user ? user.can_accounting : false;
             document.getElementById('userCanPayroll').checked = user ? user.can_payroll : false;
+            const userCanHiring = document.getElementById('userCanHiring');
+            if(userCanHiring) userCanHiring.checked = user ? !!user.can_hiring : false;
             
             const isCompAdminCb = document.getElementById('userIsCompanyAdmin');
             if(isCompAdminCb) isCompAdminCb.checked = user ? user.is_company_admin : false;
@@ -1729,7 +1740,8 @@
                 can_invoicing: document.getElementById('userCanInvoicing').checked,
                 can_finance: document.getElementById('userCanFinance').checked,
                 can_accounting: document.getElementById('userCanAccounting').checked,
-                can_payroll: document.getElementById('userCanPayroll').checked
+                can_payroll: document.getElementById('userCanPayroll').checked,
+                can_hiring: document.getElementById('userCanHiring') ? document.getElementById('userCanHiring').checked : false
             };
 
             const isCompAdminCb = document.getElementById('userIsCompanyAdmin');
