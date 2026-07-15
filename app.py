@@ -7438,7 +7438,7 @@ def is_allowed_attachment(filename):
 
 
 def validate_attachment_link(conn, company_id, linked_type, linked_id):
-    if linked_type not in ('booking', 'project'):
+    if linked_type not in ('booking', 'project', 'client'):
         return False
     try:
         linked_id = int(linked_id)
@@ -7446,8 +7446,10 @@ def validate_attachment_link(conn, company_id, linked_type, linked_id):
         return False
     if linked_type == 'booking':
         row = conn.execute('SELECT id FROM bookings WHERE id=? AND company_id=?', (linked_id, company_id)).fetchone()
-    else:
+    elif linked_type == 'project':
         row = conn.execute('SELECT id FROM projects WHERE id=? AND company_id=?', (linked_id, company_id)).fetchone()
+    else:
+        row = conn.execute('SELECT id FROM clients WHERE id=? AND company_id=?', (linked_id, company_id)).fetchone()
     return bool(row)
 
 
@@ -7847,7 +7849,9 @@ def update_client():
         data.get('postal_code'),
         data.get('address')
     )
+    client_id = None
     if data.get('id'):
+        client_id = int(data.get('id') or 0)
         conn.execute('''UPDATE clients
                         SET name=?, surname=?, client_type=?, phone=?, email=?, address=?,
                             building_number=?, street_name=?, suburb=?, postal_code=?, discount_percent=?,
@@ -7855,10 +7859,10 @@ def update_client():
                         WHERE id=? AND company_id=?''',
                      (data['name'], data.get('surname'), data.get('client_type'), data.get('phone'), data.get('email'), address,
                       data.get('building_number'), data.get('street_name'), data.get('suburb'), data.get('postal_code'), sanitize_percent(data.get('discount_percent')),
-                      data.get('company_name'), data.get('registration_number'), data.get('vat_number'), data['id'], session['company_id']))
+                      data.get('company_name'), data.get('registration_number'), data.get('vat_number'), client_id, session['company_id']))
         action_msg = (source_app, 'Updated Client', f"Updated client profile: {data['name']}")
     else:
-        conn.execute('''INSERT INTO clients
+        cur = conn.execute('''INSERT INTO clients
                         (company_id, name, surname, client_type, phone, email, address,
                          building_number, street_name, suburb, postal_code, discount_percent,
                          company_name, registration_number, vat_number)
@@ -7866,12 +7870,13 @@ def update_client():
                      (session['company_id'], data['name'], data.get('surname'), data.get('client_type'), data.get('phone'), data.get('email'), address,
                       data.get('building_number'), data.get('street_name'), data.get('suburb'), data.get('postal_code'), sanitize_percent(data.get('discount_percent')),
                       data.get('company_name'), data.get('registration_number'), data.get('vat_number')))
+        client_id = cur.lastrowid
         action_msg = (source_app, 'Created Client', f"Added new client: {data['name']}")
     conn.commit()
     conn.close()
 
     if action_msg: log_action(action_msg[0], action_msg[1], action_msg[2])
-    return jsonify({"status": "success"})
+    return jsonify({"status": "success", "client_id": client_id})
 
 @app.route('/client_report', methods=['POST'])
 def client_report():
