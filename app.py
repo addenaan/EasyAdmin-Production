@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, session, send_from_directory, send_file
+from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, session, send_from_directory, send_file, g
 import sqlite3
 import csv
 import io
@@ -15,6 +15,7 @@ import string
 import time
 import uuid
 import base64
+import html
 from urllib.parse import quote, unquote
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
@@ -83,6 +84,16 @@ if os.environ.get('FLASK_ENV') == 'production' or os.environ.get('RENDER'):
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE='Lax'
     )
+
+# --- Security hardening controls ---
+CSRF_ENABLED = os.environ.get('EASYADMIN_CSRF_ENABLED', 'true').strip().lower() not in ('0', 'false', 'no', 'off')
+RATE_LIMIT_ENABLED = os.environ.get('EASYADMIN_RATE_LIMIT_ENABLED', 'true').strip().lower() not in ('0', 'false', 'no', 'off')
+CSRF_SESSION_KEY = '_easyadmin_csrf_token'
+CSRF_FORM_FIELD = 'csrf_token'
+CSRF_HEADER_NAMES = ('X-CSRFToken', 'X-CSRF-Token')
+UNSAFE_HTTP_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+MAX_AUDIT_DETAIL_LENGTH = int(os.environ.get('MAX_AUDIT_DETAIL_LENGTH', '2000'))
+
 
 # --- Display formatting helpers ---
 # General Ledger date style: YYYY-MM-DD. Trial Balance money style: en-ZA number format.
@@ -1430,8 +1441,29 @@ def init_db():
         app_name TEXT,
         action TEXT,
         details TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        ip_address TEXT,
+        user_agent TEXT,
+        record_type TEXT,
+        record_id TEXT,
+        result TEXT DEFAULT 'success',
+        event_type TEXT DEFAULT 'application'
     )''')
+    for audit_col, audit_type in [
+        ('ip_address', 'TEXT'),
+        ('user_agent', 'TEXT'),
+        ('record_type', 'TEXT'),
+        ('record_id', 'TEXT'),
+        ('result', "TEXT DEFAULT 'success'"),
+        ('event_type', "TEXT DEFAULT 'application'")
+    ]:
+        try:
+            conn.execute(f'ALTER TABLE audit_logs ADD COLUMN {audit_col} {audit_type}')
+        except sqlite3.OperationalError:
+            pass
+        except Exception:
+            pass
+
 
     conn.execute('''CREATE TABLE IF NOT EXISTS staff_leave_requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1941,14 +1973,91 @@ def init_db():
     conn.close()
 
 # --- Helpers ---
-def log_action(app_name, action, details):
-    if 'company_id' not in session or 'username' not in session: return
+def _client_ip():
+    try:
+        forwarded_for = (request.headers.get('X-Forwarded-For') or '').split(',')[0].strip()
+        if forwarded_for:
+            return forwarded_for[:100]
+        return (request.remote_addr or '')[:100]
+    except Exception:
+        return ''
+
+
+def _client_user_agent():
+    try:
+        return (request.headers.get('User-Agent') or '')[:500]
+    except Exception:
+        return ''
+
+
+def _safe_audit_details(details):
+    if details is None:
+        return ''
+    if isinstance(details, (dict, list, tuple)):
+        try:
+            details = json.dumps(details, default=str, ensure_ascii=False)
+        except Exception:
+            details = str(details)
+    details = str(details)
+    if MAX_AUDIT_DETAIL_LENGTH and len(details) > MAX_AUDIT_DETAIL_LENGTH:
+        return details[:MAX_AUDIT_DETAIL_LENGTH - 20] + '... [truncated]'
+    return details
+
+
+def log_action(app_name, action, details, record_type=None, record_id=None, result='success', event_type='application', company_id=None, username=None):
+    """Write an enhanced audit log entry.
+
+    Backwards compatible with older calls: log_action(app, action, details).
+    New fields capture IP address, browser/user-agent, affected record and success/failure result.
+    """
+    username = username or session.get('username')
+    company_id = company_id if company_id is not None else session.get('company_id')
+    if record_id is None or record_type is None:
+        try:
+            for key, value in (request.view_args or {}).items():
+                if key.endswith('_id') or key == 'id' or key.endswith('id'):
+                    record_id = record_id if record_id is not None else value
+                    if record_type is None:
+                        record_type = key[:-3] if key.endswith('_id') else (request.endpoint or '').split('.')[0]
+                    break
+        except Exception:
+            pass
     conn = get_db_connection()
-    conn.execute("DELETE FROM audit_logs WHERE timestamp < datetime('now', '-90 days')")
-    conn.execute("INSERT INTO audit_logs (company_id, username, app_name, action, details, timestamp) VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))",
-                 (session['company_id'], session['username'], app_name, action, details))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("DELETE FROM audit_logs WHERE timestamp < datetime('now', '-90 days')")
+        conn.execute(
+            """INSERT INTO audit_logs
+               (company_id, username, app_name, action, details, timestamp, ip_address, user_agent, record_type, record_id, result, event_type)
+               VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?)""",
+            (
+                company_id,
+                username or 'anonymous',
+                app_name,
+                action,
+                _safe_audit_details(details),
+                _client_ip(),
+                _client_user_agent(),
+                record_type,
+                str(record_id) if record_id is not None else None,
+                result or 'success',
+                event_type or 'application'
+            )
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def log_security_event(action, details='', result='failure', record_type=None, record_id=None, company_id=None, username=None):
+    try:
+        g.easyadmin_security_audit_logged = True
+    except Exception:
+        pass
+    try:
+        log_action('Security', action, details, record_type=record_type, record_id=record_id, result=result, event_type='security', company_id=company_id, username=username)
+    except Exception:
+        pass
+
 
 def get_setting(key, company_id=None):
     conn = get_db_connection()
@@ -3149,9 +3258,278 @@ def _session_has_reports_access():
 
 
 def _access_denied(message='Access Denied: You do not have permission for this action.'):
+    log_security_event('Access Denied', {
+        'path': request.path,
+        'method': request.method,
+        'endpoint': request.endpoint,
+        'message': message
+    }, result='blocked')
     if _request_expects_json():
         return jsonify({'status': 'error', 'message': message}), 403
     return message, 403
+
+
+
+# --- CSRF and Rate Limiting ---
+def _ensure_csrf_token():
+    token = session.get(CSRF_SESSION_KEY)
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session[CSRF_SESSION_KEY] = token
+        session.modified = True
+    return token
+
+
+@app.context_processor
+def inject_csrf_context():
+    return {'csrf_token': _ensure_csrf_token}
+
+
+def _submitted_csrf_token():
+    for header_name in CSRF_HEADER_NAMES:
+        token = request.headers.get(header_name)
+        if token:
+            return token
+    token = request.form.get(CSRF_FORM_FIELD)
+    if token:
+        return token
+    if request.is_json:
+        try:
+            data = request.get_json(silent=True) or {}
+            if isinstance(data, dict):
+                return data.get(CSRF_FORM_FIELD) or data.get('csrf')
+        except Exception:
+            pass
+    return None
+
+
+def _csrf_error_response():
+    log_security_event('CSRF Validation Failed', {
+        'path': request.path,
+        'method': request.method,
+        'endpoint': request.endpoint
+    }, result='failure')
+    if _request_expects_json():
+        return jsonify({'status': 'error', 'message': 'Security validation failed. Please refresh the page and try again.', 'csrf_error': True}), 403
+    return 'Security validation failed. Please refresh the page and try again.', 403
+
+
+def _csrf_endpoint_exempt():
+    endpoint = request.endpoint or ''
+    if endpoint in {'static', 'manifest_webmanifest', 'service_worker', 'mobile_offline', 'health_check'}:
+        return True
+    if request.path.startswith('/static/'):
+        return True
+    return False
+
+
+_RATE_LIMIT_BUCKETS = {}
+_RATE_LIMIT_LOCK = threading.Lock()
+
+# max attempts, period seconds. Matched by endpoint first, then path prefix.
+RATE_LIMIT_RULES = {
+    'login': (8, 300),
+    'forgot_password': (5, 900),
+    'change_password': (6, 300),
+    'api_session_ping': (120, 60),
+    'api_session_timeout': (60, 60),
+    'api_staff_admin_send_notification': (20, 300),
+    'test_system_email_connection': (10, 300),
+    'test_email_connection': (10, 300),
+    'email_payslip': (30, 300),
+    'email_invoice_pdf': (30, 300),
+    'email_quote_pdf': (30, 300),
+    'email_document': (30, 300),
+}
+RATE_LIMIT_PATH_PREFIXES = [
+    ('/api/attachments/upload', 30, 300),
+    ('/api/staff/bookings/', 60, 300),
+    ('/api/staff/leave_requests', 20, 300),
+    ('/api/staff/push/subscribe', 20, 300),
+    ('/api/staff/admin/notifications/send', 20, 300),
+    ('/api/accounting/cashbook/upload', 20, 300),
+    ('/admin/import_', 10, 900),
+    ('/export/', 60, 300),
+    ('/download/', 120, 300),
+]
+
+
+def _rate_limit_rule_for_request():
+    endpoint = request.endpoint or ''
+    if endpoint in RATE_LIMIT_RULES:
+        return RATE_LIMIT_RULES[endpoint]
+    path = request.path or ''
+    for prefix, limit, window in RATE_LIMIT_PATH_PREFIXES:
+        if path.startswith(prefix):
+            return (limit, window)
+    if request.method in UNSAFE_HTTP_METHODS and path.startswith('/api/'):
+        return (90, 300)
+    return None
+
+
+def _rate_limit_identity():
+    base = _client_ip() or 'unknown-ip'
+    username = (request.form.get('username') or session.get('username') or '').strip().lower()
+    if username:
+        return f'{base}|{username}'
+    return base
+
+
+def _rate_limit_exceeded(limit, window_seconds):
+    now = time.time()
+    endpoint_key = request.endpoint or request.path or 'unknown'
+    key = f'{endpoint_key}|{_rate_limit_identity()}'
+    with _RATE_LIMIT_LOCK:
+        timestamps = _RATE_LIMIT_BUCKETS.get(key, [])
+        cutoff = now - window_seconds
+        timestamps = [ts for ts in timestamps if ts >= cutoff]
+        if len(timestamps) >= limit:
+            _RATE_LIMIT_BUCKETS[key] = timestamps
+            return True, max(1, int(window_seconds - (now - timestamps[0])))
+        timestamps.append(now)
+        _RATE_LIMIT_BUCKETS[key] = timestamps
+        # lightweight cleanup to prevent unbounded memory growth
+        if len(_RATE_LIMIT_BUCKETS) > 5000:
+            for bucket_key in list(_RATE_LIMIT_BUCKETS.keys())[:1000]:
+                _RATE_LIMIT_BUCKETS.pop(bucket_key, None)
+    return False, None
+
+
+def _rate_limit_response(retry_after):
+    log_security_event('Rate Limit Exceeded', {
+        'path': request.path,
+        'method': request.method,
+        'endpoint': request.endpoint,
+        'retry_after_seconds': retry_after
+    }, result='blocked')
+    if _request_expects_json():
+        resp = jsonify({'status': 'error', 'message': 'Too many attempts. Please wait a few minutes and try again.', 'retry_after': retry_after})
+        resp.status_code = 429
+    else:
+        resp = Response('Too many attempts. Please wait a few minutes and try again.', status=429)
+    resp.headers['Retry-After'] = str(retry_after)
+    return resp
+
+
+@app.before_request
+def enforce_csrf_and_rate_limits():
+    _ensure_csrf_token()
+
+    if RATE_LIMIT_ENABLED:
+        rule = _rate_limit_rule_for_request()
+        if rule:
+            exceeded, retry_after = _rate_limit_exceeded(*rule)
+            if exceeded:
+                return _rate_limit_response(retry_after)
+
+    if CSRF_ENABLED and request.method in UNSAFE_HTTP_METHODS and not _csrf_endpoint_exempt():
+        expected = session.get(CSRF_SESSION_KEY)
+        submitted = _submitted_csrf_token()
+        if not expected or not submitted or not secrets.compare_digest(str(expected), str(submitted)):
+            return _csrf_error_response()
+
+
+@app.after_request
+def audit_blocked_security_responses(response):
+    if response.status_code in (401, 403, 429):
+        try:
+            already_logged = bool(getattr(g, 'easyadmin_security_audit_logged', False))
+        except Exception:
+            already_logged = False
+        if not already_logged:
+            log_security_event('Request Blocked', {
+                'path': request.path,
+                'method': request.method,
+                'endpoint': request.endpoint,
+                'status_code': response.status_code
+            }, result='blocked')
+    return response
+
+
+@app.after_request
+def inject_csrf_protection(response):
+    if not CSRF_ENABLED:
+        return response
+    if response.status_code != 200 or response.is_streamed or response.mimetype != 'text/html':
+        return response
+    try:
+        body = response.get_data(as_text=True)
+    except Exception:
+        return response
+    token = html.escape(_ensure_csrf_token(), quote=True)
+    changed = False
+    if 'name="csrf-token"' not in body and "name='csrf-token'" not in body:
+        meta = f'<meta name="csrf-token" content="{token}">\n'
+        if '</head>' in body:
+            body = body.replace('</head>', meta + '</head>', 1)
+        else:
+            body = meta + body
+        changed = True
+    hidden = f'<input type="hidden" name="{CSRF_FORM_FIELD}" value="{token}" data-easyadmin-csrf="1">'
+    def _add_hidden(match):
+        form_tag = match.group(1)
+        if 'data-csrf-exempt' in form_tag or 'data-easyadmin-csrf' in form_tag:
+            return form_tag
+        return form_tag + hidden
+    new_body = re.sub(r'(<form\b(?=[^>]*\bmethod\s*=\s*["\']?post["\']?)[^>]*>)', _add_hidden, body, flags=re.I)
+    if new_body != body:
+        body = new_body
+        changed = True
+    if 'easyadmin-csrf-fetch-patch' not in body:
+        script = f'''
+<script id="easyadmin-csrf-fetch-patch">
+(function() {{
+  var token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '{token}';
+  function sameOrigin(url) {{
+    try {{ return new URL(url, window.location.href).origin === window.location.origin; }}
+    catch (e) {{ return true; }}
+  }}
+  if (window.fetch && !window.fetch.easyAdminCsrfPatched) {{
+    var originalFetch = window.fetch;
+    var patchedFetch = function(input, init) {{
+      init = init || {{}};
+      var method = (init.method || (input && input.method) || 'GET').toUpperCase();
+      var url = (typeof input === 'string') ? input : (input && input.url) || window.location.href;
+      if (/^(POST|PUT|PATCH|DELETE)$/.test(method) && sameOrigin(url)) {{
+        var headers = new Headers(init.headers || (input && input.headers) || {{}});
+        if (!headers.has('X-CSRFToken')) headers.set('X-CSRFToken', token);
+        init.headers = headers;
+      }}
+      return originalFetch(input, init);
+    }};
+    patchedFetch.easyAdminCsrfPatched = true;
+    window.fetch = patchedFetch;
+  }}
+  if (window.XMLHttpRequest && !window.XMLHttpRequest.prototype.easyAdminCsrfPatched) {{
+    var originalOpen = window.XMLHttpRequest.prototype.open;
+    var originalSend = window.XMLHttpRequest.prototype.send;
+    window.XMLHttpRequest.prototype.open = function(method, url) {{
+      this._easyAdminCsrfMethod = (method || 'GET').toUpperCase();
+      this._easyAdminCsrfUrl = url;
+      return originalOpen.apply(this, arguments);
+    }};
+    window.XMLHttpRequest.prototype.send = function() {{
+      if (/^(POST|PUT|PATCH|DELETE)$/.test(this._easyAdminCsrfMethod || '') && sameOrigin(this._easyAdminCsrfUrl || window.location.href)) {{
+        try {{ this.setRequestHeader('X-CSRFToken', token); }} catch (e) {{}}
+      }}
+      return originalSend.apply(this, arguments);
+    }};
+    window.XMLHttpRequest.prototype.easyAdminCsrfPatched = true;
+  }}
+}})();
+</script>
+'''
+        if '</head>' in body:
+            body = body.replace('</head>', script + '</head>', 1)
+        elif '</body>' in body:
+            body = body.replace('</body>', script + '</body>', 1)
+        else:
+            body += script
+        changed = True
+    if changed:
+        response.set_data(body)
+        response.headers['Content-Length'] = str(len(response.get_data()))
+    return response
 
 
 @app.before_request
@@ -3346,11 +3724,17 @@ def login():
             session['comp_google_calendar'] = bool(dict(comp).get('google_calendar_sync', 0)) if comp else False
                 
             conn.close()
-            log_action('System', 'Login', f"User {user['username']} logged in.")
+            log_action('System', 'Login', f"User {user['username']} logged in.", result='success', event_type='security', username=user['username'])
             if session.get('is_staff'):
                 return redirect(url_for('staff_portal'))
             return redirect(url_for('hub'))
-        else: error = 'Invalid credentials.'
+        else:
+            attempted_username = (request.form.get('username') or '').strip()
+            if user:
+                log_security_event('Failed Login', f'Invalid password for username: {attempted_username}', result='failure', company_id=dict(user).get('company_id'), username=attempted_username)
+            else:
+                log_security_event('Failed Login', f'Unknown username attempted: {attempted_username}', result='failure', username=attempted_username or 'unknown')
+            error = 'Invalid credentials.'
         conn.close()
     return render_template('login.html', error=error)
 
@@ -3384,8 +3768,14 @@ def forgot_password():
                         _send_system_email(account_email, 'Easy Admin password reset', body)
                         conn.execute('UPDATE users SET password_hash=? WHERE id=?', (generate_password_hash(temp_password), user['id']))
                         conn.commit()
+                        log_security_event('Password Reset Requested', f'Temporary password generated for username: {user["username"]}', result='success', company_id=dict(user).get('company_id'), username=user['username'])
+                    else:
+                        log_security_event('Password Reset Requested', f'Password reset request did not match email for username: {username}', result='failure', company_id=dict(user).get('company_id'), username=username)
+                else:
+                    log_security_event('Password Reset Requested', f'Password reset requested for unknown username: {username}', result='failure', username=username or 'unknown')
                 success_msg = generic_msg
             except Exception as exc:
+                log_security_event('Password Reset Failed', str(exc), result='failure', username=username or 'unknown')
                 error_msg = f'Password reset could not be completed: {exc}'
             finally:
                 conn.close()
@@ -3416,16 +3806,18 @@ def change_password():
             try:
                 user = conn.execute('SELECT * FROM users WHERE username=?', (session.get('username'),)).fetchone()
                 if not user or not check_password_hash(user['password_hash'], current_password):
+                    log_security_event('Change Password Failed', 'Current password was incorrect.', result='failure', username=session.get('username'))
                     error_msg = 'Current password is incorrect.'
                 else:
                     conn.execute('UPDATE users SET password_hash=? WHERE id=?', (generate_password_hash(new_password), user['id']))
                     conn.commit()
                     success_msg = 'Password changed successfully.'
                     try:
-                        log_action('System', 'Change Password', f"User {session.get('username')} changed their password.")
+                        log_action('System', 'Change Password', f"User {session.get('username')} changed their password.", result='success', event_type='security')
                     except Exception:
                         pass
             except Exception as exc:
+                log_security_event('Change Password Failed', str(exc), result='failure', username=session.get('username'))
                 error_msg = f'Password could not be changed: {exc}'
             finally:
                 conn.close()
@@ -3435,7 +3827,7 @@ def change_password():
 @app.route('/logout')
 def logout(): 
     if 'username' in session:
-        log_action('System', 'Logout', f"User {session['username']} logged out.")
+        log_action('System', 'Logout', f"User {session['username']} logged out.", result='success', event_type='security')
     session.clear()
     return redirect(url_for('login'))
 

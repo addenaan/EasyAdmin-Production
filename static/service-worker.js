@@ -1,4 +1,4 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v17-staff-notification-fix';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v18-security-hardening';
 const APP_SHELL = [
   '/mobile/offline',
   '/static/mobile.css?v=20260622',

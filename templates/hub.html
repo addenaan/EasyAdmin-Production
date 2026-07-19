@@ -296,7 +296,7 @@
     </div>
 
     <div class="modal fade" id="holidayModal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
+        <div class="modal-dialog modal-xl">
             <div class="modal-content">
                 <div class="modal-header bg-info text-white">
                     <h5 class="modal-title">Manage Public Holidays</h5>
@@ -490,8 +490,13 @@
                             <tr>
                                 <th>Timestamp</th>
                                 <th>User</th>
+                                <th>Event</th>
+                                <th>Result</th>
                                 <th>App</th>
                                 <th>Action</th>
+                                <th>Affected Record</th>
+                                <th>IP Address</th>
+                                <th>Browser/User-Agent</th>
                                 <th>Details</th>
                             </tr>
                         </thead>
@@ -1098,7 +1103,7 @@
                 const tbody = document.getElementById('taxBracketsBody');
                 tbody.innerHTML = '';
                 if(data.brackets.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No tax brackets defined for this year.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="9" class="text-muted">No tax brackets defined for this year.</td></tr>';
                 } else {
                     data.brackets.forEach(b => {
                         tbody.innerHTML += `
@@ -1664,29 +1669,44 @@
 
         {% if session.get('is_superadmin') or session.get('is_company_admin') %}
         const auditModal = document.getElementById('auditModal') ? new bootstrap.Modal(document.getElementById('auditModal')) : null;
+        function auditEscape(value) {
+            return String(value ?? '').replace(/[&<>"']/g, function(ch) {
+                return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch];
+            });
+        }
         function openAuditModal() {
             fetch('/admin/audit_logs').then(r => r.json()).then(data => {
                 const tbody = document.getElementById('auditTableBody');
                 if(!tbody) return;
                 tbody.innerHTML = '';
                 if(data.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted p-4">No system activity found in the last 90 days.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted p-4">No system activity found in the last 90 days.</td></tr>';
                 } else {
                     data.forEach(log => {
                         let badgeColor = "secondary";
-                        if(log.app_name.includes("Booking")) badgeColor = "primary";
-                        if(log.app_name.includes("Finance")) badgeColor = "warning text-dark";
-                        if(log.app_name.includes("Payroll")) badgeColor = "success";
-                        if(log.app_name.includes("Invoicing")) badgeColor = "info text-dark";
-                        if(log.app_name.includes("System")) badgeColor = "dark";
+                        const appName = String(log.app_name || '');
+                        if(appName.includes("Booking")) badgeColor = "primary";
+                        if(appName.includes("Finance")) badgeColor = "warning text-dark";
+                        if(appName.includes("Payroll")) badgeColor = "success";
+                        if(appName.includes("Invoicing")) badgeColor = "info text-dark";
+                        if(appName.includes("System")) badgeColor = "dark";
+                        if(appName.includes("Security")) badgeColor = "danger";
+                        const result = String(log.result || 'success').toLowerCase();
+                        const resultClass = result === 'success' ? 'success' : (result === 'blocked' ? 'warning text-dark' : 'danger');
+                        const affected = [log.record_type, log.record_id].filter(Boolean).join(' #');
 
                         tbody.innerHTML += `
                             <tr>
-                                <td class="text-nowrap small text-muted">${log.timestamp}</td>
-                                <td><strong>${log.username}</strong></td>
-                                <td><span class="badge bg-${badgeColor}">${log.app_name}</span></td>
-                                <td>${log.action}</td>
-                                <td class="text-muted">${log.details}</td>
+                                <td class="text-nowrap small text-muted">${auditEscape(log.timestamp)}</td>
+                                <td><strong>${auditEscape(log.username)}</strong></td>
+                                <td><span class="badge bg-light text-dark border">${auditEscape(log.event_type || 'application')}</span></td>
+                                <td><span class="badge bg-${resultClass}">${auditEscape(log.result || 'success')}</span></td>
+                                <td><span class="badge bg-${badgeColor}">${auditEscape(log.app_name)}</span></td>
+                                <td>${auditEscape(log.action)}</td>
+                                <td class="small text-muted">${auditEscape(affected || '')}</td>
+                                <td class="small text-muted">${auditEscape(log.ip_address || '')}</td>
+                                <td class="small text-muted" style="max-width: 220px; word-break: break-word;">${auditEscape(log.user_agent || '')}</td>
+                                <td class="text-muted small">${auditEscape(log.details)}</td>
                             </tr>
                         `;
                     });
