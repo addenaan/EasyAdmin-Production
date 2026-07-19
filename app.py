@@ -1276,6 +1276,16 @@ def init_db():
         try: conn.execute('UPDATE users SET can_hiring=1 WHERE can_payroll=1')
         except sqlite3.OperationalError: pass
 
+    # Read-only app permissions let Company Admins give users view/report access without allowing create/edit/delete/post actions.
+    user_cols_before_readonly = set(compat_table_columns(conn, 'users'))
+    for ro_col in [
+        'can_booking_readonly', 'can_finance_readonly', 'can_payroll_readonly',
+        'can_hiring_readonly', 'can_invoicing_readonly', 'can_accounting_readonly'
+    ]:
+        if ro_col not in user_cols_before_readonly:
+            try: conn.execute(f'ALTER TABLE users ADD COLUMN {ro_col} INTEGER DEFAULT 0')
+            except Exception: pass
+
     conn.execute('''CREATE TABLE IF NOT EXISTS system_email_settings (
         setting_key TEXT PRIMARY KEY,
         setting_value TEXT
@@ -3082,29 +3092,66 @@ def prevent_dynamic_response_caching(response):
 # ==========================================================
 # 0. GLOBAL SECURITY
 # ==========================================================
+APP_PERMISSION_MAP = {
+    'booking': ('can_booking', 'can_booking_readonly'),
+    'finance': ('can_finance', 'can_finance_readonly'),
+    'payroll': ('can_payroll', 'can_payroll_readonly'),
+    'hiring': ('can_hiring', 'can_hiring_readonly'),
+    'invoicing': ('can_invoicing', 'can_invoicing_readonly'),
+    'accounting': ('can_accounting', 'can_accounting_readonly'),
+}
+
+
+def _session_has_app_full(app_key):
+    full_key, _ = APP_PERMISSION_MAP.get(app_key, (None, None))
+    return bool(session.get('is_superadmin') or (full_key and session.get(full_key)))
+
+
+def _session_has_app_read(app_key):
+    full_key, readonly_key = APP_PERMISSION_MAP.get(app_key, (None, None))
+    return bool(
+        session.get('is_superadmin')
+        or (full_key and session.get(full_key))
+        or (readonly_key and session.get(readonly_key))
+    )
+
+
 def _session_has_payroll_admin_access():
-    return bool(session.get('can_payroll') or session.get('is_superadmin'))
+    return bool(_session_has_app_full('payroll'))
+
+
+def _session_has_payroll_read_access():
+    return bool(_session_has_app_read('payroll'))
 
 
 def _session_has_hiring_access():
-    return bool(session.get('can_hiring') or session.get('is_superadmin'))
+    return bool(_session_has_app_full('hiring'))
+
+
+def _session_has_hiring_read_access():
+    return bool(_session_has_app_read('hiring'))
 
 
 def _session_has_hr_module_access():
     return bool(_session_has_payroll_admin_access() or _session_has_hiring_access())
 
 
+def _session_has_hr_module_read_access():
+    return bool(_session_has_payroll_read_access() or _session_has_hiring_read_access())
+
+
 def _session_has_reports_access():
     return bool(
         session.get('is_company_admin')
         or session.get('is_superadmin')
-        or session.get('can_booking')
-        or session.get('can_invoicing')
-        or session.get('can_finance')
-        or session.get('can_payroll')
-        or session.get('can_hiring')
-        or session.get('can_accounting')
+        or any(_session_has_app_read(k) for k in APP_PERMISSION_MAP)
     )
+
+
+def _access_denied(message='Access Denied: You do not have permission for this action.'):
+    if _request_expects_json():
+        return jsonify({'status': 'error', 'message': message}), 403
+    return message, 403
 
 
 @app.before_request
@@ -3159,36 +3206,80 @@ def restrict_access():
         return 
 
     if path == '/staff_admin' or path.startswith('/api/staff/admin'):
-        if not (session.get('is_company_admin') or session.get('can_payroll')):
-            return "Access Denied: Staff Portal administration requires Company Admin or HR & Payroll access.", 403
+        if not (session.get('is_company_admin') or _session_has_app_full('payroll')):
+            return _access_denied("Access Denied: Staff Portal administration requires Company Admin or full HR & Payroll access.")
         return
-        
+
+    # Client/profile changes are write actions. Read-only Booking or Invoicing users may view client data through app/report screens only.
     if path == '/update_client':
-        if not (session.get('can_booking') or session.get('can_invoicing')):
-            return "Access Denied: You do not have permissions to manage clients.", 403
-    if path == '/booking' or path in ['/bookings', '/add', '/edit_booking', '/delete_booking', '/client_report', '/daily_route', '/export', '/generate_recurring', '/booking_staff_hours', '/export_bookings_range', '/api/booking_ops_report', '/export_booking_ops_report'] or path.startswith('/api/projects') or path.startswith('/api/attachments') or path.startswith('/api/bulk_bookings') or path.startswith('/download_attachment'):
-        if not session.get('can_booking'): return "Access Denied: You do not have permissions to access Booking & Operations.", 403
-    if path in ['/update_service', '/delete_service', '/api/services']:
-        if not (session.get('can_finance') or session.get('can_invoicing')):
-            return "Access Denied: You do not have permissions to manage service margins.", 403
-    if path == '/finance' or path in ['/log_expense', '/finance_report', '/update_vendor']:
-        if not session.get('can_finance'): return "Access Denied: You do not have permissions to access Finance.", 403
-    if path == '/accounting' or path.startswith('/api/accounting'):
-        if not session.get('can_accounting'): return "Access Denied: You do not have permissions to access Accounting.", 403
+        if not (_session_has_app_full('booking') or _session_has_app_full('invoicing')):
+            return _access_denied("Access Denied: Full Booking or Invoicing access is required to update clients.")
+
+    booking_read_paths = ['/booking', '/bookings', '/client_report', '/daily_route', '/export', '/booking_staff_hours', '/export_bookings_range', '/api/booking_ops_report', '/export_booking_ops_report', '/api/bulk_bookings/search']
+    booking_write_paths = ['/add', '/edit_booking', '/delete_booking', '/generate_recurring', '/api/bulk_bookings/update', '/api/bulk_bookings/delete', '/api/attachments/upload', '/api/attachments/delete', '/api/projects/save', '/api/projects/delete']
+    if path in booking_read_paths or path.startswith('/download_attachment') or (path.startswith('/api/projects') and request.method == 'GET') or (path.startswith('/api/attachments') and request.method == 'GET'):
+        if not _session_has_app_read('booking'):
+            return _access_denied("Access Denied: You do not have permissions to access Booking & Operations.")
+    if path in booking_write_paths:
+        if not _session_has_app_full('booking'):
+            return _access_denied("Access Denied: Full Booking & Operations access is required for this action.")
+
+    if path == '/api/services':
+        if not (_session_has_app_read('finance') or _session_has_app_read('invoicing')):
+            return _access_denied("Access Denied: You do not have permissions to view service margins.")
+    if path in ['/update_service', '/delete_service']:
+        if not (_session_has_app_full('finance') or _session_has_app_full('invoicing')):
+            return _access_denied("Access Denied: Full Finance or Invoicing access is required to manage service margins.")
+
+    if path == '/finance' or path == '/finance_report':
+        if not _session_has_app_read('finance'):
+            return _access_denied("Access Denied: You do not have permissions to access Finance.")
+    if path in ['/log_expense', '/update_vendor']:
+        if not _session_has_app_full('finance'):
+            return _access_denied("Access Denied: Full Finance access is required for this action.")
+
+    if path == '/accounting' or (path.startswith('/api/accounting') and request.method == 'GET') or (path.startswith('/download/accounting') and request.method == 'GET') or path.startswith('/view_accounting_file') or path.startswith('/download_accounting_file'):
+        if not _session_has_app_read('accounting'):
+            return _access_denied("Access Denied: You do not have permissions to access Accounting.")
+    if path.startswith('/api/accounting') and request.method != 'GET':
+        if path == '/api/accounting/bootstrap' and _session_has_app_read('accounting'):
+            pass
+        elif not _session_has_app_full('accounting'):
+            return _access_denied("Access Denied: Full Accounting access is required for this action.")
+
     if path == '/payroll':
-        if not _session_has_hr_module_access(): return "Access Denied: You do not have permissions to access HR, Payroll or Interviews & Hiring.", 403
+        if not _session_has_hr_module_read_access():
+            return _access_denied("Access Denied: You do not have permissions to access HR, Payroll or Interviews & Hiring.")
     if path in ['/save_interview', '/delete_interview']:
-        if not _session_has_hiring_access(): return "Access Denied: You do not have permissions to access Interviews & Hiring.", 403
-    if path in ['/update_employee', '/generate_payslip', '/api/save_payslip', '/generate_irp5', '/generate_emp201', '/api/ui19_settings', '/api/ui19_data', '/export_ui19', '/email_payslip', '/record_leave', '/update_leave', '/delete_leave', '/generate_report'] or path.startswith('/export_emp501') or path.startswith('/export_payroll_bank_file'):
-        if not _session_has_payroll_admin_access(): return "Access Denied: You do not have permissions to access Employee Administration or Payroll & Leave.", 403
+        if not _session_has_hiring_access():
+            return _access_denied("Access Denied: Full Interviews & Hiring access is required for this action.")
+    payroll_read_paths = ['/generate_report', '/api/ui19_data', '/export_ui19', '/generate_emp201', '/generate_irp5']
+    if path in payroll_read_paths or path.startswith('/export_emp501') or path.startswith('/export_payroll_bank_file') or path == '/api/paged/payroll_employees' or (path == '/api/ui19_settings' and request.method == 'GET'):
+        if not _session_has_payroll_read_access():
+            return _access_denied("Access Denied: You do not have permissions to access Employee Administration or Payroll & Leave.")
+    payroll_write_paths = ['/update_employee', '/generate_payslip', '/api/save_payslip', '/api/save_adjustment_payslip', '/email_payslip', '/record_leave', '/update_leave', '/delete_leave']
+    if path == '/api/ui19_settings' and request.method != 'GET':
+        if not _session_has_payroll_admin_access():
+            return _access_denied("Access Denied: Full Employee Administration or Payroll & Leave access is required for this action.")
+    if path in payroll_write_paths or path == '/api/payslip_for_distribution':
+        if not _session_has_payroll_admin_access():
+            return _access_denied("Access Denied: Full Employee Administration or Payroll & Leave access is required for this action.")
     if path.startswith('/uploads/'):
-        if not _session_has_hr_module_access(): return "Access Denied: You do not have permissions to access HR documents.", 403
-    if path == '/invoicing' or path.startswith('/api/uninvoiced') or path.startswith('/api/save_invoice') or path.startswith('/api/invoice') or path.startswith('/api/save_quote') or path.startswith('/api/quote') or path.startswith('/download/invoice') or path.startswith('/download/quote') or path.startswith('/api/email_invoice_pdf') or path.startswith('/api/email_quote_pdf') or path == '/api/save_invoice_settings' or path == '/api/email_document' or path == '/api/client_statement' or path.startswith('/api/credit_note'):
-        if not session.get('can_invoicing'): return "Access Denied: You do not have permissions to access Invoicing & Quotes.", 403
-    
+        if not _session_has_hr_module_read_access():
+            return _access_denied("Access Denied: You do not have permissions to access HR documents.")
+
+    invoicing_read_prefixes = ['/api/uninvoiced', '/api/client_statement', '/download/invoice', '/download/quote']
+    if path == '/invoicing' or any(path.startswith(prefix) for prefix in invoicing_read_prefixes) or ((path.startswith('/api/invoice') or path.startswith('/api/quote') or path.startswith('/api/credit_note')) and request.method == 'GET'):
+        if not _session_has_app_read('invoicing'):
+            return _access_denied("Access Denied: You do not have permissions to access Invoicing & Quotes.")
+    invoicing_write_prefixes = ['/api/save_invoice', '/api/save_quote', '/api/email_invoice_pdf', '/api/email_quote_pdf']
+    if any(path.startswith(prefix) for prefix in invoicing_write_prefixes) or path == '/api/save_invoice_settings' or path == '/api/email_document' or ((path.startswith('/api/invoice') or path.startswith('/api/quote') or path.startswith('/api/credit_note')) and request.method != 'GET'):
+        if not _session_has_app_full('invoicing'):
+            return _access_denied("Access Denied: Full Invoicing & Quotes access is required for this action.")
+
     if path == '/settings' or path == '/api/test_email_connection' or path == '/api/test_google_calendar_connection':
         if not session.get('is_company_admin'):
-            return "Access Denied: Only Company Admins can access Email & Calendar Settings from the Hub.", 403
+            return _access_denied("Access Denied: Only Company Admins can access Email & Calendar Settings from the Hub.")
 
 @app.route('/api/session/ping', methods=['POST'])
 def api_session_ping():
@@ -3231,6 +3322,12 @@ def login():
             session['can_hiring'] = bool(dict(user).get('can_hiring', 0))
             session['can_invoicing'] = bool(dict(user).get('can_invoicing', 0))
             session['can_accounting'] = bool(dict(user).get('can_accounting', 0))
+            session['can_booking_readonly'] = bool(dict(user).get('can_booking_readonly', 0))
+            session['can_finance_readonly'] = bool(dict(user).get('can_finance_readonly', 0))
+            session['can_payroll_readonly'] = bool(dict(user).get('can_payroll_readonly', 0))
+            session['can_hiring_readonly'] = bool(dict(user).get('can_hiring_readonly', 0))
+            session['can_invoicing_readonly'] = bool(dict(user).get('can_invoicing_readonly', 0))
+            session['can_accounting_readonly'] = bool(dict(user).get('can_accounting_readonly', 0))
             
             if user['is_superadmin']:
                 comp = conn.execute('SELECT * FROM companies ORDER BY id ASC LIMIT 1').fetchone()
@@ -3415,20 +3512,7 @@ REPORT_GROUP_ORDER = ['Operations', 'Clients', 'Projects', 'Invoicing', 'Finance
 def _report_permissions():
     if session.get('is_company_admin') or session.get('is_superadmin'):
         return {'booking', 'invoicing', 'finance', 'payroll', 'hiring', 'accounting'}
-    perms = set()
-    if session.get('can_booking'):
-        perms.add('booking')
-    if session.get('can_invoicing'):
-        perms.add('invoicing')
-    if session.get('can_finance'):
-        perms.add('finance')
-    if session.get('can_payroll'):
-        perms.add('payroll')
-    if session.get('can_hiring'):
-        perms.add('hiring')
-    if session.get('can_accounting'):
-        perms.add('accounting')
-    return perms
+    return {app_key for app_key in APP_PERMISSION_MAP if _session_has_app_read(app_key)}
 
 
 def _report_type_allowed(report_type):
@@ -5911,17 +5995,17 @@ def api_staff_admin_account_save():
             if existing:
                 employee_email = (dict(employee).get('email') or '').strip()
                 if password:
-                    conn.execute('''UPDATE users SET username=?, email=?, password_hash=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_hiring=0, can_invoicing=0, can_accounting=0, is_company_admin=0
+                    conn.execute('''UPDATE users SET username=?, email=?, password_hash=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_hiring=0, can_invoicing=0, can_accounting=0, can_booking_readonly=0, can_finance_readonly=0, can_payroll_readonly=0, can_hiring_readonly=0, can_invoicing_readonly=0, can_accounting_readonly=0, is_company_admin=0
                                     WHERE id=? AND company_id=?''',
                                  (username or existing['username'], employee_email, generate_password_hash(password), employee_id, 1 if enabled else 0, existing['id'], cid))
                 else:
-                    conn.execute('''UPDATE users SET username=?, email=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_hiring=0, can_invoicing=0, can_accounting=0, is_company_admin=0
+                    conn.execute('''UPDATE users SET username=?, email=?, employee_id=?, is_staff=?, can_booking=0, can_finance=0, can_payroll=0, can_hiring=0, can_invoicing=0, can_accounting=0, can_booking_readonly=0, can_finance_readonly=0, can_payroll_readonly=0, can_hiring_readonly=0, can_invoicing_readonly=0, can_accounting_readonly=0, is_company_admin=0
                                     WHERE id=? AND company_id=?''',
                                  (username or existing['username'], employee_email, employee_id, 1 if enabled else 0, existing['id'], cid))
             elif enabled:
                 employee_email = (dict(employee).get('email') or '').strip()
-                conn.execute('''INSERT INTO users (username, email, company_id, password_hash, employee_id, is_staff, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, is_superadmin, is_company_admin)
-                                VALUES (?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 0, 0)''',
+                conn.execute('''INSERT INTO users (username, email, company_id, password_hash, employee_id, is_staff, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, can_booking_readonly, can_finance_readonly, can_payroll_readonly, can_hiring_readonly, can_invoicing_readonly, can_accounting_readonly, is_superadmin, is_company_admin)
+                                VALUES (?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)''',
                              (username, employee_email, cid, generate_password_hash(password or 'Password123'), employee_id))
             conn.commit()
         except sqlite3.IntegrityError:
@@ -6111,11 +6195,11 @@ MOBILE_STATUS_VALUES = {'Scheduled', 'In Progress', 'Completed', 'Cancelled'}
 
 
 def _mobile_has_booking_access():
-    return bool(session.get('can_booking') or session.get('is_superadmin'))
+    return bool(_session_has_app_read('booking'))
 
 
 def _mobile_has_invoicing_access():
-    return bool(session.get('can_invoicing') or session.get('is_superadmin'))
+    return bool(_session_has_app_read('invoicing'))
 
 
 def _mobile_forbidden(message='You do not have permission to access this mobile function.'):
@@ -6535,10 +6619,10 @@ def api_mobile_dashboard():
                 'booking': _mobile_has_booking_access(),
                 'projects': _mobile_has_booking_access() and _mobile_table_exists(conn, 'projects'),
                 'invoicing': _mobile_has_invoicing_access(),
-                'finance': bool(session.get('can_finance') or session.get('is_superadmin')),
-                'payroll': bool(session.get('can_payroll') or session.get('is_superadmin')),
-                'hiring': bool(session.get('can_hiring') or session.get('is_superadmin')),
-                'accounting': bool(session.get('can_accounting') or session.get('is_superadmin')),
+                'finance': bool(_session_has_app_read('finance')),
+                'payroll': bool(_session_has_payroll_read_access()),
+                'hiring': bool(_session_has_hiring_read_access()),
+                'accounting': bool(_session_has_app_read('accounting')),
             },
             'today': today,
             'stats': {'today_bookings': 0, 'upcoming_bookings': 0, 'active_projects': 0, 'unpaid_invoices': 0},
@@ -6625,8 +6709,8 @@ def api_mobile_booking_detail(booking_id):
 
 @app.route('/api/mobile/bookings/<int:booking_id>/status', methods=['POST'])
 def api_mobile_booking_status(booking_id):
-    if not _mobile_has_booking_access():
-        return _mobile_forbidden('Booking permission is required.')
+    if not _session_has_app_full('booking'):
+        return _mobile_forbidden('Full Booking permission is required to update booking status.')
     data = request.get_json(silent=True) or {}
     new_status = (data.get('status') or '').strip()
     if new_status not in MOBILE_STATUS_VALUES:
@@ -6685,8 +6769,8 @@ def api_mobile_booking_status(booking_id):
 
 @app.route('/api/mobile/bookings/<int:booking_id>/notes', methods=['POST'])
 def api_mobile_booking_notes(booking_id):
-    if not _mobile_has_booking_access():
-        return _mobile_forbidden('Booking permission is required.')
+    if not _session_has_app_full('booking'):
+        return _mobile_forbidden('Full Booking permission is required to update booking notes.')
     data = request.get_json(silent=True) or {}
     notes = (data.get('notes') or '').strip()
     cid = session.get('company_id')
@@ -6808,7 +6892,7 @@ def api_background_job(job_id):
 
 @app.route('/api/paged/payroll_employees', methods=['GET'])
 def api_paged_payroll_employees():
-    if not session.get('can_payroll') and not session.get('is_superadmin'):
+    if not _session_has_payroll_read_access():
         return jsonify({"status": "error", "message": "Forbidden"}), 403
     conn = get_db_connection()
     cid = session['company_id']
@@ -6827,7 +6911,7 @@ def api_paged_payroll_employees():
 
 @app.route('/api/paged/bookings', methods=['GET'])
 def api_paged_bookings():
-    if not session.get('can_booking') and not session.get('is_superadmin'):
+    if not _session_has_app_read('booking'):
         return jsonify({"status": "error", "message": "Forbidden"}), 403
     conn = get_db_connection()
     cid = session['company_id']
@@ -6859,7 +6943,7 @@ def api_paged_bookings():
 
 @app.route('/api/paged/invoices', methods=['GET'])
 def api_paged_invoices():
-    if not session.get('can_invoicing') and not session.get('is_superadmin'):
+    if not _session_has_app_read('invoicing'):
         return jsonify({"status": "error", "message": "Forbidden"}), 403
     conn = get_db_connection()
     cid = session['company_id']
@@ -6878,7 +6962,7 @@ def api_paged_invoices():
 
 @app.route('/api/paged/finance_expenses', methods=['GET'])
 def api_paged_finance_expenses():
-    if not session.get('can_finance') and not session.get('is_superadmin'):
+    if not _session_has_app_read('finance'):
         return jsonify({"status": "error", "message": "Forbidden"}), 403
     conn = get_db_connection()
     cid = session['company_id']
@@ -7740,15 +7824,21 @@ def save_user():
     conn = get_db_connection()
     if not session.get('is_superadmin'):
         cid = session['company_id']
-        is_comp_admin = 0 
+        is_comp_admin = 0
         comp = conn.execute('SELECT can_booking, can_finance, can_payroll, can_invoicing, can_accounting FROM companies WHERE id=?', (cid,)).fetchone()
-        comp_dict = dict(comp)
+        comp_dict = dict(comp or {})
         can_b = 1 if data.get('can_booking') and comp_dict.get('can_booking') else 0
         can_f = 1 if data.get('can_finance') and comp_dict.get('can_finance') else 0
         can_p = 1 if data.get('can_payroll') and comp_dict.get('can_payroll') else 0
         can_h = 1 if data.get('can_hiring') and comp_dict.get('can_payroll') else 0
         can_i = 1 if data.get('can_invoicing') and comp_dict.get('can_invoicing') else 0
         can_a = 1 if data.get('can_accounting') and comp_dict.get('can_accounting') else 0
+        can_b_ro = 1 if data.get('can_booking_readonly') and comp_dict.get('can_booking') and not can_b else 0
+        can_f_ro = 1 if data.get('can_finance_readonly') and comp_dict.get('can_finance') and not can_f else 0
+        can_p_ro = 1 if data.get('can_payroll_readonly') and comp_dict.get('can_payroll') and not can_p else 0
+        can_h_ro = 1 if data.get('can_hiring_readonly') and comp_dict.get('can_payroll') and not can_h else 0
+        can_i_ro = 1 if data.get('can_invoicing_readonly') and comp_dict.get('can_invoicing') and not can_i else 0
+        can_a_ro = 1 if data.get('can_accounting_readonly') and comp_dict.get('can_accounting') and not can_a else 0
     else:
         cid = data.get('company_id')
         is_comp_admin = 1 if data.get('is_company_admin') else 0
@@ -7758,15 +7848,26 @@ def save_user():
         can_h = 1 if data.get('can_hiring') else 0
         can_i = 1 if data.get('can_invoicing') else 0
         can_a = 1 if data.get('can_accounting') else 0
+        can_b_ro = 1 if data.get('can_booking_readonly') and not can_b else 0
+        can_f_ro = 1 if data.get('can_finance_readonly') and not can_f else 0
+        can_p_ro = 1 if data.get('can_payroll_readonly') and not can_p else 0
+        can_h_ro = 1 if data.get('can_hiring_readonly') and not can_h else 0
+        can_i_ro = 1 if data.get('can_invoicing_readonly') and not can_i else 0
+        can_a_ro = 1 if data.get('can_accounting_readonly') and not can_a else 0
 
     action_msg = None
     try:
         if data.get('id'):
-            if data.get('password'): conn.execute('UPDATE users SET username=?, email=?, company_id=?, password_hash=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], user_email, cid, generate_password_hash(data['password']), can_b, can_f, can_p, can_h, can_i, can_a, is_comp_admin, data['id']))
-            else: conn.execute('UPDATE users SET username=?, email=?, company_id=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, is_company_admin=? WHERE id=? AND is_superadmin=0', (data['username'], user_email, cid, can_b, can_f, can_p, can_h, can_i, can_a, is_comp_admin, data['id']))
+            if data.get('password'):
+                conn.execute('''UPDATE users SET username=?, email=?, company_id=?, password_hash=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, can_booking_readonly=?, can_finance_readonly=?, can_payroll_readonly=?, can_hiring_readonly=?, can_invoicing_readonly=?, can_accounting_readonly=?, is_company_admin=? WHERE id=? AND is_superadmin=0''',
+                             (data['username'], user_email, cid, generate_password_hash(data['password']), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, is_comp_admin, data['id']))
+            else:
+                conn.execute('''UPDATE users SET username=?, email=?, company_id=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, can_booking_readonly=?, can_finance_readonly=?, can_payroll_readonly=?, can_hiring_readonly=?, can_invoicing_readonly=?, can_accounting_readonly=?, is_company_admin=? WHERE id=? AND is_superadmin=0''',
+                             (data['username'], user_email, cid, can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, is_comp_admin, data['id']))
             action_msg = ('System Admin', 'Updated User', f"Updated settings for user: {data['username']}")
         else:
-            conn.execute('INSERT INTO users (username, email, company_id, password_hash, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, is_superadmin, is_company_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)', (data['username'], user_email, cid, generate_password_hash(data['password'] or 'Password123'), can_b, can_f, can_p, can_h, can_i, can_a, is_comp_admin))
+            conn.execute('''INSERT INTO users (username, email, company_id, password_hash, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, can_booking_readonly, can_finance_readonly, can_payroll_readonly, can_hiring_readonly, can_invoicing_readonly, can_accounting_readonly, is_superadmin, is_company_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)''',
+                         (data['username'], user_email, cid, generate_password_hash(data['password'] or 'Password123'), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, is_comp_admin))
             action_msg = ('System Admin', 'Created User', f"Created new user account: {data['username']}")
         conn.commit()
     except sqlite3.IntegrityError: return jsonify({"status": "error", "message": "Username already exists."})
@@ -7780,11 +7881,11 @@ def get_users():
     if not session.get('is_superadmin') and not session.get('is_company_admin'): return "Forbidden", 403
     conn = get_db_connection()
     if session.get('is_superadmin'):
-        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 ORDER BY u.is_superadmin DESC, u.username ASC''').fetchall()
     else:
-        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 WHERE u.company_id = ? ORDER BY u.is_company_admin DESC, u.username ASC''', (session['company_id'],)).fetchall()
     conn.close()
@@ -9563,8 +9664,10 @@ def finance_report():
 def payroll_index():
     conn = get_db_connection()
     cid = session['company_id']
-    can_hr_payroll = _session_has_payroll_admin_access()
-    can_hiring = _session_has_hiring_access()
+    can_hr_payroll = _session_has_payroll_read_access()
+    can_hiring = _session_has_hiring_read_access()
+    can_hr_payroll_write = _session_has_payroll_admin_access()
+    can_hiring_write = _session_has_hiring_access()
 
     # Ensure older/existing tenants have their setup defaults available before rendering HR screens.
     # Patch 5.3 introduced tenant scorecards, but the payroll page must explicitly load the
@@ -9667,6 +9770,8 @@ def payroll_index():
         payroll_current_month_status=payroll_current_month_status,
         can_hr_payroll=can_hr_payroll,
         can_hiring=can_hiring,
+        can_hr_payroll_write=can_hr_payroll_write,
+        can_hiring_write=can_hiring_write,
         session=session
     )
 
@@ -10860,7 +10965,10 @@ def build_ui19_data(conn, company_id, month_str, employee_ids=None):
 
 @app.route('/api/ui19_settings', methods=['GET', 'POST'])
 def ui19_settings():
-    if not session.get('can_payroll') and not session.get('is_superadmin'):
+    if request.method == 'GET':
+        if not _session_has_payroll_read_access():
+            return jsonify({'message': 'Forbidden'}), 403
+    elif not _session_has_payroll_admin_access():
         return jsonify({'message': 'Forbidden'}), 403
     conn = get_db_connection()
     cid = session['company_id']
@@ -10895,7 +11003,7 @@ def ui19_settings():
 
 @app.route('/api/ui19_data', methods=['POST'])
 def ui19_data():
-    if not session.get('can_payroll') and not session.get('is_superadmin'):
+    if not _session_has_payroll_read_access():
         return jsonify({'message': 'Forbidden'}), 403
     data = request.get_json() or {}
     month_str = (data.get('month') or '').strip()
@@ -11202,7 +11310,7 @@ def export_ui19_pdf(payload):
 
 @app.route('/export_ui19')
 def export_ui19():
-    if not session.get('can_payroll') and not session.get('is_superadmin'):
+    if not _session_has_payroll_read_access():
         return 'Forbidden', 403
     month_str = (request.args.get('month') or '').strip()
     employee_ids = parse_ui19_employee_ids(request.args.get('employee_ids'))
@@ -11225,7 +11333,7 @@ def export_ui19():
 
 @app.route('/generate_emp201', methods=['POST'])
 def generate_emp201():
-    if not session.get('can_payroll') and not session.get('is_superadmin'):
+    if not _session_has_payroll_read_access():
         return jsonify({"message": "Forbidden"}), 403
 
     data = request.get_json()
@@ -11349,7 +11457,7 @@ def export_emp501(year):
 
 @app.route('/export_payroll_bank_file')
 def export_payroll_bank_file():
-    if not session.get('can_payroll') and not session.get('is_superadmin'):
+    if not _session_has_payroll_read_access():
         return "Forbidden", 403
     month_str = (request.args.get('month') or '').strip()
     template_key = (request.args.get('template') or 'generic_csv').strip()
@@ -11495,7 +11603,7 @@ def invoicing_index():
 
 @app.route('/api/save_invoice_settings', methods=['POST'])
 def save_invoice_settings():
-    if not session.get('can_invoicing') and not session.get('is_superadmin'): return "Forbidden", 403
+    if not _session_has_app_read('invoicing'): return "Forbidden", 403
     data = request.json
     cid = session['company_id']
     conn = get_db_connection()
@@ -11910,8 +12018,8 @@ def credit_invoice(inv_id):
 
 @app.route('/api/invoice/<int:inv_id>/post_accounting', methods=['POST'])
 def post_invoice_accounting_api(inv_id):
-    if not (session.get('can_accounting') or session.get('is_superadmin')):
-        return jsonify({'status': 'error', 'message': 'Accounting permission is required to post invoices to Accounting.'}), 403
+    if not _session_has_app_full('accounting'):
+        return jsonify({'status': 'error', 'message': 'Full Accounting access is required to post invoices to Accounting.'}), 403
     cid = session['company_id']
     conn = get_db_connection()
     try:
@@ -11930,8 +12038,8 @@ def post_invoice_accounting_api(inv_id):
 
 @app.route('/api/credit_note/<int:credit_id>/post_accounting', methods=['POST'])
 def post_credit_note_accounting_api(credit_id):
-    if not (session.get('can_accounting') or session.get('is_superadmin')):
-        return jsonify({'status': 'error', 'message': 'Accounting permission is required to post credit notes to Accounting.'}), 403
+    if not _session_has_app_full('accounting'):
+        return jsonify({'status': 'error', 'message': 'Full Accounting access is required to post credit notes to Accounting.'}), 403
     cid = session['company_id']
     conn = get_db_connection()
     try:
@@ -12878,7 +12986,7 @@ def _build_raw_pdf(page_streams, page_w=595.28, page_h=841.89, image_resources=N
 
 @app.route('/download/invoice/<int:inv_id>.pdf')
 def download_invoice_pdf(inv_id):
-    if not session.get('can_invoicing') and not session.get('is_superadmin'):
+    if not _session_has_app_read('invoicing'):
         return "Forbidden", 403
     payload = _build_billing_pdf_payload('invoice', inv_id)
     if not payload:
@@ -12890,7 +12998,7 @@ def download_invoice_pdf(inv_id):
 
 @app.route('/download/quote/<int:q_id>.pdf')
 def download_quote_pdf(q_id):
-    if not session.get('can_invoicing') and not session.get('is_superadmin'):
+    if not _session_has_app_read('invoicing'):
         return "Forbidden", 403
     payload = _build_billing_pdf_payload('quote', q_id)
     if not payload:
@@ -12979,7 +13087,7 @@ def email_document():
 # --- NEW: CLIENT STATEMENT ROUTE ---
 @app.route('/api/client_statement', methods=['POST'])
 def client_statement():
-    if not session.get('can_invoicing') and not session.get('is_superadmin'):
+    if not _session_has_app_read('invoicing'):
         return jsonify({"message": "Forbidden"}), 403
 
     data = request.json or {}
@@ -15200,7 +15308,7 @@ def _build_accounting_report_xlsx(payload):
 
 @app.route('/download/accounting/reports/trial_balance.pdf')
 def download_accounting_trial_balance_pdf():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     as_at = request.args.get('as_at') or datetime.now().strftime('%Y-%m-%d')
@@ -15226,7 +15334,7 @@ def download_accounting_trial_balance_pdf():
 
 @app.route('/download/accounting/reports/income_statement.pdf')
 def download_accounting_income_statement_pdf():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     start_date = request.args.get('start_date') or datetime.now().strftime('%Y-01-01')
@@ -15255,7 +15363,7 @@ def download_accounting_income_statement_pdf():
 
 @app.route('/download/accounting/reports/balance_sheet.pdf')
 def download_accounting_balance_sheet_pdf():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     as_at = request.args.get('as_at') or datetime.now().strftime('%Y-%m-%d')
@@ -15285,7 +15393,7 @@ def download_accounting_balance_sheet_pdf():
 
 @app.route('/download/accounting/reports/cash_flow.pdf')
 def download_accounting_cash_flow_pdf():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     start_date = request.args.get('start_date') or datetime.now().strftime('%Y-01-01')
@@ -15311,7 +15419,7 @@ def download_accounting_cash_flow_pdf():
 
 @app.route('/download/accounting/reports/general_ledger.pdf')
 def download_accounting_general_ledger_pdf():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     start_date = request.args.get('start_date') or datetime.now().strftime('%Y-01-01')
@@ -15347,7 +15455,7 @@ def download_accounting_general_ledger_pdf():
 
 @app.route('/download/accounting/reports/trial_balance.xlsx')
 def download_accounting_trial_balance_xlsx():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     as_at = request.args.get('as_at') or datetime.now().strftime('%Y-%m-%d')
@@ -15375,7 +15483,7 @@ def download_accounting_trial_balance_xlsx():
 
 @app.route('/download/accounting/reports/income_statement.xlsx')
 def download_accounting_income_statement_xlsx():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     start_date = request.args.get('start_date') or datetime.now().strftime('%Y-01-01')
@@ -15405,7 +15513,7 @@ def download_accounting_income_statement_xlsx():
 
 @app.route('/download/accounting/reports/balance_sheet.xlsx')
 def download_accounting_balance_sheet_xlsx():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     as_at = request.args.get('as_at') or datetime.now().strftime('%Y-%m-%d')
@@ -15436,7 +15544,7 @@ def download_accounting_balance_sheet_xlsx():
 
 @app.route('/download/accounting/reports/cash_flow.xlsx')
 def download_accounting_cash_flow_xlsx():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     start_date = request.args.get('start_date') or datetime.now().strftime('%Y-01-01')
@@ -15462,7 +15570,7 @@ def download_accounting_cash_flow_xlsx():
 
 @app.route('/download/accounting/reports/general_ledger.xlsx')
 def download_accounting_general_ledger_xlsx():
-    if not session.get('can_accounting') and not session.get('is_superadmin'):
+    if not _session_has_app_read('accounting'):
         return 'Forbidden', 403
     cid = _current_company_id()
     start_date = request.args.get('start_date') or datetime.now().strftime('%Y-01-01')
@@ -15498,7 +15606,7 @@ def download_accounting_general_ledger_xlsx():
 # ACCOUNTING MANAGEMENT REPORTS (SALES / COA / VAT)
 # ==========================================================
 def _accounting_report_require_permission():
-    return bool(session.get('can_accounting') or session.get('is_superadmin'))
+    return bool(_session_has_app_read('accounting'))
 
 
 def _accounting_client_display_from_fields(first_name='', surname='', company_name='', fallback=''):

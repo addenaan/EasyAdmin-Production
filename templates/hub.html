@@ -79,7 +79,7 @@
             </div>
             {% endif %}
             
-            {% if session.get('can_booking') or session.get('is_superadmin') %}
+            {% if session.get('can_booking') or session.get('can_booking_readonly') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center" onclick="window.location.href='/booking'">
                     <div class="card-body p-4">
@@ -92,7 +92,7 @@
             </div>
             {% endif %}
 
-            {% if session.get('can_invoicing') or session.get('is_superadmin') %}
+            {% if session.get('can_invoicing') or session.get('can_invoicing_readonly') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center border border-info shadow-sm" onclick="window.location.href='/invoicing'">
                     <div class="card-body p-4">
@@ -105,7 +105,7 @@
             </div>
             {% endif %}
 
-            {% if session.get('can_finance') or session.get('is_superadmin') %}
+            {% if session.get('can_finance') or session.get('can_finance_readonly') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center" onclick="window.location.href='/finance'">
                     <div class="card-body p-4">
@@ -118,7 +118,7 @@
             </div>
             {% endif %}
 
-            {% if session.get('can_accounting') or session.get('is_superadmin') %}
+            {% if session.get('can_accounting') or session.get('can_accounting_readonly') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center border border-dark shadow-sm" onclick="window.location.href='/accounting'">
                     <div class="card-body p-4">
@@ -131,7 +131,7 @@
             </div>
             {% endif %}
 
-            {% if session.get('can_booking') or session.get('can_invoicing') or session.get('can_finance') or session.get('is_company_admin') or session.get('is_superadmin') %}
+            {% if session.get('can_booking') or session.get('can_booking_readonly') or session.get('can_invoicing') or session.get('can_invoicing_readonly') or session.get('can_finance') or session.get('can_finance_readonly') or session.get('can_payroll') or session.get('can_payroll_readonly') or session.get('can_hiring') or session.get('can_hiring_readonly') or session.get('can_accounting') or session.get('can_accounting_readonly') or session.get('is_company_admin') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center border border-secondary shadow-sm" onclick="window.location.href='/reports'">
                     <div class="card-body p-4">
@@ -144,7 +144,7 @@
             </div>
             {% endif %}
 
-            {% if session.get('can_payroll') or session.get('can_hiring') or session.get('is_superadmin') %}
+            {% if session.get('can_payroll') or session.get('can_payroll_readonly') or session.get('can_hiring') or session.get('can_hiring_readonly') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center" onclick="window.location.href='/payroll'">
                     <div class="card-body p-4">
@@ -157,7 +157,7 @@
             </div>
             {% endif %}
 
-            {% if not session.get('can_booking') and not session.get('can_finance') and not session.get('can_payroll') and not session.get('can_hiring') and not session.get('can_invoicing') and not session.get('can_accounting') and not session.get('is_superadmin') %}
+            {% if not session.get('can_booking') and not session.get('can_booking_readonly') and not session.get('can_finance') and not session.get('can_finance_readonly') and not session.get('can_payroll') and not session.get('can_payroll_readonly') and not session.get('can_hiring') and not session.get('can_hiring_readonly') and not session.get('can_invoicing') and not session.get('can_invoicing_readonly') and not session.get('can_accounting') and not session.get('can_accounting_readonly') and not session.get('is_superadmin') %}
             <div class="col-12">
                 <div class="alert alert-warning text-center shadow-sm">
                     You do not currently have access to any applications. Please contact your Company Admin.
@@ -671,31 +671,49 @@
                     </div>
 
                     <label class="form-label fw-bold small text-primary border-bottom w-100 pb-1">App Permissions</label>
-                    <p class="small text-muted mb-2" id="appPermText">Select apps to grant access to this user.</p>
+                    <p class="small text-muted mb-2" id="appPermText">Grant either full access or read-only access. Read-only users can view app data and reports, but server-side checks block save, delete, send, post and import actions.</p>
 
-                    <div class="form-check" id="wrapperCanBooking">
-                        <input class="form-check-input border-primary" type="checkbox" id="userCanBooking">
-                        <label class="form-check-label" for="userCanBooking">Booking & Ops Access</label>
+                    <div class="border rounded p-2 mb-2" id="wrapperCanBooking">
+                        <div class="fw-bold small mb-1">Booking & Ops</div>
+                        <div class="d-flex gap-3 flex-wrap">
+                            <div class="form-check"><input class="form-check-input border-primary" type="checkbox" id="userCanBooking"><label class="form-check-label" for="userCanBooking">Full access</label></div>
+                            <div class="form-check"><input class="form-check-input border-secondary" type="checkbox" id="userCanBookingReadonly"><label class="form-check-label" for="userCanBookingReadonly">Read only</label></div>
+                        </div>
                     </div>
-                    <div class="form-check" id="wrapperCanInvoicing">
-                        <input class="form-check-input border-info" type="checkbox" id="userCanInvoicing">
-                        <label class="form-check-label" for="userCanInvoicing">Invoicing & Quotes Access</label>
+                    <div class="border rounded p-2 mb-2" id="wrapperCanInvoicing">
+                        <div class="fw-bold small mb-1">Invoicing & Quotes</div>
+                        <div class="d-flex gap-3 flex-wrap">
+                            <div class="form-check"><input class="form-check-input border-info" type="checkbox" id="userCanInvoicing"><label class="form-check-label" for="userCanInvoicing">Full access</label></div>
+                            <div class="form-check"><input class="form-check-input border-secondary" type="checkbox" id="userCanInvoicingReadonly"><label class="form-check-label" for="userCanInvoicingReadonly">Read only</label></div>
+                        </div>
                     </div>
-                    <div class="form-check" id="wrapperCanFinance">
-                        <input class="form-check-input border-warning" type="checkbox" id="userCanFinance">
-                        <label class="form-check-label" for="userCanFinance">Finance Access</label>
+                    <div class="border rounded p-2 mb-2" id="wrapperCanFinance">
+                        <div class="fw-bold small mb-1">Finance</div>
+                        <div class="d-flex gap-3 flex-wrap">
+                            <div class="form-check"><input class="form-check-input border-warning" type="checkbox" id="userCanFinance"><label class="form-check-label" for="userCanFinance">Full access</label></div>
+                            <div class="form-check"><input class="form-check-input border-secondary" type="checkbox" id="userCanFinanceReadonly"><label class="form-check-label" for="userCanFinanceReadonly">Read only</label></div>
+                        </div>
                     </div>
-                    <div class="form-check" id="wrapperCanAccounting">
-                        <input class="form-check-input border-dark" type="checkbox" id="userCanAccounting">
-                        <label class="form-check-label" for="userCanAccounting">Accounting Access</label>
+                    <div class="border rounded p-2 mb-2" id="wrapperCanAccounting">
+                        <div class="fw-bold small mb-1">Accounting</div>
+                        <div class="d-flex gap-3 flex-wrap">
+                            <div class="form-check"><input class="form-check-input border-dark" type="checkbox" id="userCanAccounting"><label class="form-check-label" for="userCanAccounting">Full access</label></div>
+                            <div class="form-check"><input class="form-check-input border-secondary" type="checkbox" id="userCanAccountingReadonly"><label class="form-check-label" for="userCanAccountingReadonly">Read only</label></div>
+                        </div>
                     </div>
-                    <div class="form-check" id="wrapperCanPayroll">
-                        <input class="form-check-input border-success" type="checkbox" id="userCanPayroll">
-                        <label class="form-check-label" for="userCanPayroll">Employee Administration + Payroll & Leave Access</label>
+                    <div class="border rounded p-2 mb-2" id="wrapperCanPayroll">
+                        <div class="fw-bold small mb-1">Employee Administration + Payroll & Leave</div>
+                        <div class="d-flex gap-3 flex-wrap">
+                            <div class="form-check"><input class="form-check-input border-success" type="checkbox" id="userCanPayroll"><label class="form-check-label" for="userCanPayroll">Full access</label></div>
+                            <div class="form-check"><input class="form-check-input border-secondary" type="checkbox" id="userCanPayrollReadonly"><label class="form-check-label" for="userCanPayrollReadonly">Read only</label></div>
+                        </div>
                     </div>
-                    <div class="form-check mb-3" id="wrapperCanHiring">
-                        <input class="form-check-input border-primary" type="checkbox" id="userCanHiring">
-                        <label class="form-check-label" for="userCanHiring">Interviews & Hiring Access</label>
+                    <div class="border rounded p-2 mb-3" id="wrapperCanHiring">
+                        <div class="fw-bold small mb-1">Interviews & Hiring</div>
+                        <div class="d-flex gap-3 flex-wrap">
+                            <div class="form-check"><input class="form-check-input border-primary" type="checkbox" id="userCanHiring"><label class="form-check-label" for="userCanHiring">Full access</label></div>
+                            <div class="form-check"><input class="form-check-input border-secondary" type="checkbox" id="userCanHiringReadonly"><label class="form-check-label" for="userCanHiringReadonly">Read only</label></div>
+                        </div>
                     </div>
 
                     {% if session.get('is_superadmin') %}
@@ -1680,6 +1698,23 @@
         const usersModal = document.getElementById('usersModal') ? new bootstrap.Modal(document.getElementById('usersModal')) : null;
         const userFormModal = document.getElementById('userFormModal') ? new bootstrap.Modal(document.getElementById('userFormModal')) : null;
 
+        function setupPermissionPair(fullId, readOnlyId) {
+            const full = document.getElementById(fullId);
+            const readOnly = document.getElementById(readOnlyId);
+            if(!full || !readOnly) return;
+            full.addEventListener('change', () => { if(full.checked) readOnly.checked = false; });
+            readOnly.addEventListener('change', () => { if(readOnly.checked) full.checked = false; });
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            setupPermissionPair('userCanBooking', 'userCanBookingReadonly');
+            setupPermissionPair('userCanInvoicing', 'userCanInvoicingReadonly');
+            setupPermissionPair('userCanFinance', 'userCanFinanceReadonly');
+            setupPermissionPair('userCanAccounting', 'userCanAccountingReadonly');
+            setupPermissionPair('userCanPayroll', 'userCanPayrollReadonly');
+            setupPermissionPair('userCanHiring', 'userCanHiringReadonly');
+        });
+
         function openUsersModal() {
             fetch('/admin/users').then(r => r.json()).then(data => {
                 const tbody = document.getElementById('usersTableBody');
@@ -1692,12 +1727,16 @@
                     else roles.push('<span class="badge bg-secondary">Staff</span>');
 
                     let apps = [];
-                    if(u.can_booking) apps.push('<span class="badge bg-primary">Booking</span>');
-                    if(u.can_invoicing) apps.push('<span class="badge bg-info text-dark">Invoicing</span>');
-                    if(u.can_finance) apps.push('<span class="badge bg-warning text-dark">Finance</span>');
-                    if(u.can_accounting) apps.push('<span class="badge bg-dark">Accounting</span>');
-                    if(u.can_payroll) apps.push('<span class="badge bg-success">Employee Admin + Payroll</span>');
-                    if(u.can_hiring) apps.push('<span class="badge bg-primary">Hiring</span>');
+                    function addAppBadge(fullFlag, readFlag, fullLabel, readLabel, badgeClass) {
+                        if(fullFlag) apps.push(`<span class="badge ${badgeClass}">${fullLabel}</span>`);
+                        else if(readFlag) apps.push(`<span class="badge bg-secondary">${readLabel} Read Only</span>`);
+                    }
+                    addAppBadge(u.can_booking, u.can_booking_readonly, 'Booking', 'Booking', 'bg-primary');
+                    addAppBadge(u.can_invoicing, u.can_invoicing_readonly, 'Invoicing', 'Invoicing', 'bg-info text-dark');
+                    addAppBadge(u.can_finance, u.can_finance_readonly, 'Finance', 'Finance', 'bg-warning text-dark');
+                    addAppBadge(u.can_accounting, u.can_accounting_readonly, 'Accounting', 'Accounting', 'bg-dark');
+                    addAppBadge(u.can_payroll, u.can_payroll_readonly, 'Employee Admin + Payroll', 'Employee Admin + Payroll', 'bg-success');
+                    addAppBadge(u.can_hiring, u.can_hiring_readonly, 'Hiring', 'Hiring', 'bg-primary');
 
                     let actions = u.is_superadmin ? '' : `
                         <button class="btn btn-sm btn-outline-primary fw-bold" onclick='openUserForm(${JSON.stringify(u).replace(/'/g, "&#39;")})'>Edit</button>
@@ -1728,13 +1767,20 @@
             document.getElementById('userPassword').value = "";
             document.getElementById('userCompanyId').value = user ? user.company_id : (isSuperAdmin && companiesList.length > 0 ? companiesList[0].id : currentCompanyId);
             
-            document.getElementById('userCanBooking').checked = user ? user.can_booking : false;
-            document.getElementById('userCanInvoicing').checked = user ? user.can_invoicing : false;
-            document.getElementById('userCanFinance').checked = user ? user.can_finance : false;
-            document.getElementById('userCanAccounting').checked = user ? user.can_accounting : false;
-            document.getElementById('userCanPayroll').checked = user ? user.can_payroll : false;
+            document.getElementById('userCanBooking').checked = user ? !!user.can_booking : false;
+            document.getElementById('userCanBookingReadonly').checked = user ? !!user.can_booking_readonly && !user.can_booking : false;
+            document.getElementById('userCanInvoicing').checked = user ? !!user.can_invoicing : false;
+            document.getElementById('userCanInvoicingReadonly').checked = user ? !!user.can_invoicing_readonly && !user.can_invoicing : false;
+            document.getElementById('userCanFinance').checked = user ? !!user.can_finance : false;
+            document.getElementById('userCanFinanceReadonly').checked = user ? !!user.can_finance_readonly && !user.can_finance : false;
+            document.getElementById('userCanAccounting').checked = user ? !!user.can_accounting : false;
+            document.getElementById('userCanAccountingReadonly').checked = user ? !!user.can_accounting_readonly && !user.can_accounting : false;
+            document.getElementById('userCanPayroll').checked = user ? !!user.can_payroll : false;
+            document.getElementById('userCanPayrollReadonly').checked = user ? !!user.can_payroll_readonly && !user.can_payroll : false;
             const userCanHiring = document.getElementById('userCanHiring');
             if(userCanHiring) userCanHiring.checked = user ? !!user.can_hiring : false;
+            const userCanHiringReadonly = document.getElementById('userCanHiringReadonly');
+            if(userCanHiringReadonly) userCanHiringReadonly.checked = user ? !!user.can_hiring_readonly && !user.can_hiring : false;
             
             const isCompAdminCb = document.getElementById('userIsCompanyAdmin');
             if(isCompAdminCb) isCompAdminCb.checked = user ? user.is_company_admin : false;
@@ -1750,11 +1796,17 @@
                 password: document.getElementById('userPassword').value,
                 company_id: document.getElementById('userCompanyId').value,
                 can_booking: document.getElementById('userCanBooking').checked,
+                can_booking_readonly: document.getElementById('userCanBookingReadonly').checked,
                 can_invoicing: document.getElementById('userCanInvoicing').checked,
+                can_invoicing_readonly: document.getElementById('userCanInvoicingReadonly').checked,
                 can_finance: document.getElementById('userCanFinance').checked,
+                can_finance_readonly: document.getElementById('userCanFinanceReadonly').checked,
                 can_accounting: document.getElementById('userCanAccounting').checked,
+                can_accounting_readonly: document.getElementById('userCanAccountingReadonly').checked,
                 can_payroll: document.getElementById('userCanPayroll').checked,
-                can_hiring: document.getElementById('userCanHiring') ? document.getElementById('userCanHiring').checked : false
+                can_payroll_readonly: document.getElementById('userCanPayrollReadonly').checked,
+                can_hiring: document.getElementById('userCanHiring') ? document.getElementById('userCanHiring').checked : false,
+                can_hiring_readonly: document.getElementById('userCanHiringReadonly') ? document.getElementById('userCanHiringReadonly').checked : false
             };
 
             const isCompAdminCb = document.getElementById('userIsCompanyAdmin');
