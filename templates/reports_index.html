@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reports | Easy Admin</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: #f4f6f9; font-family: Arial, sans-serif; }
+        .reports-header { background: linear-gradient(135deg, #212529, #495057); color: #fff; padding: 26px 0; border-bottom: 5px solid #0d6efd; }
+        .report-card { border: 0; border-radius: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.07); }
+        .metric-card { border: 0; border-radius: 12px; box-shadow: 0 3px 10px rgba(0,0,0,0.05); height: 100%; }
+        .metric-value { font-size: 1.35rem; font-weight: 800; }
+        .metric-label { min-height: 34px; }
+        .table thead th { background: #212529; color: #fff; white-space: nowrap; position: sticky; top: 0; z-index: 1; }
+        .table td { vertical-align: top; white-space: nowrap; }
+        .table td.long-text { white-space: normal; min-width: 260px; }
+        .filter-label { font-size: .78rem; font-weight: 700; color: #6c757d; text-transform: uppercase; letter-spacing: .03em; }
+        .report-summary-badge { font-size: .85rem; }
+        .screen-only { display: block; }
+        @media print {
+            .screen-only, .btn, .reports-header .btn { display: none !important; }
+            body { background: #fff; }
+            .container { max-width: 100% !important; }
+            .report-card, .metric-card { box-shadow: none; border: 1px solid #ddd; }
+            .table thead th { position: static; background: #f0f0f0 !important; color: #000 !important; }
+        }
+    </style>
+</head>
+<body>
+    <div class="reports-header shadow-sm">
+        <div class="container d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div>
+                <h1 class="fw-bold mb-1">📊 Reports & Analytics</h1>
+                <p class="mb-0 opacity-75">Operational, invoicing, finance, HR, payroll and leave reporting for {{ session.get('company_name', 'Easy Admin') }}</p>
+            </div>
+            <div class="screen-only">
+                <a href="/hub" class="btn btn-light fw-bold text-dark me-2">Back to Hub</a>
+                <a href="/logout" class="btn btn-outline-light fw-bold">Logout</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="container my-4">
+        <div class="row g-3 mb-4" id="metricsRow">
+            <div class="col-6 col-lg-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small fw-bold metric-label">Bookings</div><div class="metric-value" id="metricBookings">0</div></div></div></div>
+            <div class="col-6 col-lg-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small fw-bold metric-label">Completed Bookings</div><div class="metric-value text-success" id="metricCompleted">0</div></div></div></div>
+            <div class="col-6 col-lg-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small fw-bold metric-label">Uninvoiced Bookings</div><div class="metric-value text-warning" id="metricUninvoiced">0</div></div></div></div>
+            <div class="col-6 col-lg-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small fw-bold metric-label">Invoice Total</div><div class="metric-value text-primary" id="metricInvoiceTotal">R0.00</div></div></div></div>
+            <div class="col-6 col-lg-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small fw-bold metric-label">Outstanding Balance</div><div class="metric-value text-danger" id="metricOutstanding">R0.00</div></div></div></div>
+            <div class="col-6 col-lg-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small fw-bold metric-label">Expenses</div><div class="metric-value" id="metricExpenses">R0.00</div></div></div></div>
+            <div class="col-6 col-lg-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small fw-bold metric-label">Payroll Gross</div><div class="metric-value" id="metricPayroll">R0.00</div></div></div></div>
+            <div class="col-6 col-lg-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small fw-bold metric-label">Open Project Value</div><div class="metric-value" id="metricProjectValue">R0.00</div></div></div></div>
+        </div>
+
+        <div class="card report-card mb-4 screen-only">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                    <div>
+                        <h4 class="fw-bold mb-0">Report Filters</h4>
+                        <p class="text-muted small mb-0">Choose a report, date range and optional filters before viewing or exporting.</p>
+                    </div>
+                    <div>
+                        <button class="btn btn-primary fw-bold" onclick="runReport()">Run Report</button>
+                        <button class="btn btn-outline-success fw-bold" onclick="exportReportCsv()">Export CSV</button>
+                        <button class="btn btn-outline-dark fw-bold" onclick="window.print()">Print / Save PDF</button>
+                    </div>
+                </div>
+                <div class="row g-3">
+                    <div class="col-lg-4">
+                        <label class="filter-label">Report Type</label>
+                        <select id="reportType" class="form-select border-dark" onchange="runReport()">
+                            {% for group, reports in report_groups.items() %}
+                                <optgroup label="{{ group }}">
+                                    {% for report in reports %}
+                                        <option value="{{ report.key }}">{{ report.title }}</option>
+                                    {% endfor %}
+                                </optgroup>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="filter-label">Start Date</label>
+                        <input type="date" id="startDate" class="form-control" value="{{ start_date }}" onchange="refreshOverview()">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="filter-label">End Date</label>
+                        <input type="date" id="endDate" class="form-control" value="{{ end_date }}" onchange="refreshOverview()">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="filter-label">Client</label>
+                        <select id="clientId" class="form-select" onchange="refreshOverview()">
+                            <option value="">All clients</option>
+                            {% for client in clients %}
+                                <option value="{{ client.id }}">{{ client.option_label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="filter-label">Project</label>
+                        <select id="projectId" class="form-select" onchange="refreshOverview()">
+                            <option value="">All projects</option>
+                            {% for project in projects %}
+                                <option value="{{ project.id }}">{{ project.project_name }}{% if project.project_code %} — {{ project.project_code }}{% endif %}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="filter-label">Employee</label>
+                        <select id="employee" class="form-select" onchange="refreshOverview()">
+                            <option value="">All employees</option>
+                            {% for employee in employees %}
+                                <option value="{{ employee.name }}">{{ employee.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="filter-label">Service</label>
+                        <select id="service" class="form-select" onchange="refreshOverview()">
+                            <option value="">All services</option>
+                            {% for service in services %}
+                                <option value="{{ service.name }}">{{ service.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="filter-label">Status Filter</label>
+                        <select id="statusFilter" class="form-select" onchange="refreshOverview()">
+                            <option value="">All statuses</option>
+                            <option value="invoiced">Booking: Invoiced</option>
+                            <option value="uninvoiced">Booking: Uninvoiced</option>
+                            <option value="paid">Invoice: Paid</option>
+                            <option value="unpaid">Invoice: Unpaid</option>
+                            <option value="partial">Invoice: Partially Paid</option>
+                            <option value="overdue">Invoice: Overdue</option>
+                            <option value="Pending">Pending</option>
+                            <option value="Approved">Approved</option>
+                            <option value="Accepted">Accepted</option>
+                            <option value="Converted">Converted</option>
+                            <option value="Declined">Declined</option>
+                            <option value="Rejected">Rejected</option>
+                            <option value="Active">Employee: Active</option>
+                            <option value="Inactive">Employee: Inactive</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="filter-label">Project Status</label>
+                        <select id="projectStatus" class="form-select" onchange="refreshOverview()">
+                            <option value="">All project statuses</option>
+                            {% for status in project_statuses %}
+                                <option value="{{ status }}">{{ status }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-9 d-flex align-items-end justify-content-end">
+                        <button class="btn btn-outline-secondary fw-bold" onclick="clearFilters()">Clear Optional Filters</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card report-card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                    <div>
+                        <h3 class="fw-bold mb-1" id="reportTitle">Report</h3>
+                        <div class="text-muted small" id="reportMeta">Select filters and run a report.</div>
+                    </div>
+                    <div id="summaryBadges" class="text-end"></div>
+                </div>
+                <div id="reportAlert"></div>
+                <div class="table-responsive" style="max-height: 70vh;">
+                    <table class="table table-striped table-hover table-sm align-middle" id="reportTable">
+                        <thead></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+const moneyFormatter = new Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR' });
+let currentPayload = null;
+
+function getFilters() {
+    return {
+        report_type: document.getElementById('reportType').value,
+        start_date: document.getElementById('startDate').value,
+        end_date: document.getElementById('endDate').value,
+        client_id: document.getElementById('clientId').value,
+        project_id: document.getElementById('projectId').value,
+        employee: document.getElementById('employee').value,
+        service: document.getElementById('service').value,
+        status_filter: document.getElementById('statusFilter').value,
+        project_status: document.getElementById('projectStatus').value
+    };
+}
+
+function moneyMaybe(value, columnName) {
+    const numeric = typeof value === 'number' || /^-?\d+(\.\d+)?$/.test(String(value || '').trim());
+    if (!numeric) return value ?? '';
+    const c = String(columnName || '').toLowerCase();
+    if (c.includes('price') || c.includes('total') || c.includes('cost') || c.includes('balance') || c.includes('amount') || c.includes('value') || c.includes('salary') || c.includes('paid') || c.includes('uif') || c.includes('paye') || c.includes('deduction') || c.includes('income') || c.includes('expense') || c.includes('profit') || c.includes('revenue')) {
+        return moneyFormatter.format(Number(value || 0));
+    }
+    if (c.includes('margin') || c.includes('percent') || c.includes('%')) {
+        return `${Number(value || 0).toFixed(2)}%`;
+    }
+    return value ?? '';
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#039;'}[ch]));
+}
+
+async function refreshOverview() {
+    const filters = getFilters();
+    const params = new URLSearchParams(filters);
+    try {
+        const res = await fetch('/api/reports/overview?' + params.toString(), { cache: 'no-store' });
+        const data = await res.json();
+        if (data.status !== 'success') return;
+        const m = data.metrics || {};
+        document.getElementById('metricBookings').textContent = m.bookings || 0;
+        document.getElementById('metricCompleted').textContent = m.completed_bookings || 0;
+        document.getElementById('metricUninvoiced').textContent = m.uninvoiced_bookings || 0;
+        document.getElementById('metricInvoiceTotal').textContent = moneyFormatter.format(m.invoice_total || 0);
+        document.getElementById('metricOutstanding').textContent = moneyFormatter.format(m.outstanding_balance || 0);
+        document.getElementById('metricExpenses').textContent = moneyFormatter.format(m.expense_total || 0);
+        document.getElementById('metricPayroll').textContent = moneyFormatter.format(m.payroll_gross || 0);
+        document.getElementById('metricProjectValue').textContent = moneyFormatter.format(m.open_project_fixed_value || 0);
+    } catch (err) {
+        console.warn('Overview failed', err);
+    }
+}
+
+function renderReport(payload) {
+    currentPayload = payload;
+    document.getElementById('reportTitle').textContent = payload.title || 'Report';
+    document.getElementById('reportMeta').textContent = `Period: ${payload.filters.start_date} to ${payload.filters.end_date} | Generated: ${payload.generated_at}`;
+    const summary = payload.summary || {};
+    document.getElementById('summaryBadges').innerHTML = `
+        <span class="badge bg-dark report-summary-badge me-1">Rows: ${summary.row_count || 0}</span>
+        <span class="badge bg-primary report-summary-badge me-1">Bookings: ${summary.booking_count || 0}</span>
+        <span class="badge bg-success report-summary-badge me-1">Completed: ${summary.completed_bookings || 0}</span>
+        <span class="badge bg-warning text-dark report-summary-badge">Uninvoiced: ${summary.uninvoiced_bookings || 0}</span>
+    `;
+    const thead = document.querySelector('#reportTable thead');
+    const tbody = document.querySelector('#reportTable tbody');
+    thead.innerHTML = '<tr>' + (payload.columns || []).map(c => `<th>${escapeHtml(c)}</th>`).join('') + '</tr>';
+    if (!payload.rows || !payload.rows.length) {
+        tbody.innerHTML = `<tr><td colspan="${(payload.columns || []).length || 1}" class="text-center text-muted py-4">No records found for the selected filters.</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = payload.rows.map(row => '<tr>' + row.map((cell, idx) => {
+        const columnName = (payload.columns || [])[idx] || '';
+        const text = moneyMaybe(cell, columnName);
+        const longClass = String(text || '').length > 55 ? ' class="long-text"' : '';
+        return `<td${longClass}>${escapeHtml(text)}</td>`;
+    }).join('') + '</tr>').join('');
+}
+
+async function runReport() {
+    const alertBox = document.getElementById('reportAlert');
+    alertBox.innerHTML = '<div class="alert alert-info">Generating report...</div>';
+    try {
+        const res = await fetch('/api/reports/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(getFilters())
+        });
+        const data = await res.json();
+        if (!res.ok || data.status !== 'success') {
+            throw new Error(data.message || 'Report could not be generated.');
+        }
+        alertBox.innerHTML = '';
+        renderReport(data);
+        refreshOverview();
+    } catch (err) {
+        alertBox.innerHTML = `<div class="alert alert-danger">${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function exportReportCsv() {
+    const filters = getFilters();
+    const reportType = filters.report_type;
+    delete filters.report_type;
+    const params = new URLSearchParams(filters);
+    window.location.href = `/export/reports/${encodeURIComponent(reportType)}.csv?${params.toString()}`;
+}
+
+function clearFilters() {
+    document.getElementById('clientId').value = '';
+    document.getElementById('projectId').value = '';
+    document.getElementById('employee').value = '';
+    document.getElementById('service').value = '';
+    document.getElementById('statusFilter').value = '';
+    document.getElementById('projectStatus').value = '';
+    refreshOverview();
+    runReport();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    refreshOverview();
+    runReport();
+});
+</script>
+</body>
+</html>

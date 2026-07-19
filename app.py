@@ -3062,7 +3062,7 @@ def prevent_dynamic_response_caching(response):
         '/api/', '/admin/', '/staff', '/mobile', '/hub', '/booking', '/bookings',
         '/payroll', '/invoicing', '/finance', '/accounting', '/clients',
         '/employees', '/projects', '/quotes', '/invoices', '/settings',
-        '/download', '/export', '/uploads/'
+        '/download', '/export', '/uploads/', '/reports'
     )
     is_dynamic = (
         request.method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE') and (
@@ -3094,6 +3094,19 @@ def _session_has_hr_module_access():
     return bool(_session_has_payroll_admin_access() or _session_has_hiring_access())
 
 
+def _session_has_reports_access():
+    return bool(
+        session.get('is_company_admin')
+        or session.get('is_superadmin')
+        or session.get('can_booking')
+        or session.get('can_invoicing')
+        or session.get('can_finance')
+        or session.get('can_payroll')
+        or session.get('can_hiring')
+        or session.get('can_accounting')
+    )
+
+
 @app.before_request
 def restrict_access():
     public_endpoints = ['landing', 'login', 'forgot_password', 'static', 'manifest_webmanifest', 'service_worker', 'mobile_offline', 'health_check']
@@ -3119,6 +3132,10 @@ def restrict_access():
         return "Fatal Error: Account is not assigned to a company.", 403
 
     path = request.path
+
+    if path == '/reports' or path.startswith('/api/reports') or path.startswith('/export/reports'):
+        if not _session_has_reports_access():
+            return "Access Denied: You do not have permissions to access Reports.", 403
 
     if session.get('is_staff'):
         allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/staff/download_payslip/', '/api/staff/', '/api/session/', '/change_password', '/change-password', '/password/change', '/logout')
@@ -3329,8 +3346,1221 @@ def logout():
 def landing():
     return render_template('landing.html')
 
+
 @app.route('/hub')
 def hub(): return render_template('hub.html', session=session)
+
+
+# ==========================================================
+# REPORTS & ANALYTICS ROUTES
+# ==========================================================
+REPORT_TYPES = {
+    # Phase 1/2 - Operations, Clients, Projects
+    'booking_detail': {'title': 'Booking Detail Report', 'group': 'Operations', 'access': ('booking',)},
+    'bookings_by_client': {'title': 'Bookings by Client', 'group': 'Operations', 'access': ('booking',)},
+    'bookings_by_employee': {'title': 'Bookings by Employee', 'group': 'Operations', 'access': ('booking',)},
+    'bookings_by_service': {'title': 'Bookings by Service', 'group': 'Operations', 'access': ('booking',)},
+    'bookings_by_project': {'title': 'Bookings by Project', 'group': 'Operations', 'access': ('booking', 'finance', 'invoicing')},
+    'uninvoiced_bookings': {'title': 'Uninvoiced Bookings', 'group': 'Operations', 'access': ('booking', 'invoicing')},
+    'client_directory': {'title': 'Client Directory Report', 'group': 'Clients', 'access': ('booking', 'invoicing', 'finance')},
+    'client_activity': {'title': 'Client Activity Report', 'group': 'Clients', 'access': ('booking', 'invoicing', 'finance')},
+    'client_revenue': {'title': 'Client Revenue Report', 'group': 'Clients', 'access': ('invoicing', 'finance')},
+    'client_documents': {'title': 'Client Document Report', 'group': 'Clients', 'access': ('booking', 'invoicing', 'finance')},
+    'project_summary': {'title': 'Project Summary Report', 'group': 'Projects', 'access': ('booking', 'finance', 'invoicing')},
+    'project_bookings': {'title': 'Project Bookings Report', 'group': 'Projects', 'access': ('booking', 'finance', 'invoicing')},
+    'project_documents': {'title': 'Project Document Report', 'group': 'Projects', 'access': ('booking', 'finance', 'invoicing')},
+
+    # Phase 3 - Invoicing and Finance
+    'invoice_register': {'title': 'Invoice Register', 'group': 'Invoicing', 'access': ('invoicing',)},
+    'quote_register': {'title': 'Quote Register', 'group': 'Invoicing', 'access': ('invoicing',)},
+    'credit_note_register': {'title': 'Credit Note Register', 'group': 'Invoicing', 'access': ('invoicing',)},
+    'outstanding_invoices': {'title': 'Outstanding Invoices', 'group': 'Invoicing', 'access': ('invoicing', 'finance')},
+    'invoice_aging': {'title': 'Invoice Aging Report', 'group': 'Invoicing', 'access': ('invoicing', 'finance')},
+    'sales_by_client': {'title': 'Sales by Client', 'group': 'Invoicing', 'access': ('invoicing', 'finance')},
+    'sales_by_service': {'title': 'Sales by Service', 'group': 'Invoicing', 'access': ('invoicing', 'finance')},
+    'sales_by_project': {'title': 'Sales by Project', 'group': 'Invoicing', 'access': ('invoicing', 'finance')},
+    'finance_summary': {'title': 'Finance Summary Report', 'group': 'Finance', 'access': ('finance',)},
+    'expense_detail': {'title': 'Expense Detail Report', 'group': 'Finance', 'access': ('finance',)},
+    'expenses_by_category': {'title': 'Expenses by Category', 'group': 'Finance', 'access': ('finance',)},
+    'expenses_by_supplier': {'title': 'Expenses by Supplier', 'group': 'Finance', 'access': ('finance',)},
+    'service_margin_report': {'title': 'Service Margin Report', 'group': 'Finance', 'access': ('finance', 'invoicing')},
+    'client_profitability': {'title': 'Client Profitability Report', 'group': 'Finance', 'access': ('finance',)},
+    'project_profitability': {'title': 'Project Profitability Report', 'group': 'Finance', 'access': ('finance',)},
+    'monthly_income_expenses': {'title': 'Monthly Income vs Expenses', 'group': 'Finance', 'access': ('finance',)},
+    'top_services_by_revenue': {'title': 'Top Services by Revenue', 'group': 'Finance', 'access': ('finance', 'invoicing')},
+    'low_margin_services': {'title': 'Low Margin Services', 'group': 'Finance', 'access': ('finance', 'invoicing')},
+
+    # Phase 4 - Interviews/Hiring, Employee Admin, Payroll & Leave
+    'candidate_list': {'title': 'Candidate List Report', 'group': 'Interviews & Hiring', 'access': ('hiring',)},
+    'candidate_ranking': {'title': 'Candidate Ranking Report', 'group': 'Interviews & Hiring', 'access': ('hiring',)},
+    'hiring_pipeline': {'title': 'Hiring Pipeline Report', 'group': 'Interviews & Hiring', 'access': ('hiring',)},
+    'employee_directory': {'title': 'Employee Directory Report', 'group': 'Employee Administration', 'access': ('payroll',)},
+    'employee_documents': {'title': 'Employee Document Report', 'group': 'Employee Administration', 'access': ('payroll',)},
+    'employee_notes': {'title': 'Employee Notes Report', 'group': 'Employee Administration', 'access': ('payroll',)},
+    'inactive_employees': {'title': 'Inactive Employees Report', 'group': 'Employee Administration', 'access': ('payroll',)},
+    'emergency_contacts': {'title': 'Emergency Contact Report', 'group': 'Employee Administration', 'access': ('payroll',)},
+    'payroll_summary': {'title': 'Payroll Summary Report', 'group': 'Payroll & Leave', 'access': ('payroll',)},
+    'payslip_register': {'title': 'Payslip Register', 'group': 'Payroll & Leave', 'access': ('payroll',)},
+    'employee_earnings': {'title': 'Employee Earnings Report', 'group': 'Payroll & Leave', 'access': ('payroll',)},
+    'deductions_report': {'title': 'Deductions Report', 'group': 'Payroll & Leave', 'access': ('payroll',)},
+    'leave_taken_report': {'title': 'Leave Taken Report', 'group': 'Payroll & Leave', 'access': ('payroll',)},
+    'leave_requests_report': {'title': 'Leave Requests Report', 'group': 'Payroll & Leave', 'access': ('payroll',)},
+    'leave_balance_report': {'title': 'Leave Balance Report', 'group': 'Payroll & Leave', 'access': ('payroll',)},
+    'dates_worked_report': {'title': 'Dates Worked Report', 'group': 'Payroll & Leave', 'access': ('payroll', 'booking')}
+}
+
+REPORT_GROUP_ORDER = ['Operations', 'Clients', 'Projects', 'Invoicing', 'Finance', 'Interviews & Hiring', 'Employee Administration', 'Payroll & Leave']
+
+
+def _report_permissions():
+    if session.get('is_company_admin') or session.get('is_superadmin'):
+        return {'booking', 'invoicing', 'finance', 'payroll', 'hiring', 'accounting'}
+    perms = set()
+    if session.get('can_booking'):
+        perms.add('booking')
+    if session.get('can_invoicing'):
+        perms.add('invoicing')
+    if session.get('can_finance'):
+        perms.add('finance')
+    if session.get('can_payroll'):
+        perms.add('payroll')
+    if session.get('can_hiring'):
+        perms.add('hiring')
+    if session.get('can_accounting'):
+        perms.add('accounting')
+    return perms
+
+
+def _report_type_allowed(report_type):
+    meta = REPORT_TYPES.get(report_type)
+    if not meta:
+        return False
+    access = set(meta.get('access') or [])
+    if not access:
+        return True
+    return bool(access.intersection(_report_permissions()))
+
+
+def _report_access_denied_message(report_type=None):
+    if report_type and report_type in REPORT_TYPES:
+        return f"You do not have permission to access the {REPORT_TYPES[report_type]['title']}."
+    return 'Invalid report type or insufficient permissions.'
+
+
+def _report_json_access_denied(report_type=None):
+    return jsonify({'status': 'error', 'message': _report_access_denied_message(report_type)}), 403
+
+
+def _ensure_report_type_allowed(report_type, json_response=True):
+    report_type = (report_type or '').strip()
+    if not _report_type_allowed(report_type):
+        if json_response:
+            return _report_json_access_denied(report_type)
+        return _report_access_denied_message(report_type), 403
+    return None
+
+
+BOOKING_DATA_REPORT_TYPES = {
+    'booking_detail', 'uninvoiced_bookings', 'bookings_by_client', 'client_activity',
+    'bookings_by_employee', 'bookings_by_service', 'bookings_by_project',
+    'project_bookings', 'service_margin_report', 'top_services_by_revenue',
+    'low_margin_services', 'client_profitability', 'project_profitability',
+    'dates_worked_report'
+}
+
+SERVICE_COST_REPORT_TYPES = {
+    'service_margin_report', 'top_services_by_revenue', 'low_margin_services',
+    'client_profitability', 'project_profitability'
+}
+
+
+def _available_report_types():
+    return {key: value for key, value in REPORT_TYPES.items() if _report_type_allowed(key)}
+
+
+def _group_report_types(report_types):
+    grouped = {group: [] for group in REPORT_GROUP_ORDER}
+    for key, meta in report_types.items():
+        group = meta.get('group') or 'Other'
+        grouped.setdefault(group, []).append({'key': key, 'title': meta.get('title') or key.replace('_', ' ').title()})
+    return {group: rows for group, rows in grouped.items() if rows}
+
+
+def _report_parse_date(value, fallback=None):
+    value = (value or '').strip()
+    try:
+        datetime.strptime(value, '%Y-%m-%d')
+        return value
+    except Exception:
+        return fallback
+
+
+def _report_default_dates():
+    today = datetime.now().date()
+    first_day = today.replace(day=1)
+    return first_day.strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d')
+
+
+def _report_filters(payload=None):
+    payload = payload or {}
+    default_start, default_end = _report_default_dates()
+    start_date = _report_parse_date(str(payload.get('start_date') or ''), default_start)
+    end_date = _report_parse_date(str(payload.get('end_date') or ''), default_end)
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    def _as_int(value):
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    status_filter = str(payload.get('status_filter') or payload.get('invoice_status') or '').strip()
+    return {
+        'start_date': start_date,
+        'end_date': end_date,
+        'client_id': _as_int(payload.get('client_id')),
+        'project_id': _as_int(payload.get('project_id')),
+        'employee': str(payload.get('employee') or '').strip(),
+        'service': str(payload.get('service') or '').strip(),
+        'project_status': str(payload.get('project_status') or '').strip(),
+        'status_filter': status_filter,
+        'invoice_status': status_filter.lower(),
+        'raw_status': status_filter
+    }
+
+
+def _report_split_list(value):
+    seen = set()
+    values = []
+    for raw in str(value or '').replace(';', ',').split(','):
+        item = raw.strip()
+        key = item.lower()
+        if item and key not in seen:
+            values.append(item)
+            seen.add(key)
+    return values
+
+
+def _report_client_name_from_fields(row):
+    d = dict(row or {})
+    full = ' '.join([str(d.get('client_first_name') or '').strip(), str(d.get('client_surname') or '').strip()]).strip()
+    return full or str(d.get('client_company_name') or d.get('client_name') or d.get('title') or 'Unknown Client').strip()
+
+
+def _report_money(value):
+    try:
+        return round(float(value or 0), 2)
+    except Exception:
+        return 0.0
+
+
+def _report_percent(part, whole):
+    whole = _report_money(whole)
+    if not whole:
+        return 0.0
+    return round((_report_money(part) / whole) * 100, 2)
+
+
+def _report_status_match(status, desired):
+    if not desired:
+        return True
+    return str(status or '').strip().lower() == str(desired or '').strip().lower()
+
+
+def _report_booking_where(filters, alias='b'):
+    where = [f"{alias}.company_id=?", f"substr({alias}.start, 1, 10) BETWEEN ? AND ?"]
+    params = [session['company_id'], filters['start_date'], filters['end_date']]
+    if filters.get('client_id'):
+        where.append(f"{alias}.client_id=?")
+        params.append(filters['client_id'])
+    if filters.get('project_id'):
+        where.append(f"{alias}.project_id=?")
+        params.append(filters['project_id'])
+    if filters.get('employee'):
+        where.append(f"COALESCE({alias}.employee, '') LIKE ?")
+        params.append(f"%{filters['employee']}%")
+    if filters.get('service'):
+        where.append(f"COALESCE({alias}.booking_type, '') LIKE ?")
+        params.append(f"%{filters['service']}%")
+    if filters.get('invoice_status') == 'invoiced':
+        where.append(f"COALESCE({alias}.is_invoiced, 0)=1")
+    elif filters.get('invoice_status') == 'uninvoiced':
+        where.append(f"COALESCE({alias}.is_invoiced, 0)=0")
+    return ' AND '.join(where), params
+
+
+def _reports_booking_rows(conn, filters):
+    where, params = _report_booking_where(filters, 'b')
+    if filters.get('project_status'):
+        where += " AND COALESCE(p.status, '')=?"
+        params.append(filters['project_status'])
+    rows = conn.execute(f"""
+        SELECT b.id, b.title, b.client_id, b.start, b.employee, b.booking_type, b.transport,
+               b.overtime_hours, b.booking_notes, COALESCE(b.is_invoiced, 0) AS is_invoiced,
+               b.project_id, COALESCE(b.mobile_status, 'Scheduled') AS mobile_status,
+               b.mobile_started_at, b.mobile_completed_at,
+               p.project_name, p.project_code, p.status AS project_status, COALESCE(p.fixed_price, 0) AS project_fixed_price,
+               c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name,
+               (SELECT COUNT(*) FROM attachments a WHERE a.company_id=b.company_id AND a.linked_type='booking' AND a.linked_id=b.id) AS attachment_count
+        FROM bookings b
+        LEFT JOIN projects p ON p.id=b.project_id AND p.company_id=b.company_id
+        LEFT JOIN clients c ON c.id=b.client_id AND c.company_id=b.company_id
+        WHERE {where}
+        ORDER BY b.start ASC, b.id ASC
+    """, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _report_service_map(conn):
+    rows = conn.execute("SELECT name, client_price, company_cost FROM services WHERE company_id=?", (session['company_id'],)).fetchall()
+    return {(r['name'] or '').strip().lower(): {'name': (r['name'] or '').strip(), 'price': _report_money(r['client_price']), 'cost': _report_money(r['company_cost'])} for r in rows}
+
+
+def _report_booking_values(booking, service_map):
+    services = _report_split_list(booking.get('booking_type'))
+    service_revenue = 0.0
+    service_cost = 0.0
+    for service in services:
+        item = service_map.get(service.lower())
+        if item:
+            service_revenue += item['price']
+            service_cost += item['cost']
+    return _report_money(service_revenue), _report_money(service_cost)
+
+
+def _report_project_booking_costs(bookings, service_map):
+    grouped = {}
+    for b in bookings:
+        pid = b.get('project_id')
+        if not pid:
+            continue
+        _, cost = _report_booking_values(b, service_map)
+        g = grouped.setdefault(pid, {'booking_cost': 0.0, 'booking_count': 0, 'services': set(), 'staff': set()})
+        g['booking_cost'] += cost
+        g['booking_count'] += 1
+        for s in _report_split_list(b.get('booking_type')):
+            g['services'].add(s)
+        for e in _report_split_list(b.get('employee')):
+            g['staff'].add(e)
+    return grouped
+
+
+def _reports_invoice_rows(conn, filters, include_all_statuses=False):
+    cid = session['company_id']
+    where = ["i.company_id=?", "i.date BETWEEN ? AND ?"]
+    params = [cid, filters['start_date'], filters['end_date']]
+    if filters.get('client_id'):
+        where.append('i.client_id=?')
+        params.append(filters['client_id'])
+    if filters.get('project_id'):
+        where.append('i.project_id=?')
+        params.append(filters['project_id'])
+    rows = conn.execute(f"""
+        SELECT i.*, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name,
+               p.project_name, p.project_code
+        FROM invoices i
+        LEFT JOIN clients c ON c.id=i.client_id AND c.company_id=i.company_id
+        LEFT JOIN projects p ON p.id=i.project_id AND p.company_id=i.company_id
+        WHERE {' AND '.join(where)}
+        ORDER BY i.date ASC, i.id ASC
+    """, params).fetchall()
+    result = []
+    today = datetime.now().date()
+    for r in rows:
+        d = dict(r)
+        total = _report_money(d.get('total'))
+        balance = _report_money(d.get('balance_remaining') if d.get('balance_remaining') is not None else (d.get('amount_due_now') if d.get('amount_due_now') is not None else total))
+        paid = _report_money(total - balance)
+        status = str(d.get('status') or '').strip() or ('Paid' if balance <= 0 else 'Unpaid')
+        due_date = d.get('due_date') or d.get('date') or ''
+        overdue_days = 0
+        try:
+            overdue_days = max((today - datetime.strptime(due_date[:10], '%Y-%m-%d').date()).days, 0)
+        except Exception:
+            overdue_days = 0
+        d.update({'computed_total': total, 'computed_balance': balance, 'computed_paid': paid, 'computed_status': status, 'overdue_days': overdue_days})
+        status_filter = filters.get('invoice_status') or ''
+        if not include_all_statuses and status_filter in {'paid', 'unpaid', 'partial', 'overdue'}:
+            if status_filter == 'paid' and balance > 0:
+                continue
+            if status_filter == 'unpaid' and not (balance > 0 and paid <= 0):
+                continue
+            if status_filter == 'partial' and not (balance > 0 and paid > 0):
+                continue
+            if status_filter == 'overdue' and not (balance > 0 and overdue_days > 0):
+                continue
+        result.append(d)
+    return result
+
+
+def _reports_invoice_totals(conn, filters):
+    totals = {}
+    for d in _reports_invoice_rows(conn, filters, include_all_statuses=True):
+        key = str(d.get('client_id') or ('legacy:' + (d.get('client_name') or 'Unknown Client')))
+        g = totals.setdefault(key, {'client': _report_client_name_from_fields(d), 'invoice_count': 0, 'invoice_total': 0.0, 'balance_total': 0.0, 'paid_total': 0.0})
+        g['invoice_count'] += 1
+        g['invoice_total'] += _report_money(d.get('computed_total'))
+        g['balance_total'] += _report_money(d.get('computed_balance'))
+        g['paid_total'] += _report_money(d.get('computed_paid'))
+    for g in totals.values():
+        g['invoice_total'] = _report_money(g['invoice_total'])
+        g['balance_total'] = _report_money(g['balance_total'])
+        g['paid_total'] = _report_money(g['paid_total'])
+    return totals
+
+
+def _reports_project_rows(conn, filters):
+    cid = session['company_id']
+    where = ["p.company_id=?"]
+    params = [cid]
+    if filters.get('client_id'):
+        where.append('p.client_id=?')
+        params.append(filters['client_id'])
+    if filters.get('project_id'):
+        where.append('p.id=?')
+        params.append(filters['project_id'])
+    if filters.get('project_status'):
+        where.append("COALESCE(p.status, '')=?")
+        params.append(filters['project_status'])
+    where.append("(EXISTS (SELECT 1 FROM bookings b WHERE b.company_id=p.company_id AND b.project_id=p.id AND substr(b.start, 1, 10) BETWEEN ? AND ?) OR (COALESCE(p.start_date, '') <= ? AND COALESCE(NULLIF(p.actual_end_date, ''), NULLIF(p.estimated_end_date, ''), '9999-12-31') >= ?))")
+    params.extend([filters['start_date'], filters['end_date'], filters['end_date'], filters['start_date']])
+    return [dict(r) for r in conn.execute(f"""
+        SELECT p.*, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name,
+               (SELECT COUNT(*) FROM attachments a WHERE a.company_id=p.company_id AND a.linked_type='project' AND a.linked_id=p.id) AS project_document_count,
+               (SELECT COUNT(*) FROM bookings b WHERE b.company_id=p.company_id AND b.project_id=p.id AND substr(b.start, 1, 10) BETWEEN ? AND ?) AS booking_count,
+               (SELECT SUM(COALESCE(pc.amount, 0)) FROM project_costs pc WHERE pc.company_id=p.company_id AND pc.project_id=p.id AND COALESCE(pc.cost_date, '') BETWEEN ? AND ?) AS additional_cost_total,
+               (SELECT SUM(COALESCE(i.total, 0)) FROM invoices i WHERE i.company_id=p.company_id AND i.project_id=p.id AND i.date BETWEEN ? AND ?) AS invoice_total
+        FROM projects p
+        LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
+        WHERE {' AND '.join(where)}
+        ORDER BY p.start_date ASC, p.project_name ASC
+    """, [filters['start_date'], filters['end_date'], filters['start_date'], filters['end_date'], filters['start_date'], filters['end_date']] + params).fetchall()]
+
+
+def _report_extract_service_name(description, service_map):
+    desc = str(description or '').strip()
+    if not desc:
+        return 'Unspecified Service'
+    lower = desc.lower()
+    for service_key, service in sorted(service_map.items(), key=lambda kv: len(kv[1]['name']), reverse=True):
+        name = service['name']
+        if lower == name.lower() or lower.startswith(name.lower() + ' ') or lower.startswith(name.lower() + ' -') or lower.startswith(name.lower() + ','):
+            return name
+    return desc.split(' - ')[0].strip() or desc
+
+
+def _reports_quote_rows(conn, filters):
+    where = ["q.company_id=?", "q.date BETWEEN ? AND ?"]
+    params = [session['company_id'], filters['start_date'], filters['end_date']]
+    if filters.get('client_id'):
+        where.append('q.client_id=?')
+        params.append(filters['client_id'])
+    rows = conn.execute(f"""
+        SELECT q.*, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
+        FROM quotes q
+        LEFT JOIN clients c ON c.id=q.client_id AND c.company_id=q.company_id
+        WHERE {' AND '.join(where)}
+        ORDER BY q.date ASC, q.id ASC
+    """, params).fetchall()
+    status_filter = (filters.get('status_filter') or '').strip().lower()
+    result = []
+    for r in rows:
+        d = dict(r)
+        if status_filter in {'pending', 'accepted', 'approved', 'rejected', 'declined', 'converted'}:
+            if not _report_status_match(d.get('status'), status_filter):
+                continue
+        result.append(d)
+    return result
+
+
+def _employee_base_where(filters, alias='e', include_suppliers=False):
+    where = [f"{alias}.company_id=?"]
+    params = [session['company_id']]
+    if not include_suppliers:
+        where.append(f"(COALESCE({alias}.emp_type, '') NOT IN ('Supplier', 'Provider'))")
+    status = (filters.get('status_filter') or '').strip()
+    if status in {'Active', 'Inactive'}:
+        where.append(f"COALESCE({alias}.status, 'Active')=?")
+        params.append(status)
+    if filters.get('employee'):
+        where.append(f"COALESCE({alias}.name, '') LIKE ?")
+        params.append(f"%{filters['employee']}%")
+    return ' AND '.join(where), params
+
+
+def _build_reports_payload(report_type, filters):
+    if report_type not in REPORT_TYPES or not _report_type_allowed(report_type):
+        raise PermissionError(_report_access_denied_message(report_type))
+    conn = get_db_connection()
+    try:
+        columns = []
+        rows = []
+        # Second-layer security: only load booking/service datasets for report types
+        # that are explicitly allowed and require those datasets. This prevents
+        # unauthorised report calls from receiving operational summaries through
+        # unrelated HR/payroll/hiring reports.
+        bookings = _reports_booking_rows(conn, filters) if report_type in BOOKING_DATA_REPORT_TYPES else []
+        service_map = _report_service_map(conn) if report_type in SERVICE_COST_REPORT_TYPES else {}
+
+        if report_type == 'booking_detail':
+            columns = ['Date', 'Day', 'Time', 'Client', 'Project', 'Service', 'Staff', 'Status', 'Invoiced', 'Attachments', 'Notes']
+            for b in bookings:
+                date_part = (b.get('start') or '')[:10]
+                time_part = (b.get('start') or '').split('T')[1] if 'T' in (b.get('start') or '') else ''
+                day = datetime.strptime(date_part, '%Y-%m-%d').strftime('%A') if date_part else ''
+                rows.append([date_part, day, time_part, _report_client_name_from_fields(b), b.get('project_name') or '', b.get('booking_type') or '', b.get('employee') or '', b.get('mobile_status') or 'Scheduled', 'Yes' if b.get('is_invoiced') else 'No', b.get('attachment_count') or 0, b.get('booking_notes') or ''])
+
+        elif report_type == 'uninvoiced_bookings':
+            columns = ['Date', 'Client', 'Project', 'Service', 'Staff', 'Status', 'Attachments', 'Notes']
+            for b in bookings:
+                if b.get('is_invoiced'):
+                    continue
+                rows.append([(b.get('start') or '')[:10], _report_client_name_from_fields(b), b.get('project_name') or '', b.get('booking_type') or '', b.get('employee') or '', b.get('mobile_status') or 'Scheduled', b.get('attachment_count') or 0, b.get('booking_notes') or ''])
+
+        elif report_type in ('bookings_by_client', 'client_activity'):
+            grouped = {}
+            for b in bookings:
+                client = _report_client_name_from_fields(b)
+                key = str(b.get('client_id') or ('legacy:' + client))
+                g = grouped.setdefault(key, {'client': client, 'booking_count': 0, 'completed': 0, 'uninvoiced': 0, 'first_date': '', 'last_date': '', 'staff': set(), 'services': set(), 'projects': set(), 'attachments': 0})
+                date_part = (b.get('start') or '')[:10]
+                g['booking_count'] += 1
+                if not g['first_date'] or date_part < g['first_date']:
+                    g['first_date'] = date_part
+                if not g['last_date'] or date_part > g['last_date']:
+                    g['last_date'] = date_part
+                if (b.get('mobile_status') or '').lower() == 'completed':
+                    g['completed'] += 1
+                if not b.get('is_invoiced'):
+                    g['uninvoiced'] += 1
+                for s in _report_split_list(b.get('employee')):
+                    g['staff'].add(s)
+                for s in _report_split_list(b.get('booking_type')):
+                    g['services'].add(s)
+                if b.get('project_name'):
+                    g['projects'].add(b.get('project_name'))
+                g['attachments'] += int(b.get('attachment_count') or 0)
+            columns = ['Client', 'Bookings', 'Completed', 'Uninvoiced', 'First Date', 'Last Date', 'Staff', 'Services', 'Projects', 'Attachments']
+            for g in sorted(grouped.values(), key=lambda x: x['client'].lower()):
+                rows.append([g['client'], g['booking_count'], g['completed'], g['uninvoiced'], g['first_date'], g['last_date'], ', '.join(sorted(g['staff'])), ', '.join(sorted(g['services'])), ', '.join(sorted(g['projects'])), g['attachments']])
+
+        elif report_type == 'bookings_by_employee':
+            grouped = {}
+            for b in bookings:
+                employees = _report_split_list(b.get('employee')) or ['Unassigned']
+                for employee in employees:
+                    g = grouped.setdefault(employee, {'employee': employee, 'booking_count': 0, 'completed': 0, 'in_progress': 0, 'uninvoiced': 0, 'clients': set(), 'services': set(), 'projects': set(), 'overtime': 0.0})
+                    g['booking_count'] += 1
+                    status = (b.get('mobile_status') or '').lower()
+                    if status == 'completed':
+                        g['completed'] += 1
+                    if status == 'in progress':
+                        g['in_progress'] += 1
+                    if not b.get('is_invoiced'):
+                        g['uninvoiced'] += 1
+                    g['clients'].add(_report_client_name_from_fields(b))
+                    for s in _report_split_list(b.get('booking_type')):
+                        g['services'].add(s)
+                    if b.get('project_name'):
+                        g['projects'].add(b.get('project_name'))
+                    g['overtime'] += _report_money(b.get('overtime_hours'))
+            columns = ['Employee', 'Bookings', 'Completed', 'In Progress', 'Uninvoiced', 'Clients', 'Services', 'Projects', 'Overtime Hours']
+            for g in sorted(grouped.values(), key=lambda x: x['employee'].lower()):
+                rows.append([g['employee'], g['booking_count'], g['completed'], g['in_progress'], g['uninvoiced'], ', '.join(sorted(g['clients'])), ', '.join(sorted(g['services'])), ', '.join(sorted(g['projects'])), _report_money(g['overtime'])])
+
+        elif report_type == 'bookings_by_service':
+            grouped = {}
+            for b in bookings:
+                services = _report_split_list(b.get('booking_type')) or ['Unspecified Service']
+                for service in services:
+                    g = grouped.setdefault(service, {'service': service, 'booking_count': 0, 'clients': set(), 'staff': set(), 'project_bookings': 0, 'completed': 0, 'uninvoiced': 0})
+                    g['booking_count'] += 1
+                    g['clients'].add(_report_client_name_from_fields(b))
+                    for s in _report_split_list(b.get('employee')):
+                        g['staff'].add(s)
+                    if b.get('project_id'):
+                        g['project_bookings'] += 1
+                    if (b.get('mobile_status') or '').lower() == 'completed':
+                        g['completed'] += 1
+                    if not b.get('is_invoiced'):
+                        g['uninvoiced'] += 1
+            columns = ['Service', 'Bookings', 'Clients', 'Staff', 'Project Bookings', 'Completed', 'Uninvoiced']
+            for g in sorted(grouped.values(), key=lambda x: x['service'].lower()):
+                rows.append([g['service'], g['booking_count'], len(g['clients']), ', '.join(sorted(g['staff'])), g['project_bookings'], g['completed'], g['uninvoiced']])
+
+        elif report_type == 'bookings_by_project':
+            grouped = {}
+            for b in bookings:
+                project = b.get('project_name') or 'No Project'
+                key = str(b.get('project_id') or 'none')
+                g = grouped.setdefault(key, {'project': project, 'client': _report_client_name_from_fields(b), 'status': b.get('project_status') or '', 'fixed_price': _report_money(b.get('project_fixed_price')), 'booking_count': 0, 'staff': set(), 'services': set(), 'completed': 0, 'uninvoiced': 0})
+                g['booking_count'] += 1
+                for s in _report_split_list(b.get('employee')):
+                    g['staff'].add(s)
+                for s in _report_split_list(b.get('booking_type')):
+                    g['services'].add(s)
+                if (b.get('mobile_status') or '').lower() == 'completed':
+                    g['completed'] += 1
+                if not b.get('is_invoiced'):
+                    g['uninvoiced'] += 1
+            columns = ['Project', 'Client', 'Status', 'Fixed Price', 'Bookings', 'Completed', 'Uninvoiced', 'Staff', 'Services']
+            for g in sorted(grouped.values(), key=lambda x: x['project'].lower()):
+                rows.append([g['project'], g['client'], g['status'], g['fixed_price'], g['booking_count'], g['completed'], g['uninvoiced'], ', '.join(sorted(g['staff'])), ', '.join(sorted(g['services']))])
+
+        elif report_type == 'client_directory':
+            invoice_totals = _reports_invoice_totals(conn, filters)
+            client_rows = conn.execute("""
+                SELECT c.*, 
+                       (SELECT MAX(substr(b.start, 1, 10)) FROM bookings b WHERE b.company_id=c.company_id AND b.client_id=c.id) AS last_booking_date,
+                       (SELECT COUNT(*) FROM bookings b WHERE b.company_id=c.company_id AND b.client_id=c.id AND substr(b.start, 1, 10) BETWEEN ? AND ?) AS booking_count,
+                       (SELECT COUNT(*) FROM attachments a WHERE a.company_id=c.company_id AND a.linked_type='client' AND a.linked_id=c.id) AS document_count
+                FROM clients c
+                WHERE c.company_id=?
+                  AND (?=0 OR c.id=?)
+                ORDER BY COALESCE(c.company_name, ''), c.name, c.surname
+            """, (filters['start_date'], filters['end_date'], session['company_id'], filters.get('client_id') or 0, filters.get('client_id') or 0)).fetchall()
+            columns = ['Client', 'Type', 'Phone', 'Email', 'Address', 'Bookings in Period', 'Last Booking', 'Documents', 'Invoice Total in Period', 'Outstanding Balance']
+            for c in client_rows:
+                d = dict(c)
+                key = str(d.get('id'))
+                inv = invoice_totals.get(key, {})
+                rows.append([client_display_name(d), d.get('client_type') or '', d.get('phone') or '', d.get('email') or '', compose_client_address(d.get('building_number'), d.get('street_name'), d.get('suburb'), d.get('postal_code'), d.get('address')), d.get('booking_count') or 0, d.get('last_booking_date') or '', d.get('document_count') or 0, inv.get('invoice_total', 0), inv.get('balance_total', 0)])
+
+        elif report_type in ('client_revenue', 'sales_by_client'):
+            invoice_totals = _reports_invoice_totals(conn, filters)
+            columns = ['Client', 'Invoices', 'Invoice Total', 'Paid', 'Outstanding Balance']
+            for inv in sorted(invoice_totals.values(), key=lambda x: x['client'].lower()):
+                rows.append([inv['client'], inv['invoice_count'], inv['invoice_total'], inv['paid_total'], inv['balance_total']])
+
+        elif report_type == 'client_documents':
+            params = [session['company_id']]
+            client_filter = ''
+            if filters.get('client_id'):
+                client_filter = ' AND c.id=?'
+                params.append(filters['client_id'])
+            docs = conn.execute(f"""
+                SELECT c.id, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name,
+                       a.original_filename, a.file_size, a.uploaded_by, a.uploaded_at
+                FROM clients c
+                LEFT JOIN attachments a ON a.company_id=c.company_id AND a.linked_type='client' AND a.linked_id=c.id
+                WHERE c.company_id=? {client_filter}
+                ORDER BY COALESCE(c.company_name, ''), c.name, c.surname, a.uploaded_at DESC
+            """, params).fetchall()
+            columns = ['Client', 'Document', 'Size KB', 'Uploaded By', 'Uploaded At']
+            for d in docs:
+                row = dict(d)
+                rows.append([_report_client_name_from_fields(row), row.get('original_filename') or 'No document uploaded', round(float(row.get('file_size') or 0) / 1024, 1), row.get('uploaded_by') or '', row.get('uploaded_at') or ''])
+
+        elif report_type == 'project_summary':
+            columns = ['Project', 'Code', 'Client', 'Status', 'Fixed Price', 'Invoice Total', 'Additional Costs', 'Bookings', 'Documents', 'Start Date', 'Estimated End', 'Actual End']
+            for p in _reports_project_rows(conn, filters):
+                rows.append([p.get('project_name') or '', p.get('project_code') or '', _report_client_name_from_fields(p), p.get('status') or '', _report_money(p.get('fixed_price')), _report_money(p.get('invoice_total')), _report_money(p.get('additional_cost_total')), p.get('booking_count') or 0, p.get('project_document_count') or 0, p.get('start_date') or '', p.get('estimated_end_date') or '', p.get('actual_end_date') or ''])
+
+        elif report_type == 'project_bookings':
+            columns = ['Project', 'Client', 'Date', 'Staff', 'Service', 'Status', 'Invoiced', 'Notes']
+            for b in bookings:
+                if not b.get('project_id'):
+                    continue
+                rows.append([b.get('project_name') or '', _report_client_name_from_fields(b), (b.get('start') or '')[:10], b.get('employee') or '', b.get('booking_type') or '', b.get('mobile_status') or 'Scheduled', 'Yes' if b.get('is_invoiced') else 'No', b.get('booking_notes') or ''])
+
+        elif report_type == 'project_documents':
+            project_rows = _reports_project_rows(conn, filters)
+            columns = ['Project', 'Client', 'Status', 'Document', 'Size KB', 'Uploaded By', 'Uploaded At']
+            for p in project_rows:
+                docs = conn.execute("""SELECT original_filename, file_size, uploaded_by, uploaded_at
+                                       FROM attachments
+                                       WHERE company_id=? AND linked_type='project' AND linked_id=?
+                                       ORDER BY uploaded_at DESC""", (session['company_id'], p.get('id'))).fetchall()
+                if not docs:
+                    rows.append([p.get('project_name') or '', _report_client_name_from_fields(p), p.get('status') or '', 'No document uploaded', 0, '', ''])
+                for d in docs:
+                    dd = dict(d)
+                    rows.append([p.get('project_name') or '', _report_client_name_from_fields(p), p.get('status') or '', dd.get('original_filename') or '', round(float(dd.get('file_size') or 0) / 1024, 1), dd.get('uploaded_by') or '', dd.get('uploaded_at') or ''])
+
+        # Phase 3: Invoicing reports
+        elif report_type == 'invoice_register':
+            columns = ['Invoice #', 'Date', 'Due Date', 'Client', 'Project', 'Status', 'Subtotal', 'Discount', 'VAT', 'Total', 'Paid', 'Balance']
+            for i in _reports_invoice_rows(conn, filters):
+                rows.append([i.get('id'), i.get('date') or '', i.get('due_date') or '', _report_client_name_from_fields(i), i.get('project_name') or '', i.get('computed_status') or '', _report_money(i.get('subtotal')), _report_money(i.get('discount_amount')), _report_money(i.get('vat_amount')), i.get('computed_total'), i.get('computed_paid'), i.get('computed_balance')])
+
+        elif report_type == 'quote_register':
+            columns = ['Quote #', 'Date', 'Valid Until', 'Client', 'Status', 'Subtotal', 'VAT', 'Total', 'Converted Invoice']
+            for q in _reports_quote_rows(conn, filters):
+                rows.append([q.get('id'), q.get('date') or '', q.get('valid_until') or '', _report_client_name_from_fields(q), q.get('status') or '', _report_money(q.get('subtotal')), _report_money(q.get('vat_amount')), _report_money(q.get('total')), q.get('converted_invoice_id') or ''])
+
+        elif report_type == 'credit_note_register':
+            where = ["cn.company_id=?", "cn.credit_date BETWEEN ? AND ?"]
+            params = [session['company_id'], filters['start_date'], filters['end_date']]
+            if filters.get('client_id'):
+                where.append('i.client_id=?')
+                params.append(filters['client_id'])
+            credit_rows = conn.execute(f"""
+                SELECT cn.*, i.client_name, i.client_id, i.date AS invoice_date, i.total AS invoice_total,
+                       c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
+                FROM invoice_credit_notes cn
+                LEFT JOIN invoices i ON i.id=cn.invoice_id AND i.company_id=cn.company_id
+                LEFT JOIN clients c ON c.id=i.client_id AND c.company_id=cn.company_id
+                WHERE {' AND '.join(where)}
+                ORDER BY cn.credit_date ASC, cn.id ASC
+            """, params).fetchall()
+            columns = ['Credit Note #', 'Credit Date', 'Invoice #', 'Invoice Date', 'Client', 'Reason', 'Amount', 'Accounting Status']
+            for cn in credit_rows:
+                d = dict(cn)
+                rows.append([d.get('id'), d.get('credit_date') or '', d.get('invoice_id') or '', d.get('invoice_date') or '', _report_client_name_from_fields(d), d.get('reason') or '', _report_money(d.get('amount')), d.get('accounting_status') or ''])
+
+        elif report_type == 'outstanding_invoices':
+            columns = ['Invoice #', 'Date', 'Due Date', 'Client', 'Project', 'Status', 'Total', 'Paid', 'Balance', 'Days Overdue']
+            for i in _reports_invoice_rows(conn, filters, include_all_statuses=True):
+                if _report_money(i.get('computed_balance')) <= 0:
+                    continue
+                rows.append([i.get('id'), i.get('date') or '', i.get('due_date') or '', _report_client_name_from_fields(i), i.get('project_name') or '', i.get('computed_status') or '', i.get('computed_total'), i.get('computed_paid'), i.get('computed_balance'), i.get('overdue_days') or 0])
+
+        elif report_type == 'invoice_aging':
+            grouped = {}
+            for i in _reports_invoice_rows(conn, filters, include_all_statuses=True):
+                balance = _report_money(i.get('computed_balance'))
+                if balance <= 0:
+                    continue
+                client = _report_client_name_from_fields(i)
+                g = grouped.setdefault(client, {'client': client, 'current': 0.0, 'd30': 0.0, 'd60': 0.0, 'd90': 0.0, 'd120': 0.0, 'total': 0.0, 'invoices': 0})
+                days = int(i.get('overdue_days') or 0)
+                if days <= 0:
+                    g['current'] += balance
+                elif days <= 30:
+                    g['d30'] += balance
+                elif days <= 60:
+                    g['d60'] += balance
+                elif days <= 90:
+                    g['d90'] += balance
+                else:
+                    g['d120'] += balance
+                g['total'] += balance
+                g['invoices'] += 1
+            columns = ['Client', 'Invoices', 'Current', '1-30 Days', '31-60 Days', '61-90 Days', '90+ Days', 'Total Outstanding']
+            for g in sorted(grouped.values(), key=lambda x: x['client'].lower()):
+                rows.append([g['client'], g['invoices'], _report_money(g['current']), _report_money(g['d30']), _report_money(g['d60']), _report_money(g['d90']), _report_money(g['d120']), _report_money(g['total'])])
+
+        elif report_type == 'sales_by_service':
+            invoice_where = ["i.company_id=?", "i.date BETWEEN ? AND ?"]
+            params = [session['company_id'], filters['start_date'], filters['end_date']]
+            if filters.get('client_id'):
+                invoice_where.append('i.client_id=?')
+                params.append(filters['client_id'])
+            if filters.get('project_id'):
+                invoice_where.append('i.project_id=?')
+                params.append(filters['project_id'])
+            item_rows = conn.execute(f"""
+                SELECT ii.description, ii.amount, ii.quantity, ii.unit_price, i.client_id, i.project_id
+                FROM invoice_items ii
+                JOIN invoices i ON i.id=ii.invoice_id
+                WHERE {' AND '.join(invoice_where)}
+            """, params).fetchall()
+            grouped = {}
+            for item in item_rows:
+                d = dict(item)
+                service = _report_extract_service_name(d.get('description'), service_map)
+                if filters.get('service') and filters['service'].lower() not in service.lower():
+                    continue
+                amount = _report_money(d.get('amount') if d.get('amount') is not None else (_report_money(d.get('quantity')) * _report_money(d.get('unit_price'))))
+                g = grouped.setdefault(service, {'service': service, 'lines': 0, 'quantity': 0.0, 'total': 0.0})
+                g['lines'] += 1
+                g['quantity'] += _report_money(d.get('quantity') or 1)
+                g['total'] += amount
+            columns = ['Service', 'Invoice Lines', 'Quantity', 'Sales Total']
+            for g in sorted(grouped.values(), key=lambda x: x['total'], reverse=True):
+                rows.append([g['service'], g['lines'], _report_money(g['quantity']), _report_money(g['total'])])
+
+        elif report_type == 'sales_by_project':
+            grouped = {}
+            for i in _reports_invoice_rows(conn, filters, include_all_statuses=True):
+                project = i.get('project_name') or 'No Project'
+                key = str(i.get('project_id') or 'none')
+                g = grouped.setdefault(key, {'project': project, 'client': _report_client_name_from_fields(i), 'invoices': 0, 'total': 0.0, 'paid': 0.0, 'balance': 0.0})
+                g['invoices'] += 1
+                g['total'] += _report_money(i.get('computed_total'))
+                g['paid'] += _report_money(i.get('computed_paid'))
+                g['balance'] += _report_money(i.get('computed_balance'))
+            columns = ['Project', 'Client', 'Invoices', 'Sales Total', 'Paid', 'Outstanding Balance']
+            for g in sorted(grouped.values(), key=lambda x: x['total'], reverse=True):
+                rows.append([g['project'], g['client'], g['invoices'], _report_money(g['total']), _report_money(g['paid']), _report_money(g['balance'])])
+
+        # Phase 3: Finance reports
+        elif report_type == 'finance_summary':
+            stats = calculate_financials(filters['start_date'], filters['end_date'])
+            columns = ['Metric', 'Value']
+            rows = [
+                ['Revenue', stats.get('revenue', 0)],
+                ['Employee Cost', stats.get('employee_cost', 0)],
+                ['Provider Cost', stats.get('provider_cost', 0)],
+                ['Supplier / Expense Cost', stats.get('supplier_cost', 0)],
+                ['Profit', stats.get('profit', 0)],
+                ['Jobs / Bookings', stats.get('jobs', 0)],
+                ['Profit Margin %', _report_percent(stats.get('profit', 0), stats.get('revenue', 0))]
+            ]
+
+        elif report_type == 'expense_detail':
+            exp = conn.execute("""SELECT date, category, supplier, description, amount FROM expenses
+                                  WHERE company_id=? AND date BETWEEN ? AND ?
+                                  ORDER BY date ASC, id ASC""", (session['company_id'], filters['start_date'], filters['end_date'])).fetchall()
+            columns = ['Date', 'Category', 'Supplier', 'Description', 'Amount']
+            for e in exp:
+                d = dict(e)
+                rows.append([d.get('date') or '', d.get('category') or '', d.get('supplier') or '', d.get('description') or '', _report_money(d.get('amount'))])
+
+        elif report_type in ('expenses_by_category', 'expenses_by_supplier'):
+            group_col = 'category' if report_type == 'expenses_by_category' else 'supplier'
+            exp = conn.execute(f"""SELECT COALESCE({group_col}, 'Unspecified') AS group_name, COUNT(*) AS expense_count, SUM(COALESCE(amount, 0)) AS total
+                                   FROM expenses WHERE company_id=? AND date BETWEEN ? AND ?
+                                   GROUP BY COALESCE({group_col}, 'Unspecified')
+                                   ORDER BY SUM(COALESCE(amount, 0)) DESC""", (session['company_id'], filters['start_date'], filters['end_date'])).fetchall()
+            columns = ['Category' if group_col == 'category' else 'Supplier', 'Expenses', 'Total Amount']
+            for e in exp:
+                d = dict(e)
+                rows.append([d.get('group_name') or 'Unspecified', d.get('expense_count') or 0, _report_money(d.get('total'))])
+
+        elif report_type in ('service_margin_report', 'top_services_by_revenue', 'low_margin_services'):
+            services = conn.execute("SELECT name, client_price, company_cost FROM services WHERE company_id=? ORDER BY name ASC", (session['company_id'],)).fetchall()
+            usage = {}
+            for b in bookings:
+                for service in _report_split_list(b.get('booking_type')):
+                    item = service_map.get(service.lower(), {'price': 0.0, 'cost': 0.0, 'name': service})
+                    g = usage.setdefault(item['name'], {'booking_count': 0, 'normal_revenue': 0.0, 'cost': 0.0, 'project_bookings': 0})
+                    g['booking_count'] += 1
+                    if b.get('project_id'):
+                        g['project_bookings'] += 1
+                    else:
+                        g['normal_revenue'] += item['price']
+                    g['cost'] += item['cost']
+            data = []
+            for s in services:
+                d = dict(s)
+                name = d.get('name') or ''
+                price = _report_money(d.get('client_price'))
+                cost = _report_money(d.get('company_cost'))
+                unit_profit = _report_money(price - cost)
+                margin = _report_percent(unit_profit, price)
+                u = usage.get(name, {'booking_count': 0, 'normal_revenue': 0.0, 'cost': 0.0, 'project_bookings': 0})
+                data.append({'service': name, 'client_price': price, 'company_cost': cost, 'unit_profit': unit_profit, 'margin': margin, 'bookings': u['booking_count'], 'project_bookings': u['project_bookings'], 'estimated_revenue': _report_money(u['normal_revenue']), 'estimated_cost': _report_money(u['cost'])})
+            if report_type == 'top_services_by_revenue':
+                data.sort(key=lambda x: x['estimated_revenue'], reverse=True)
+            elif report_type == 'low_margin_services':
+                data.sort(key=lambda x: x['margin'])
+            columns = ['Service', 'Client Price', 'Company Cost', 'Unit Profit', 'Margin %', 'Bookings', 'Project Bookings', 'Estimated Non-Project Revenue', 'Estimated Cost']
+            for d in data:
+                rows.append([d['service'], d['client_price'], d['company_cost'], d['unit_profit'], d['margin'], d['bookings'], d['project_bookings'], d['estimated_revenue'], d['estimated_cost']])
+
+        elif report_type == 'client_profitability':
+            grouped = {}
+            project_rev_counted = set()
+            for b in bookings:
+                client = _report_client_name_from_fields(b)
+                key = str(b.get('client_id') or ('legacy:' + client))
+                g = grouped.setdefault(key, {'client': client, 'bookings': 0, 'revenue': 0.0, 'cost': 0.0, 'projects': set(), 'services': set()})
+                revenue, cost = _report_booking_values(b, service_map)
+                g['bookings'] += 1
+                if b.get('project_id'):
+                    project_key = str(b.get('project_id'))
+                    g['projects'].add(b.get('project_name') or project_key)
+                    if project_key not in project_rev_counted:
+                        g['revenue'] += _report_money(b.get('project_fixed_price'))
+                        project_rev_counted.add(project_key)
+                else:
+                    g['revenue'] += revenue
+                g['cost'] += cost
+                for s in _report_split_list(b.get('booking_type')):
+                    g['services'].add(s)
+            columns = ['Client', 'Bookings', 'Projects', 'Services', 'Revenue', 'Cost', 'Profit', 'Margin %']
+            for g in sorted(grouped.values(), key=lambda x: x['client'].lower()):
+                profit = _report_money(g['revenue'] - g['cost'])
+                rows.append([g['client'], g['bookings'], ', '.join(sorted(g['projects'])), ', '.join(sorted(g['services'])), _report_money(g['revenue']), _report_money(g['cost']), profit, _report_percent(profit, g['revenue'])])
+
+        elif report_type == 'project_profitability':
+            project_rows = _reports_project_rows(conn, filters)
+            cost_by_project = _report_project_booking_costs(bookings, service_map)
+            columns = ['Project', 'Client', 'Status', 'Fixed Price Revenue', 'Invoice Total', 'Booking Cost', 'Additional Costs', 'Total Cost', 'Profit', 'Margin %', 'Bookings']
+            for p in project_rows:
+                pid = p.get('id')
+                c = cost_by_project.get(pid, {'booking_cost': 0.0, 'booking_count': 0})
+                revenue = _report_money(p.get('fixed_price'))
+                booking_cost = _report_money(c.get('booking_cost'))
+                additional = _report_money(p.get('additional_cost_total'))
+                total_cost = _report_money(booking_cost + additional)
+                profit = _report_money(revenue - total_cost)
+                rows.append([p.get('project_name') or '', _report_client_name_from_fields(p), p.get('status') or '', revenue, _report_money(p.get('invoice_total')), booking_cost, additional, total_cost, profit, _report_percent(profit, revenue), c.get('booking_count') or p.get('booking_count') or 0])
+
+        elif report_type == 'monthly_income_expenses':
+            grouped = {}
+            invoice_rows = conn.execute("""SELECT substr(date, 1, 7) AS month_key, SUM(COALESCE(total, 0)) AS income, COUNT(*) AS invoices
+                                         FROM invoices WHERE company_id=? AND date BETWEEN ? AND ?
+                                         GROUP BY substr(date, 1, 7)""", (session['company_id'], filters['start_date'], filters['end_date'])).fetchall()
+            expense_rows = conn.execute("""SELECT substr(date, 1, 7) AS month_key, SUM(COALESCE(amount, 0)) AS expenses, COUNT(*) AS expense_count
+                                         FROM expenses WHERE company_id=? AND date BETWEEN ? AND ?
+                                         GROUP BY substr(date, 1, 7)""", (session['company_id'], filters['start_date'], filters['end_date'])).fetchall()
+            for r in invoice_rows:
+                d = dict(r)
+                g = grouped.setdefault(d.get('month_key') or '', {'month': d.get('month_key') or '', 'income': 0.0, 'expenses': 0.0, 'invoices': 0, 'expense_count': 0})
+                g['income'] = _report_money(d.get('income'))
+                g['invoices'] = int(d.get('invoices') or 0)
+            for r in expense_rows:
+                d = dict(r)
+                g = grouped.setdefault(d.get('month_key') or '', {'month': d.get('month_key') or '', 'income': 0.0, 'expenses': 0.0, 'invoices': 0, 'expense_count': 0})
+                g['expenses'] = _report_money(d.get('expenses'))
+                g['expense_count'] = int(d.get('expense_count') or 0)
+            columns = ['Month', 'Invoices', 'Income', 'Expenses', 'Net Income']
+            for g in sorted(grouped.values(), key=lambda x: x['month']):
+                rows.append([g['month'], g['invoices'], g['income'], g['expenses'], _report_money(g['income'] - g['expenses'])])
+
+        # Phase 4: Hiring reports
+        elif report_type in ('candidate_list', 'candidate_ranking'):
+            where = ["company_id=?"]
+            params = [session['company_id']]
+            where.append("(substr(COALESCE(interview_datetime, ''), 1, 10) BETWEEN ? AND ? OR COALESCE(interview_datetime, '')='')")
+            params.extend([filters['start_date'], filters['end_date']])
+            status_filter = filters.get('status_filter') or ''
+            if status_filter in {'Pending', 'Accepted', 'Rejected', 'Converted', 'Hired', 'Declined'}:
+                where.append("COALESCE(final_decision, 'Pending')=?")
+                params.append(status_filter)
+            order = 'total_score DESC, interview_datetime DESC' if report_type == 'candidate_ranking' else 'interview_datetime DESC, name ASC'
+            candidates = conn.execute(f"""SELECT name, email, phone, id_passport, address, interview_datetime, total_score, final_decision, interview_notes
+                                         FROM interviews WHERE {' AND '.join(where)} ORDER BY {order}""", params).fetchall()
+            columns = ['Candidate', 'Interview Date/Time', 'Phone', 'Email', 'Score', 'Decision', 'Notes']
+            for c in candidates:
+                d = dict(c)
+                rows.append([d.get('name') or '', d.get('interview_datetime') or '', d.get('phone') or '', d.get('email') or '', d.get('total_score') or 0, d.get('final_decision') or 'Pending', d.get('interview_notes') or ''])
+
+        elif report_type == 'hiring_pipeline':
+            pipeline = conn.execute("""SELECT COALESCE(final_decision, 'Pending') AS decision, COUNT(*) AS candidates, AVG(COALESCE(total_score, 0)) AS avg_score
+                                      FROM interviews WHERE company_id=?
+                                      GROUP BY COALESCE(final_decision, 'Pending')
+                                      ORDER BY COUNT(*) DESC""", (session['company_id'],)).fetchall()
+            columns = ['Decision / Stage', 'Candidates', 'Average Score']
+            for r in pipeline:
+                d = dict(r)
+                rows.append([d.get('decision') or 'Pending', d.get('candidates') or 0, _report_money(d.get('avg_score'))])
+
+        # Phase 4: Employee Administration reports
+        elif report_type in ('employee_directory', 'employee_notes', 'inactive_employees', 'emergency_contacts'):
+            where, params = _employee_base_where(filters, 'e')
+            if report_type == 'inactive_employees':
+                where += " AND (COALESCE(e.status, 'Active')='Inactive' OR COALESCE(e.inactive_date, '')!='')"
+            employees = conn.execute(f"""SELECT e.* FROM employees e WHERE {where} ORDER BY e.name ASC""", params).fetchall()
+            if report_type == 'employee_directory':
+                columns = ['Employee No.', 'Name', 'Job Title', 'Type', 'Status', 'Start Date', 'Phone', 'Email', 'Notes']
+                for e in employees:
+                    d = dict(e)
+                    rows.append([d.get('emp_number') or '', d.get('name') or '', d.get('job_title') or '', d.get('emp_type') or '', d.get('status') or 'Active', d.get('start_date') or '', d.get('phone') or '', d.get('email') or '', d.get('notes') or ''])
+            elif report_type == 'employee_notes':
+                columns = ['Employee No.', 'Name', 'Job Title', 'Status', 'Notes']
+                for e in employees:
+                    d = dict(e)
+                    rows.append([d.get('emp_number') or '', d.get('name') or '', d.get('job_title') or '', d.get('status') or 'Active', d.get('notes') or ''])
+            elif report_type == 'inactive_employees':
+                columns = ['Employee No.', 'Name', 'Job Title', 'Start Date', 'Inactive Date', 'UIF Termination Code', 'Status']
+                for e in employees:
+                    d = dict(e)
+                    rows.append([d.get('emp_number') or '', d.get('name') or '', d.get('job_title') or '', d.get('start_date') or '', d.get('inactive_date') or '', d.get('uif_termination_code') or '', d.get('status') or 'Inactive'])
+            else:
+                columns = ['Employee No.', 'Name', 'Phone', 'Email', 'Address', 'Emergency Contact']
+                for e in employees:
+                    d = dict(e)
+                    rows.append([d.get('emp_number') or '', d.get('name') or '', d.get('phone') or '', d.get('email') or '', d.get('address') or '', d.get('emergency_contact') or ''])
+
+        elif report_type == 'employee_documents':
+            where, params = _employee_base_where(filters, 'e')
+            employees = conn.execute(f"""SELECT emp_number, name, job_title, status, cv_file, id_file, contract_file
+                                        FROM employees e WHERE {where} ORDER BY e.name ASC""", params).fetchall()
+            columns = ['Employee No.', 'Name', 'Job Title', 'Status', 'CV Uploaded', 'ID Uploaded', 'Contract Uploaded']
+            for e in employees:
+                d = dict(e)
+                rows.append([d.get('emp_number') or '', d.get('name') or '', d.get('job_title') or '', d.get('status') or 'Active', 'Yes' if d.get('cv_file') else 'No', 'Yes' if d.get('id_file') else 'No', 'Yes' if d.get('contract_file') else 'No'])
+
+        # Phase 4: Payroll and Leave reports
+        elif report_type in ('payroll_summary', 'employee_earnings', 'deductions_report'):
+            pay_rows = conn.execute("""
+                SELECT p.*, e.name AS employee_name, e.emp_number, e.job_title
+                FROM payslips p
+                LEFT JOIN employees e ON e.id=p.employee_id AND e.company_id=p.company_id
+                WHERE p.company_id=? AND p.date BETWEEN ? AND ?
+                ORDER BY e.name ASC, p.date ASC
+            """, (session['company_id'], filters['start_date'], filters['end_date'])).fetchall()
+            grouped = {}
+            for p in pay_rows:
+                d = dict(p)
+                name = d.get('employee_name') or 'Unknown Employee'
+                g = grouped.setdefault(name, {'employee': name, 'emp_number': d.get('emp_number') or '', 'payslips': 0, 'gross': 0.0, 'overtime': 0.0, 'transport': 0.0, 'bonus': 0.0, 'reimbursable': 0.0, 'uif': 0.0, 'paye': 0.0, 'loan': 0.0, 'net': 0.0})
+                g['payslips'] += 1
+                g['gross'] += _report_money(d.get('gross_salary'))
+                g['overtime'] += _report_money(d.get('overtime'))
+                g['transport'] += _report_money(d.get('transport'))
+                g['bonus'] += _report_money(d.get('bonus'))
+                g['reimbursable'] += _report_money(d.get('reimbursable_expenses'))
+                g['uif'] += _report_money(d.get('uif'))
+                g['paye'] += _report_money(d.get('paye'))
+                g['loan'] += _report_money(d.get('loan_repayment'))
+                g['net'] += _report_money(d.get('net_salary'))
+            if report_type == 'payroll_summary':
+                columns = ['Employee', 'Employee No.', 'Payslips', 'Gross Salary', 'UIF', 'PAYE', 'Net Salary']
+                for g in sorted(grouped.values(), key=lambda x: x['employee'].lower()):
+                    rows.append([g['employee'], g['emp_number'], g['payslips'], _report_money(g['gross']), _report_money(g['uif']), _report_money(g['paye']), _report_money(g['net'])])
+            elif report_type == 'employee_earnings':
+                columns = ['Employee', 'Employee No.', 'Payslips', 'Gross Salary', 'Overtime', 'Transport Allowance', 'Bonus', 'Reimbursable Expenses', 'Net Salary']
+                for g in sorted(grouped.values(), key=lambda x: x['employee'].lower()):
+                    rows.append([g['employee'], g['emp_number'], g['payslips'], _report_money(g['gross']), _report_money(g['overtime']), _report_money(g['transport']), _report_money(g['bonus']), _report_money(g['reimbursable']), _report_money(g['net'])])
+            else:
+                columns = ['Employee', 'Employee No.', 'Payslips', 'UIF', 'PAYE', 'Loan Repayments', 'Total Deductions']
+                for g in sorted(grouped.values(), key=lambda x: x['employee'].lower()):
+                    total_deductions = _report_money(g['uif'] + g['paye'] + g['loan'])
+                    rows.append([g['employee'], g['emp_number'], g['payslips'], _report_money(g['uif']), _report_money(g['paye']), _report_money(g['loan']), total_deductions])
+
+        elif report_type == 'payslip_register':
+            pays = conn.execute("""SELECT p.*, e.name AS employee_name, e.emp_number
+                                   FROM payslips p
+                                   LEFT JOIN employees e ON e.id=p.employee_id AND e.company_id=p.company_id
+                                   WHERE p.company_id=? AND p.date BETWEEN ? AND ?
+                                   ORDER BY p.date ASC, e.name ASC""", (session['company_id'], filters['start_date'], filters['end_date'])).fetchall()
+            columns = ['Date', 'Employee', 'Employee No.', 'Type', 'Gross Salary', 'UIF', 'PAYE', 'Net Salary', 'Adjustment Reason']
+            for p in pays:
+                d = dict(p)
+                rows.append([d.get('date') or '', d.get('employee_name') or '', d.get('emp_number') or '', d.get('payslip_type') or 'regular', _report_money(d.get('gross_salary')), _report_money(d.get('uif')), _report_money(d.get('paye')), _report_money(d.get('net_salary')), d.get('adjustment_reason') or ''])
+
+        elif report_type in ('leave_taken_report', 'leave_balance_report'):
+            leave_rows = conn.execute("""SELECT lr.*, e.name AS employee_name, e.emp_number, e.additional_leave
+                                      FROM leave_records lr
+                                      LEFT JOIN employees e ON e.id=lr.employee_id AND e.company_id=lr.company_id
+                                      WHERE lr.company_id=? AND lr.date_taken BETWEEN ? AND ?
+                                      ORDER BY e.name ASC, lr.date_taken ASC""", (session['company_id'], filters['start_date'], filters['end_date'])).fetchall()
+            if report_type == 'leave_taken_report':
+                columns = ['Date Taken', 'Employee', 'Employee No.', 'Leave Type', 'Days', 'Document']
+                for lr in leave_rows:
+                    d = dict(lr)
+                    rows.append([d.get('date_taken') or '', d.get('employee_name') or '', d.get('emp_number') or '', d.get('leave_type') or 'Annual Leave', _report_money(d.get('days')), 'Yes' if d.get('document_file') else 'No'])
+            else:
+                grouped = {}
+                for lr in leave_rows:
+                    d = dict(lr)
+                    name = d.get('employee_name') or 'Unknown Employee'
+                    g = grouped.setdefault(name, {'employee': name, 'emp_number': d.get('emp_number') or '', 'additional_leave': _report_money(d.get('additional_leave')), 'annual': 0.0, 'sick': 0.0, 'other': 0.0})
+                    lt = (d.get('leave_type') or 'Annual Leave').lower()
+                    if 'annual' in lt:
+                        g['annual'] += _report_money(d.get('days'))
+                    elif 'sick' in lt:
+                        g['sick'] += _report_money(d.get('days'))
+                    else:
+                        g['other'] += _report_money(d.get('days'))
+                columns = ['Employee', 'Employee No.', 'Additional Non-Statutory Leave', 'Annual Leave Taken', 'Sick Leave Taken', 'Other Leave Taken', 'Remaining Additional Leave']
+                for g in sorted(grouped.values(), key=lambda x: x['employee'].lower()):
+                    rows.append([g['employee'], g['emp_number'], g['additional_leave'], _report_money(g['annual']), _report_money(g['sick']), _report_money(g['other']), _report_money(g['additional_leave'] - g['other'])])
+
+        elif report_type == 'leave_requests_report':
+            status_filter = filters.get('status_filter') or ''
+            where = ["r.company_id=?", "COALESCE(r.start_date, substr(r.requested_at, 1, 10)) BETWEEN ? AND ?"]
+            params = [session['company_id'], filters['start_date'], filters['end_date']]
+            if status_filter in {'Pending', 'Approved', 'Declined'}:
+                where.append("COALESCE(r.status, 'Pending')=?")
+                params.append(status_filter)
+            reqs = conn.execute(f"""SELECT r.*, e.name AS employee_name, e.emp_number
+                                    FROM staff_leave_requests r
+                                    LEFT JOIN employees e ON e.id=r.employee_id AND e.company_id=r.company_id
+                                    WHERE {' AND '.join(where)}
+                                    ORDER BY r.start_date ASC, e.name ASC""", params).fetchall()
+            columns = ['Employee', 'Employee No.', 'Leave Type', 'Start Date', 'End Date', 'Days', 'Status', 'Requested At', 'Reviewed By', 'Admin Note']
+            for r in reqs:
+                d = dict(r)
+                rows.append([d.get('employee_name') or '', d.get('emp_number') or '', d.get('leave_type') or '', d.get('start_date') or '', d.get('end_date') or '', _report_money(d.get('days')), d.get('status') or 'Pending', d.get('requested_at') or '', d.get('reviewed_by') or '', d.get('admin_note') or ''])
+
+        elif report_type == 'dates_worked_report':
+            columns = ['Date', 'Day', 'Employee', 'Client', 'Project', 'Service', 'Status']
+            for b in bookings:
+                date_part = (b.get('start') or '')[:10]
+                day = datetime.strptime(date_part, '%Y-%m-%d').strftime('%A') if date_part else ''
+                for employee in _report_split_list(b.get('employee')) or ['Unassigned']:
+                    rows.append([date_part, day, employee, _report_client_name_from_fields(b), b.get('project_name') or '', b.get('booking_type') or '', b.get('mobile_status') or 'Scheduled'])
+
+        summary = {
+            'row_count': len(rows),
+            'booking_count': len(bookings),
+            'completed_bookings': sum(1 for b in bookings if (b.get('mobile_status') or '').lower() == 'completed'),
+            'uninvoiced_bookings': sum(1 for b in bookings if not b.get('is_invoiced')),
+            'project_booking_count': sum(1 for b in bookings if b.get('project_id')),
+            'money_total': _report_money(sum(_report_money(r[-1]) for r in rows if r and isinstance(r[-1], (int, float))))
+        }
+        return {
+            'status': 'success',
+            'report_type': report_type,
+            'title': REPORT_TYPES[report_type]['title'],
+            'filters': filters,
+            'columns': columns,
+            'rows': rows,
+            'summary': summary,
+            'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M')
+        }
+    finally:
+        conn.close()
+
+
+@app.route('/reports')
+def reports_index():
+    start_date, end_date = _report_default_dates()
+    available_reports = _available_report_types()
+    if not available_reports:
+        return "Access Denied: You do not have permissions to access Reports.", 403
+    conn = get_db_connection()
+    cid = session['company_id']
+    perms = _report_permissions()
+    operational_perms = bool(perms.intersection({'booking', 'invoicing', 'finance'}))
+    clients = prepare_client_options(conn.execute("SELECT * FROM clients WHERE company_id=? ORDER BY COALESCE(company_name, ''), name, surname", (cid,)).fetchall()) if operational_perms else []
+    employees = [dict(r) for r in conn.execute("SELECT name FROM employees WHERE company_id=? AND COALESCE(status, 'Active')!='Inactive' ORDER BY name ASC", (cid,)).fetchall()] if perms.intersection({'booking', 'payroll'}) else []
+    services = [dict(r) for r in conn.execute('SELECT name FROM services WHERE company_id=? ORDER BY name ASC', (cid,)).fetchall()] if operational_perms else []
+    projects = [dict(r) for r in conn.execute('SELECT id, project_name, project_code, status FROM projects WHERE company_id=? ORDER BY project_name ASC', (cid,)).fetchall()] if operational_perms else []
+    statuses = [r['status'] for r in conn.execute("SELECT status FROM projects WHERE company_id=? AND COALESCE(status, '')!='' GROUP BY status ORDER BY status ASC", (cid,)).fetchall()] if operational_perms else []
+    conn.close()
+    return render_template('reports_index.html', session=session, report_types=available_reports, report_groups=_group_report_types(available_reports), start_date=start_date, end_date=end_date, clients=clients, employees=employees, services=services, projects=projects, project_statuses=statuses)
+
+
+@app.route('/api/reports/overview')
+def api_reports_overview():
+    if not _available_report_types():
+        return _report_json_access_denied()
+
+    filters = _report_filters(request.args)
+    conn = get_db_connection()
+    cid = session['company_id']
+    perms = _report_permissions()
+
+    metrics = {
+        'bookings': 0,
+        'completed_bookings': 0,
+        'uninvoiced_bookings': 0,
+        'active_clients': 0,
+        'active_projects': 0,
+        'invoice_total': 0,
+        'outstanding_balance': 0,
+        'invoice_count': 0,
+        'expense_total': 0,
+        'expense_count': 0,
+        'payroll_gross': 0,
+        'payslip_count': 0,
+        'open_projects': 0,
+        'open_project_fixed_value': 0
+    }
+
+    try:
+        # Booking dashboard metrics are returned only to users with Booking & Ops reporting access.
+        if 'booking' in perms:
+            where, params = _report_booking_where(filters, 'b')
+            booking_row = conn.execute(f"""SELECT COUNT(*) AS total,
+                                               SUM(CASE WHEN COALESCE(b.mobile_status, 'Scheduled')='Completed' THEN 1 ELSE 0 END) AS completed,
+                                               SUM(CASE WHEN COALESCE(b.is_invoiced, 0)=0 THEN 1 ELSE 0 END) AS uninvoiced,
+                                               COUNT(DISTINCT b.client_id) AS clients,
+                                               COUNT(DISTINCT b.project_id) AS projects
+                                        FROM bookings b WHERE {where}""", params).fetchone()
+            booking_data = dict(booking_row) if booking_row else {}
+            metrics.update({
+                'bookings': int(booking_data.get('total') or 0),
+                'completed_bookings': int(booking_data.get('completed') or 0),
+                'uninvoiced_bookings': int(booking_data.get('uninvoiced') or 0),
+                'active_clients': int(booking_data.get('clients') or 0),
+                'active_projects': int(booking_data.get('projects') or 0)
+            })
+
+        # Invoice totals are available only to Invoicing or Finance report users.
+        if perms.intersection({'invoicing', 'finance'}):
+            invoice_row = conn.execute("""SELECT SUM(COALESCE(total, 0)) AS invoice_total,
+                                                SUM(COALESCE(balance_remaining, COALESCE(amount_due_now, total), 0)) AS balance_total,
+                                                COUNT(*) AS invoice_count
+                                         FROM invoices WHERE company_id=? AND date BETWEEN ? AND ?""", (cid, filters['start_date'], filters['end_date'])).fetchone()
+            invoice_data = dict(invoice_row) if invoice_row else {}
+            metrics.update({
+                'invoice_total': _report_money(invoice_data.get('invoice_total')),
+                'outstanding_balance': _report_money(invoice_data.get('balance_total')),
+                'invoice_count': int(invoice_data.get('invoice_count') or 0)
+            })
+
+        # Expense metrics are Finance-only.
+        if 'finance' in perms:
+            expense_row = conn.execute("""SELECT SUM(COALESCE(amount, 0)) AS expense_total, COUNT(*) AS expense_count
+                                         FROM expenses WHERE company_id=? AND date BETWEEN ? AND ?""", (cid, filters['start_date'], filters['end_date'])).fetchone()
+            expense_data = dict(expense_row) if expense_row else {}
+            metrics.update({
+                'expense_total': _report_money(expense_data.get('expense_total')),
+                'expense_count': int(expense_data.get('expense_count') or 0)
+            })
+
+        # Payroll metrics are Payroll & Leave-only.
+        if 'payroll' in perms:
+            payroll_row = conn.execute("""SELECT SUM(COALESCE(gross_salary, 0)) AS payroll_gross, COUNT(*) AS payslip_count
+                                         FROM payslips WHERE company_id=? AND date BETWEEN ? AND ?""", (cid, filters['start_date'], filters['end_date'])).fetchone()
+            payroll_data = dict(payroll_row) if payroll_row else {}
+            metrics.update({
+                'payroll_gross': _report_money(payroll_data.get('payroll_gross')),
+                'payslip_count': int(payroll_data.get('payslip_count') or 0)
+            })
+
+        # Project value is available to users who can access project-related reports.
+        if perms.intersection({'booking', 'finance', 'invoicing'}):
+            project_row = conn.execute("""SELECT COUNT(*) AS open_projects, SUM(COALESCE(fixed_price, 0)) AS fixed_value
+                                         FROM projects
+                                         WHERE company_id=? AND COALESCE(status, '') NOT IN ('Completed', 'Cancelled', 'Closed')""", (cid,)).fetchone()
+            project_data = dict(project_row) if project_row else {}
+            metrics.update({
+                'open_projects': int(project_data.get('open_projects') or 0),
+                'open_project_fixed_value': _report_money(project_data.get('fixed_value'))
+            })
+
+        return jsonify({'status': 'success', 'filters': filters, 'metrics': metrics})
+    finally:
+        conn.close()
+
+
+@app.route('/api/reports/run', methods=['POST'])
+def api_reports_run():
+    data = request.get_json(silent=True) or {}
+    report_type = (data.get('report_type') or next(iter(_available_report_types()), 'booking_detail')).strip()
+
+    denied = _ensure_report_type_allowed(report_type, json_response=True)
+    if denied:
+        return denied
+
+    filters = _report_filters(data)
+    try:
+        return jsonify(_build_reports_payload(report_type, filters))
+    except PermissionError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': f'Report could not be generated: {exc}'}), 500
+
+
+@app.route('/export/reports/<report_type>.csv')
+def export_reports_csv(report_type):
+    report_type = (report_type or '').strip()
+    denied = _ensure_report_type_allowed(report_type, json_response=False)
+    if denied:
+        return denied
+
+    filters = _report_filters(request.args)
+    try:
+        payload = _build_reports_payload(report_type, filters)
+    except PermissionError as exc:
+        return str(exc), 403
+    except ValueError:
+        return 'Invalid report type.', 400
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([payload['title']])
+    writer.writerow(['Period', f"{filters['start_date']} to {filters['end_date']}"])
+    writer.writerow(['Generated', payload['generated_at']])
+    writer.writerow([])
+    writer.writerow(payload['columns'])
+    for row in payload['rows']:
+        writer.writerow(row)
+    filename = f"Easy_Admin_{report_type}_{filters['start_date']}_to_{filters['end_date']}.csv"
+    log_action('Reports', 'Exported Report', f"Exported {payload['title']} from {filters['start_date']} to {filters['end_date']}")
+    response = Response(output.getvalue(), mimetype='text/csv')
+    response.headers['Content-Disposition'] = f'attachment; filename={filename}'
+    return response
 
 
 # ==========================================================

@@ -131,6 +131,19 @@
             </div>
             {% endif %}
 
+            {% if session.get('can_booking') or session.get('can_invoicing') or session.get('can_finance') or session.get('is_company_admin') or session.get('is_superadmin') %}
+            <div class="col-md-3">
+                <div class="card app-card text-center border border-secondary shadow-sm" onclick="window.location.href='/reports'">
+                    <div class="card-body p-4">
+                        <div class="app-icon text-secondary">📊</div>
+                        <h5 class="fw-bold text-dark">Reports</h5>
+                        <p class="text-muted small">View operational, client and project reports with filters and exports.</p>
+                        <span class="btn btn-outline-secondary mt-2 w-100 fw-bold">Open Reports</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
             {% if session.get('can_payroll') or session.get('can_hiring') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center" onclick="window.location.href='/payroll'">
