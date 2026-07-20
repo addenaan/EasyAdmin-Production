@@ -44,6 +44,8 @@
                     <span class="badge bg-warning text-dark py-2 px-3 shadow-sm border border-dark">⭐ Super Admin</span>
                 {% elif session.get('is_company_admin') %}
                     <span class="badge bg-danger text-white py-2 px-3 shadow-sm border border-dark">🛡️ Company Admin</span>
+                {% elif session.get('is_franchise_reporting') %}
+                    <span class="badge bg-primary text-white py-2 px-3 shadow-sm border border-light">🏢 Franchisor Reporting</span>
                 {% endif %}
                 <div class="hub-auth-buttons">
                     <a href="{{ url_for('change_password') }}" class="btn btn-light fw-bold text-primary">Change Password</a>
@@ -55,6 +57,7 @@
 
     <div class="container mt-5">
         <div class="row g-4 justify-content-center">
+            {% if not session.get('is_franchise_reporting') or session.get('can_booking') or session.get('can_booking_readonly') or session.get('can_invoicing') or session.get('can_invoicing_readonly') or session.get('can_finance') or session.get('can_finance_readonly') or session.get('can_payroll') or session.get('can_payroll_readonly') or session.get('can_hiring') or session.get('can_hiring_readonly') or session.get('can_accounting') or session.get('can_accounting_readonly') or session.get('is_company_admin') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center border border-primary shadow-sm" onclick="window.location.href='/mobile'">
                     <div class="card-body p-4">
@@ -65,6 +68,7 @@
                     </div>
                 </div>
             </div>
+            {% endif %}
 
             {% if session.get('can_payroll') or session.get('is_company_admin') or session.get('is_superadmin') %}
             <div class="col-md-3">
@@ -144,6 +148,19 @@
             </div>
             {% endif %}
 
+            {% if session.get('is_franchise_reporting') or session.get('is_superadmin') %}
+            <div class="col-md-3">
+                <div class="card app-card text-center border border-primary shadow-sm" onclick="window.location.href='/franchise_reports'">
+                    <div class="card-body p-4">
+                        <div class="app-icon text-primary">🏢</div>
+                        <h5 class="fw-bold text-dark">Franchise Reports</h5>
+                        <p class="text-muted small">Run reports across one or all linked franchisee tenants.</p>
+                        <span class="btn btn-outline-primary mt-2 w-100 fw-bold">Open Franchise Reports</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
             {% if session.get('can_payroll') or session.get('can_payroll_readonly') or session.get('can_hiring') or session.get('can_hiring_readonly') or session.get('is_superadmin') %}
             <div class="col-md-3">
                 <div class="card app-card text-center" onclick="window.location.href='/payroll'">
@@ -157,7 +174,7 @@
             </div>
             {% endif %}
 
-            {% if not session.get('can_booking') and not session.get('can_booking_readonly') and not session.get('can_finance') and not session.get('can_finance_readonly') and not session.get('can_payroll') and not session.get('can_payroll_readonly') and not session.get('can_hiring') and not session.get('can_hiring_readonly') and not session.get('can_invoicing') and not session.get('can_invoicing_readonly') and not session.get('can_accounting') and not session.get('can_accounting_readonly') and not session.get('is_superadmin') %}
+            {% if not session.get('can_booking') and not session.get('can_booking_readonly') and not session.get('can_finance') and not session.get('can_finance_readonly') and not session.get('can_payroll') and not session.get('can_payroll_readonly') and not session.get('can_hiring') and not session.get('can_hiring_readonly') and not session.get('can_invoicing') and not session.get('can_invoicing_readonly') and not session.get('can_accounting') and not session.get('can_accounting_readonly') and not session.get('is_superadmin') and not session.get('is_franchise_reporting') %}
             <div class="col-12">
                 <div class="alert alert-warning text-center shadow-sm">
                     You do not currently have access to any applications. Please contact your Company Admin.
@@ -209,6 +226,9 @@
                 </div>
                 <div class="col-md-3">
                     <button class="btn btn-outline-primary w-100 fw-bold" onclick="openTemplateUploadModal()">📤 Upload Template</button>
+                </div>
+                <div class="col-md-3 mt-2">
+                    <button class="btn btn-outline-primary w-100 fw-bold" onclick="openFranchiseGroupsModal()">🏢 Franchise Groups</button>
                 </div>
             </div>
         </div>
@@ -470,6 +490,79 @@
                 <div class="modal-footer">
                     <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                     <button class="btn btn-primary fw-bold" onclick="uploadIndustryTemplate()">Upload Template</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if session.get('is_superadmin') %}
+    <div class="modal fade" id="franchiseGroupsModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">Franchise Group Reporting</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="alert alert-info small">
+                        Link franchisee tenants to a franchise group and assign reporting users. Reporting users can only run reports for tenants linked here.
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-lg-5">
+                            <div class="card border-0 shadow-sm h-100">
+                                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                                    <strong>Franchise Groups</strong>
+                                    <button class="btn btn-sm btn-primary fw-bold" onclick="openFranchiseGroupForm(null)">+ Add Group</button>
+                                </div>
+                                <div class="card-body p-0">
+                                    <div class="table-responsive">
+                                        <table class="table table-sm table-hover mb-0 align-middle">
+                                            <thead class="table-light"><tr><th>Name</th><th>Franchisees</th><th>Users</th><th>Status</th><th></th></tr></thead>
+                                            <tbody id="franchiseGroupsTableBody"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-lg-7">
+                            <div class="card border-0 shadow-sm h-100">
+                                <div class="card-header bg-white"><strong id="franchiseGroupFormTitle">New Franchise Group</strong></div>
+                                <div class="card-body">
+                                    <input type="hidden" id="franchiseGroupId">
+                                    <div class="mb-3">
+                                        <label class="form-label fw-bold small">Group Name</label>
+                                        <input type="text" id="franchiseGroupName" class="form-control" placeholder="e.g. Marvellous Maids National">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label fw-bold small">Description</label>
+                                        <textarea id="franchiseGroupDescription" class="form-control" rows="2" placeholder="Optional notes"></textarea>
+                                    </div>
+                                    <div class="form-check form-switch mb-3">
+                                        <input class="form-check-input" type="checkbox" id="franchiseGroupActive" checked>
+                                        <label class="form-check-label fw-bold" for="franchiseGroupActive">Active</label>
+                                    </div>
+                                    <div class="row g-3">
+                                        <div class="col-md-6">
+                                            <label class="form-label fw-bold small">Linked Franchisee Tenants</label>
+                                            <div id="franchiseCompanyChecklist" class="border rounded bg-white p-2" style="max-height: 260px; overflow-y: auto;"></div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label fw-bold small">Franchisor Reporting Users</label>
+                                            <div id="franchiseUserChecklist" class="border rounded bg-white p-2" style="max-height: 260px; overflow-y: auto;"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="card-footer bg-white text-end">
+                                    <button class="btn btn-outline-secondary me-2" onclick="clearFranchiseGroupForm()">Clear</button>
+                                    <button class="btn btn-primary fw-bold" onclick="saveFranchiseGroup()">Save Franchise Group</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
@@ -1665,6 +1758,134 @@
                 }
             });
         }
+
+        // --- FRANCHISE GROUP REPORTING ADMIN ---
+        let franchiseGroupsModal = null;
+        let franchiseAdminData = { groups: [], companies: [], users: [], company_links: [], user_links: [] };
+
+        function openFranchiseGroupsModal() {
+            franchiseGroupsModal = franchiseGroupsModal || new bootstrap.Modal(document.getElementById('franchiseGroupsModal'));
+            loadFranchiseGroups().then(() => {
+                clearFranchiseGroupForm();
+                franchiseGroupsModal.show();
+            });
+        }
+
+        function loadFranchiseGroups() {
+            return fetch('/admin/franchise_groups')
+                .then(r => r.json())
+                .then(data => {
+                    if(data.status === 'error') throw new Error(data.message || 'Could not load franchise groups.');
+                    franchiseAdminData = data;
+                    renderFranchiseGroupsTable();
+                    renderFranchiseGroupChecklists([], []);
+                })
+                .catch(err => alert(err.message || err));
+        }
+
+        function franchiseCompanyIds(groupId) {
+            return (franchiseAdminData.company_links || []).filter(x => String(x.franchise_group_id) === String(groupId)).map(x => String(x.company_id));
+        }
+        function franchiseUserIds(groupId) {
+            return (franchiseAdminData.user_links || []).filter(x => String(x.franchise_group_id) === String(groupId)).map(x => String(x.user_id));
+        }
+
+        function renderFranchiseGroupsTable() {
+            const tbody = document.getElementById('franchiseGroupsTableBody');
+            if(!tbody) return;
+            tbody.innerHTML = '';
+            (franchiseAdminData.groups || []).forEach(group => {
+                const companyCount = franchiseCompanyIds(group.id).length;
+                const userCount = franchiseUserIds(group.id).length;
+                const statusBadge = group.active ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Inactive</span>';
+                tbody.innerHTML += `
+                    <tr>
+                        <td><strong>${escapeHtml(group.name || '')}</strong><div class="small text-muted">${escapeHtml(group.description || '')}</div></td>
+                        <td>${companyCount}</td>
+                        <td>${userCount}</td>
+                        <td>${statusBadge}</td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-outline-primary" onclick="openFranchiseGroupById(${group.id})">Edit</button>
+                            ${group.active ? `<button class="btn btn-sm btn-outline-danger ms-1" onclick="deactivateFranchiseGroup(${group.id})">Deactivate</button>` : ''}
+                        </td>
+                    </tr>`;
+            });
+        }
+
+        function renderFranchiseGroupChecklists(selectedCompanies, selectedUsers) {
+            const compWrap = document.getElementById('franchiseCompanyChecklist');
+            const userWrap = document.getElementById('franchiseUserChecklist');
+            if(compWrap) {
+                compWrap.innerHTML = (franchiseAdminData.companies || []).map(c => `
+                    <div class="form-check">
+                        <input class="form-check-input franchise-company-cb" type="checkbox" value="${c.id}" id="fgc_${c.id}" ${selectedCompanies.includes(String(c.id)) ? 'checked' : ''}>
+                        <label class="form-check-label small" for="fgc_${c.id}">${escapeHtml(c.name || '')}</label>
+                    </div>`).join('') || '<div class="text-muted small">No companies found.</div>';
+            }
+            if(userWrap) {
+                userWrap.innerHTML = (franchiseAdminData.users || []).map(u => `
+                    <div class="form-check">
+                        <input class="form-check-input franchise-user-cb" type="checkbox" value="${u.id}" id="fgu_${u.id}" ${selectedUsers.includes(String(u.id)) ? 'checked' : ''}>
+                        <label class="form-check-label small" for="fgu_${u.id}">${escapeHtml(u.username || '')}<span class="text-muted">${u.company_name ? ' - ' + escapeHtml(u.company_name) : ''}</span></label>
+                    </div>`).join('') || '<div class="text-muted small">No users found.</div>';
+            }
+        }
+
+        function clearFranchiseGroupForm() {
+            document.getElementById('franchiseGroupFormTitle').innerText = 'New Franchise Group';
+            document.getElementById('franchiseGroupId').value = '';
+            document.getElementById('franchiseGroupName').value = '';
+            document.getElementById('franchiseGroupDescription').value = '';
+            document.getElementById('franchiseGroupActive').checked = true;
+            renderFranchiseGroupChecklists([], []);
+        }
+
+        function openFranchiseGroupById(groupId) {
+            const group = (franchiseAdminData.groups || []).find(g => String(g.id) === String(groupId));
+            if(group) openFranchiseGroupForm(group);
+        }
+
+        function openFranchiseGroupForm(group) {
+            if(!group) return clearFranchiseGroupForm();
+            document.getElementById('franchiseGroupFormTitle').innerText = 'Edit Franchise Group';
+            document.getElementById('franchiseGroupId').value = group.id || '';
+            document.getElementById('franchiseGroupName').value = group.name || '';
+            document.getElementById('franchiseGroupDescription').value = group.description || '';
+            document.getElementById('franchiseGroupActive').checked = !!group.active;
+            renderFranchiseGroupChecklists(franchiseCompanyIds(group.id), franchiseUserIds(group.id));
+        }
+
+        function saveFranchiseGroup() {
+            const payload = {
+                id: document.getElementById('franchiseGroupId').value,
+                name: document.getElementById('franchiseGroupName').value.trim(),
+                description: document.getElementById('franchiseGroupDescription').value.trim(),
+                active: document.getElementById('franchiseGroupActive').checked,
+                company_ids: Array.from(document.querySelectorAll('.franchise-company-cb:checked')).map(x => x.value),
+                user_ids: Array.from(document.querySelectorAll('.franchise-user-cb:checked')).map(x => x.value)
+            };
+            if(!payload.name) return alert('Please enter a franchise group name.');
+            if(!payload.company_ids.length) return alert('Please link at least one franchisee tenant.');
+            if(!payload.user_ids.length) return alert('Please assign at least one franchisor reporting user.');
+            fetch('/admin/franchise_groups/save', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+            }).then(r => r.json()).then(res => {
+                if(res.status === 'error') return alert(res.message || 'Could not save franchise group.');
+                alert('Franchise group saved. Reporting users must log out and back in to receive access.');
+                loadFranchiseGroups();
+            }).catch(err => alert(err.message || err));
+        }
+
+        function deactivateFranchiseGroup(id) {
+            if(!confirm('Deactivate this franchise group? Reporting users linked to it will no longer have franchise report access after their next login.')) return;
+            fetch('/admin/franchise_groups/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id}) })
+                .then(r => r.json()).then(res => {
+                    if(res.status === 'error') return alert(res.message || 'Could not deactivate group.');
+                    loadFranchiseGroups();
+                    clearFranchiseGroupForm();
+                });
+        }
+
         {% endif %}
 
         {% if session.get('is_superadmin') or session.get('is_company_admin') %}

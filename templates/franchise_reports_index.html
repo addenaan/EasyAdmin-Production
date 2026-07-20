@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Franchise Reports | Easy Admin</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: #f4f6f9; font-family: Arial, sans-serif; }
+        .page-header { background: linear-gradient(135deg, #0d6efd, #003d99); color: #fff; padding: 28px 0; border-bottom: 5px solid #002d73; }
+        .metric-card { border: 0; border-radius: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+        .report-panel { background: #fff; border-radius: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); padding: 20px; }
+        .table-responsive { max-height: 60vh; overflow: auto; }
+        th { position: sticky; top: 0; background: #f8f9fa !important; z-index: 1; }
+        @media print {
+            .no-print { display: none !important; }
+            body { background: #fff; }
+            .report-panel, .metric-card { box-shadow: none; border: 1px solid #ddd; }
+            .table-responsive { max-height: none; overflow: visible; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page-header no-print">
+        <div class="container d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div>
+                <h2 class="fw-bold mb-1">🏢 Franchise Reports</h2>
+                <div class="opacity-75">{{ group.name }}{% if group.description %} - {{ group.description }}{% endif %}</div>
+            </div>
+            <div class="d-flex gap-2">
+                <a href="/hub" class="btn btn-light fw-bold text-primary">Back to Hub</a>
+                <a href="/logout" class="btn btn-light fw-bold text-danger">Logout</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="container my-4">
+        <div class="row g-3 mb-4" id="metricsRow">
+            <div class="col-md-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Linked Franchisees</div><div class="h4 fw-bold" id="metricFranchisees">-</div></div></div></div>
+            <div class="col-md-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Bookings</div><div class="h4 fw-bold" id="metricBookings">-</div></div></div></div>
+            <div class="col-md-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Invoice Total</div><div class="h4 fw-bold" id="metricInvoiceTotal">-</div></div></div></div>
+            <div class="col-md-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Outstanding</div><div class="h4 fw-bold" id="metricOutstanding">-</div></div></div></div>
+        </div>
+
+        <div class="report-panel mb-4 no-print">
+            <div class="row g-3 align-items-end">
+                {% if session.get('is_superadmin') and group_options %}
+                <div class="col-md-3">
+                    <label class="form-label fw-bold small">Franchise Group</label>
+                    <select id="franchiseGroupId" class="form-select" onchange="switchFranchiseGroup()">
+                        {% for g in group_options %}<option value="{{ g.id }}" {% if g.id == selected_group_id %}selected{% endif %}>{{ g.name }}</option>{% endfor %}
+                    </select>
+                </div>
+                {% endif %}
+                <div class="col-md-3">
+                    <label class="form-label fw-bold small">Report</label>
+                    <select id="reportType" class="form-select">
+                        {% for group_name, reports in report_groups.items() %}
+                            <optgroup label="{{ group_name }}">
+                                {% for report in reports %}<option value="{{ report.key }}">{{ report.title }}</option>{% endfor %}
+                            </optgroup>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label fw-bold small">Franchisee</label>
+                    <select id="franchiseeCompanyId" class="form-select">
+                        <option value="0">All Franchisees</option>
+                        {% for c in franchisees %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-bold small">From</label>
+                    <input type="date" id="startDate" class="form-control" value="{{ start_date }}">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-bold small">To</label>
+                    <input type="date" id="endDate" class="form-control" value="{{ end_date }}">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-bold small">Service</label>
+                    <select id="serviceFilter" class="form-select">
+                        <option value="">All Services</option>
+                        {% for s in services %}<option value="{{ s.name }}">{{ s.name }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-bold small">Status</label>
+                    <input type="text" id="statusFilter" class="form-control" placeholder="Optional">
+                </div>
+                <div class="col-md-3 d-flex gap-2">
+                    <button class="btn btn-primary fw-bold flex-fill" onclick="runFranchiseReport()">Run Report</button>
+                    <button class="btn btn-outline-success fw-bold" onclick="exportFranchiseCsv()">CSV</button>
+                    <button class="btn btn-outline-dark fw-bold" onclick="window.print()">Print/PDF</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="report-panel">
+            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                <div>
+                    <h4 id="reportTitle" class="fw-bold mb-1">Select a report</h4>
+                    <div id="reportMeta" class="text-muted small">Choose filters and click Run Report.</div>
+                </div>
+                <div id="rowCount" class="badge bg-secondary fs-6">0 rows</div>
+            </div>
+            <div id="reportError"></div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover table-bordered align-middle bg-white" id="reportTable">
+                    <thead id="reportHead"></thead>
+                    <tbody id="reportBody"><tr><td class="text-center text-muted p-4">No report loaded yet.</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+<script>
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+function selectedGroupId() {
+    const el = document.getElementById('franchiseGroupId');
+    return el ? el.value : '{{ selected_group_id }}';
+}
+function collectFilters() {
+    return {
+        franchise_group_id: selectedGroupId(),
+        report_type: document.getElementById('reportType').value,
+        company_id: document.getElementById('franchiseeCompanyId').value,
+        start_date: document.getElementById('startDate').value,
+        end_date: document.getElementById('endDate').value,
+        service: document.getElementById('serviceFilter').value,
+        status_filter: document.getElementById('statusFilter').value
+    };
+}
+function switchFranchiseGroup() {
+    const gid = selectedGroupId();
+    window.location.href = `/franchise_reports?franchise_group_id=${encodeURIComponent(gid)}`;
+}
+function loadOverview() {
+    const f = collectFilters();
+    const q = new URLSearchParams(f).toString();
+    fetch(`/api/franchise_reports/overview?${q}`)
+        .then(r => r.json())
+        .then(res => {
+            if(res.status !== 'success') return;
+            const m = res.metrics || {};
+            document.getElementById('metricFranchisees').textContent = m.linked_franchisees ?? '-';
+            document.getElementById('metricBookings').textContent = m.bookings ?? '-';
+            document.getElementById('metricInvoiceTotal').textContent = m.invoice_total ?? '-';
+            document.getElementById('metricOutstanding').textContent = m.outstanding_balance ?? '-';
+        });
+}
+function runFranchiseReport() {
+    const filters = collectFilters();
+    document.getElementById('reportError').innerHTML = '';
+    document.getElementById('reportBody').innerHTML = '<tr><td class="text-center text-muted p-4">Loading report...</td></tr>';
+    fetch('/api/franchise_reports/run', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(filters)
+    }).then(r => r.json()).then(res => {
+        if(res.status !== 'success') {
+            document.getElementById('reportError').innerHTML = `<div class="alert alert-danger">${escapeHtml(res.message || 'Report failed.')}</div>`;
+            document.getElementById('reportBody').innerHTML = '<tr><td class="text-center text-muted p-4">No report loaded.</td></tr>';
+            return;
+        }
+        renderReport(res);
+        loadOverview();
+    }).catch(err => {
+        document.getElementById('reportError').innerHTML = `<div class="alert alert-danger">${escapeHtml(err.message || err)}</div>`;
+    });
+}
+function renderReport(res) {
+    document.getElementById('reportTitle').textContent = res.title || 'Report';
+    document.getElementById('reportMeta').textContent = `${res.franchise_group?.name || 'Franchise Group'} | ${res.filters.start_date} to ${res.filters.end_date} | Generated ${res.generated_at}`;
+    document.getElementById('rowCount').textContent = `${(res.rows || []).length} rows`;
+    const cols = res.columns || [];
+    document.getElementById('reportHead').innerHTML = `<tr>${cols.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr>`;
+    if(!res.rows || !res.rows.length) {
+        document.getElementById('reportBody').innerHTML = `<tr><td colspan="${Math.max(cols.length, 1)}" class="text-center text-muted p-4">No data found for the selected filters.</td></tr>`;
+        return;
+    }
+    document.getElementById('reportBody').innerHTML = res.rows.map(row => `<tr>${row.map(v => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`).join('');
+}
+function exportFranchiseCsv() {
+    const f = collectFilters();
+    const reportType = f.report_type;
+    delete f.report_type;
+    const q = new URLSearchParams(f).toString();
+    window.location.href = `/export/franchise_reports/${encodeURIComponent(reportType)}.csv?${q}`;
+}
+document.addEventListener('DOMContentLoaded', () => {
+    loadOverview();
+    runFranchiseReport();
+});
+</script>
+</body>
+</html>

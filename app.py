@@ -1297,6 +1297,35 @@ def init_db():
             try: conn.execute(f'ALTER TABLE users ADD COLUMN {ro_col} INTEGER DEFAULT 0')
             except Exception: pass
 
+    # Franchise group reporting keeps franchisees as separate tenants while giving
+    # franchisors one reporting-only login over explicitly linked companies only.
+    conn.execute('''CREATE TABLE IF NOT EXISTS franchise_groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS franchise_group_companies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        franchise_group_id INTEGER NOT NULL,
+        company_id INTEGER NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(franchise_group_id, company_id)
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS franchise_group_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        franchise_group_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        access_level TEXT DEFAULT 'reports_only',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(franchise_group_id, user_id)
+    )''')
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_franchise_group_companies_group ON franchise_group_companies(franchise_group_id, company_id)')
+    except sqlite3.OperationalError: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_franchise_group_users_user ON franchise_group_users(user_id, franchise_group_id)')
+    except sqlite3.OperationalError: pass
+
     conn.execute('''CREATE TABLE IF NOT EXISTS system_email_settings (
         setting_key TEXT PRIMARY KEY,
         setting_value TEXT
@@ -3181,7 +3210,7 @@ def prevent_dynamic_response_caching(response):
         '/api/', '/admin/', '/staff', '/mobile', '/hub', '/booking', '/bookings',
         '/payroll', '/invoicing', '/finance', '/accounting', '/clients',
         '/employees', '/projects', '/quotes', '/invoices', '/settings',
-        '/download', '/export', '/uploads/', '/reports'
+        '/download', '/export', '/uploads/', '/reports', '/franchise_reports'
     )
     is_dynamic = (
         request.method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE') and (
@@ -3340,6 +3369,10 @@ RATE_LIMIT_RULES = {
     'email_invoice_pdf': (30, 300),
     'email_quote_pdf': (30, 300),
     'email_document': (30, 300),
+    'api_franchise_reports_run': (60, 300),
+    'export_franchise_reports_csv': (60, 300),
+    'admin_franchise_groups_save': (20, 300),
+    'admin_franchise_groups_delete': (10, 300),
 }
 RATE_LIMIT_PATH_PREFIXES = [
     ('/api/attachments/upload', 30, 300),
@@ -3553,7 +3586,7 @@ def restrict_access():
             return _session_timeout_response()
         _touch_session_activity()
     
-    if not session.get('company_id') and not session.get('is_superadmin'):
+    if not session.get('company_id') and not session.get('is_superadmin') and not session.get('is_franchise_reporting'):
         return "Fatal Error: Account is not assigned to a company.", 403
 
     path = request.path
@@ -3561,6 +3594,10 @@ def restrict_access():
     if path == '/reports' or path.startswith('/api/reports') or path.startswith('/export/reports'):
         if not _session_has_reports_access():
             return "Access Denied: You do not have permissions to access Reports.", 403
+
+    if path == '/franchise_reports' or path.startswith('/api/franchise_reports') or path.startswith('/export/franchise_reports'):
+        if not (session.get('is_franchise_reporting') or session.get('is_superadmin')):
+            return "Access Denied: Franchise reporting access required.", 403
 
     if session.get('is_staff'):
         allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/staff/download_payslip/', '/api/staff/', '/api/session/', '/change_password', '/change-password', '/password/change', '/logout')
@@ -3722,7 +3759,25 @@ def login():
             session['comp_can_invoicing'] = bool(dict(comp).get('can_invoicing', 0)) if comp else False
             session['comp_can_accounting'] = bool(dict(comp).get('can_accounting', 0)) if comp else False
             session['comp_google_calendar'] = bool(dict(comp).get('google_calendar_sync', 0)) if comp else False
-                
+
+            franchise_membership = conn.execute('''SELECT fg.id AS franchise_group_id,
+                                                         fg.name AS franchise_group_name,
+                                                         COALESCE(fgu.access_level, 'reports_only') AS access_level
+                                                  FROM franchise_group_users fgu
+                                                  JOIN franchise_groups fg ON fg.id=fgu.franchise_group_id
+                                                  WHERE fgu.user_id=? AND COALESCE(fg.active, 1)=1
+                                                  ORDER BY fg.name ASC LIMIT 1''', (user['id'],)).fetchone()
+            if franchise_membership:
+                session['is_franchise_reporting'] = True
+                session['franchise_group_id'] = franchise_membership['franchise_group_id']
+                session['franchise_group_name'] = franchise_membership['franchise_group_name']
+                session['franchise_access_level'] = franchise_membership['access_level'] or 'reports_only'
+            else:
+                session['is_franchise_reporting'] = False
+                session.pop('franchise_group_id', None)
+                session.pop('franchise_group_name', None)
+                session.pop('franchise_access_level', None)
+
             conn.close()
             log_action('System', 'Login', f"User {user['username']} logged in.", result='success', event_type='security', username=user['username'])
             if session.get('is_staff'):
@@ -5038,6 +5093,525 @@ def export_reports_csv(report_type):
     response.headers['Content-Disposition'] = f'attachment; filename={filename}'
     return response
 
+
+# ==========================================================
+# FRANCHISE GROUP REPORTING
+# ==========================================================
+FRANCHISE_REPORT_TYPES = {
+    'booking_summary': {'title': 'Booking Summary by Franchisee', 'group': 'Bookings'},
+    'booking_detail': {'title': 'Booking Detail Report', 'group': 'Bookings'},
+    'bookings_by_client': {'title': 'Bookings by Client', 'group': 'Bookings'},
+    'bookings_by_service': {'title': 'Bookings by Service', 'group': 'Bookings'},
+    'bookings_by_employee': {'title': 'Bookings by Employee', 'group': 'Bookings'},
+    'project_summary': {'title': 'Project Summary by Franchisee', 'group': 'Projects'},
+    'invoice_summary': {'title': 'Invoice / Revenue Summary by Franchisee', 'group': 'Invoicing'},
+    'outstanding_invoices': {'title': 'Outstanding Invoice Summary', 'group': 'Invoicing'},
+}
+
+
+def _franchise_report_groups():
+    grouped = {}
+    for key, meta in FRANCHISE_REPORT_TYPES.items():
+        grouped.setdefault(meta.get('group') or 'Reports', []).append({'key': key, 'title': meta['title']})
+    return grouped
+
+
+def _franchise_user_group_id():
+    if session.get('is_franchise_reporting') and session.get('franchise_group_id'):
+        return int(session.get('franchise_group_id'))
+    if session.get('is_superadmin'):
+        try:
+            return int(request.args.get('franchise_group_id') or request.form.get('franchise_group_id') or 0)
+        except Exception:
+            return 0
+    return 0
+
+
+def _franchise_group_row(conn, group_id=None):
+    gid = group_id or _franchise_user_group_id()
+    if not gid:
+        return None
+    return conn.execute('SELECT * FROM franchise_groups WHERE id=? AND COALESCE(active, 1)=1', (gid,)).fetchone()
+
+
+def _franchise_allowed_companies(conn, group_id=None):
+    group = _franchise_group_row(conn, group_id)
+    if not group:
+        return [], None
+    rows = conn.execute('''SELECT c.id, c.name
+                           FROM franchise_group_companies fgc
+                           JOIN companies c ON c.id=fgc.company_id
+                           WHERE fgc.franchise_group_id=?
+                           ORDER BY c.name ASC''', (group['id'],)).fetchall()
+    return [dict(r) for r in rows], dict(group)
+
+
+def _franchise_placeholders(values):
+    return ','.join(['?'] * len(values))
+
+
+def _franchise_report_parse_date(value, fallback=None):
+    value = (value or '').strip()
+    try:
+        datetime.strptime(value, '%Y-%m-%d')
+        return value
+    except Exception:
+        return fallback
+
+
+def _franchise_report_default_dates():
+    today = datetime.now().date()
+    return today.replace(day=1).strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d')
+
+
+def _franchise_report_filters(payload=None, allowed_company_ids=None):
+    payload = payload or {}
+    default_start, default_end = _franchise_report_default_dates()
+    start_date = _franchise_report_parse_date(str(payload.get('start_date') or ''), default_start)
+    end_date = _franchise_report_parse_date(str(payload.get('end_date') or ''), default_end)
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+    try:
+        requested_company_id = int(payload.get('company_id') or payload.get('franchisee_company_id') or 0)
+    except Exception:
+        requested_company_id = 0
+    allowed_company_ids = set(int(x) for x in (allowed_company_ids or []))
+    if requested_company_id and requested_company_id not in allowed_company_ids:
+        raise PermissionError('Selected franchisee is not linked to your franchise group.')
+    return {
+        'start_date': start_date,
+        'end_date': end_date,
+        'company_id': requested_company_id,
+        'service': str(payload.get('service') or '').strip(),
+        'status_filter': str(payload.get('status_filter') or '').strip(),
+        'franchise_group_id': _franchise_user_group_id()
+    }
+
+
+def _franchise_company_scope(filters, allowed_company_ids, alias='b'):
+    scoped = [int(x) for x in allowed_company_ids]
+    if filters.get('company_id'):
+        scoped = [int(filters['company_id'])]
+    if not scoped:
+        raise PermissionError('No franchisee tenants are linked to this franchise group.')
+    return f"{alias}.company_id IN ({_franchise_placeholders(scoped)})", scoped
+
+
+def _franchise_client_display(row):
+    return _report_client_name_from_fields(row)
+
+
+def _franchise_booking_rows(conn, filters, allowed_company_ids):
+    scope_sql, params = _franchise_company_scope(filters, allowed_company_ids, 'b')
+    where = [scope_sql, "substr(COALESCE(CAST(b.start AS TEXT), ''), 1, 10) BETWEEN ? AND ?"]
+    params.extend([filters['start_date'], filters['end_date']])
+    if filters.get('service'):
+        where.append("LOWER(COALESCE(b.booking_type, '')) LIKE ?")
+        params.append(f"%{filters['service'].lower()}%")
+    if filters.get('status_filter'):
+        where.append("LOWER(COALESCE(b.mobile_status, 'Scheduled')) = LOWER(?)")
+        params.append(filters['status_filter'])
+    return [dict(r) for r in conn.execute(f'''SELECT b.*, co.name AS franchisee_name,
+                                                     c.name, c.surname, c.company_name,
+                                                     p.project_name
+                                              FROM bookings b
+                                              JOIN companies co ON co.id=b.company_id
+                                              LEFT JOIN clients c ON c.id=b.client_id AND c.company_id=b.company_id
+                                              LEFT JOIN projects p ON p.id=b.project_id AND p.company_id=b.company_id
+                                              WHERE {' AND '.join(where)}
+                                              ORDER BY co.name ASC, b.start ASC, b.id ASC''', params).fetchall()]
+
+
+def _franchise_invoice_rows(conn, filters, allowed_company_ids, outstanding_only=False):
+    scope_sql, params = _franchise_company_scope(filters, allowed_company_ids, 'i')
+    where = [scope_sql, 'i.date BETWEEN ? AND ?']
+    params.extend([filters['start_date'], filters['end_date']])
+    if outstanding_only:
+        where.append("COALESCE(i.balance_remaining, COALESCE(i.amount_due_now, i.total, 0)) > 0.004")
+    if filters.get('status_filter'):
+        where.append("LOWER(COALESCE(i.status, 'Unpaid')) = LOWER(?)")
+        params.append(filters['status_filter'])
+    return [dict(r) for r in conn.execute(f'''SELECT i.*, co.name AS franchisee_name,
+                                                     p.project_name
+                                              FROM invoices i
+                                              JOIN companies co ON co.id=i.company_id
+                                              LEFT JOIN projects p ON p.id=i.project_id AND p.company_id=i.company_id
+                                              WHERE {' AND '.join(where)}
+                                              ORDER BY co.name ASC, i.date ASC, i.id ASC''', params).fetchall()]
+
+
+def _franchise_project_rows(conn, filters, allowed_company_ids):
+    scope_sql, params = _franchise_company_scope(filters, allowed_company_ids, 'p')
+    where = [scope_sql]
+    if filters.get('status_filter'):
+        where.append("LOWER(COALESCE(p.status, '')) = LOWER(?)")
+        params.append(filters['status_filter'])
+    where.append("(COALESCE(p.start_date, '')='' OR COALESCE(p.start_date, ?) <= ?)")
+    params.extend([filters['end_date'], filters['end_date']])
+    return [dict(r) for r in conn.execute(f'''SELECT p.id, p.company_id, p.client_id, p.project_name, p.project_code, p.status, p.fixed_price,
+                                                     p.start_date, p.estimated_end_date, p.actual_end_date,
+                                                     co.name AS franchisee_name,
+                                                     c.name, c.surname, c.company_name,
+                                                     (SELECT COUNT(*) FROM bookings b
+                                                      WHERE b.project_id=p.id AND b.company_id=p.company_id
+                                                        AND substr(COALESCE(CAST(b.start AS TEXT), ''), 1, 10) BETWEEN ? AND ?) AS booking_count,
+                                                     (SELECT SUM(COALESCE(pc.amount, 0)) FROM project_costs pc
+                                                      WHERE pc.project_id=p.id AND pc.company_id=p.company_id) AS additional_costs
+                                              FROM projects p
+                                              JOIN companies co ON co.id=p.company_id
+                                              LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
+                                              WHERE {' AND '.join(where)}
+                                              ORDER BY co.name ASC, p.project_name ASC''', [filters['start_date'], filters['end_date']] + params).fetchall()]
+
+
+def _build_franchise_report_payload(report_type, filters, allowed_companies, group):
+    if report_type not in FRANCHISE_REPORT_TYPES:
+        raise ValueError('Invalid franchise report type.')
+    allowed_company_ids = [int(c['id']) for c in allowed_companies]
+    conn = get_db_connection()
+    try:
+        rows = []
+        columns = []
+        bookings = []
+        if report_type in {'booking_summary', 'booking_detail', 'bookings_by_client', 'bookings_by_service', 'bookings_by_employee'}:
+            bookings = _franchise_booking_rows(conn, filters, allowed_company_ids)
+
+        if report_type == 'booking_summary':
+            grouped = {}
+            for b in bookings:
+                key = b.get('company_id')
+                g = grouped.setdefault(key, {'franchisee': b.get('franchisee_name') or '', 'bookings': 0, 'completed': 0, 'uninvoiced': 0, 'clients': set(), 'projects': set()})
+                g['bookings'] += 1
+                if (b.get('mobile_status') or 'Scheduled') == 'Completed':
+                    g['completed'] += 1
+                if not b.get('is_invoiced'):
+                    g['uninvoiced'] += 1
+                if b.get('client_id'):
+                    g['clients'].add(b.get('client_id'))
+                if b.get('project_id'):
+                    g['projects'].add(b.get('project_id'))
+            columns = ['Franchisee', 'Bookings', 'Completed', 'Uninvoiced', 'Clients', 'Projects']
+            for g in sorted(grouped.values(), key=lambda x: x['franchisee'].lower()):
+                rows.append([g['franchisee'], g['bookings'], g['completed'], g['uninvoiced'], len(g['clients']), len(g['projects'])])
+
+        elif report_type == 'booking_detail':
+            columns = ['Date', 'Franchisee', 'Client', 'Employee', 'Service', 'Project', 'Status', 'Invoiced']
+            for b in bookings:
+                rows.append([(b.get('start') or '')[:10], b.get('franchisee_name') or '', _franchise_client_display(b), b.get('employee') or '', b.get('booking_type') or '', b.get('project_name') or '', b.get('mobile_status') or 'Scheduled', 'Yes' if b.get('is_invoiced') else 'No'])
+
+        elif report_type == 'bookings_by_client':
+            grouped = {}
+            for b in bookings:
+                client = _franchise_client_display(b) or 'Unspecified Client'
+                key = (b.get('franchisee_name') or '', client)
+                g = grouped.setdefault(key, {'franchisee': key[0], 'client': client, 'count': 0, 'completed': 0})
+                g['count'] += 1
+                if (b.get('mobile_status') or 'Scheduled') == 'Completed':
+                    g['completed'] += 1
+            columns = ['Franchisee', 'Client', 'Bookings', 'Completed']
+            for g in sorted(grouped.values(), key=lambda x: (x['franchisee'].lower(), x['client'].lower())):
+                rows.append([g['franchisee'], g['client'], g['count'], g['completed']])
+
+        elif report_type == 'bookings_by_service':
+            grouped = {}
+            for b in bookings:
+                services = _report_split_list(b.get('booking_type')) or ['Unspecified Service']
+                for service in services:
+                    key = (b.get('franchisee_name') or '', service)
+                    g = grouped.setdefault(key, {'franchisee': key[0], 'service': service, 'count': 0, 'completed': 0})
+                    g['count'] += 1
+                    if (b.get('mobile_status') or 'Scheduled') == 'Completed':
+                        g['completed'] += 1
+            columns = ['Franchisee', 'Service', 'Bookings', 'Completed']
+            for g in sorted(grouped.values(), key=lambda x: (x['franchisee'].lower(), x['service'].lower())):
+                rows.append([g['franchisee'], g['service'], g['count'], g['completed']])
+
+        elif report_type == 'bookings_by_employee':
+            grouped = {}
+            for b in bookings:
+                employees = _report_split_list(b.get('employee')) or ['Unassigned']
+                for emp in employees:
+                    key = (b.get('franchisee_name') or '', emp)
+                    g = grouped.setdefault(key, {'franchisee': key[0], 'employee': emp, 'count': 0, 'completed': 0})
+                    g['count'] += 1
+                    if (b.get('mobile_status') or 'Scheduled') == 'Completed':
+                        g['completed'] += 1
+            columns = ['Franchisee', 'Employee', 'Bookings', 'Completed']
+            for g in sorted(grouped.values(), key=lambda x: (x['franchisee'].lower(), x['employee'].lower())):
+                rows.append([g['franchisee'], g['employee'], g['count'], g['completed']])
+
+        elif report_type == 'project_summary':
+            projects = _franchise_project_rows(conn, filters, allowed_company_ids)
+            columns = ['Franchisee', 'Project', 'Code', 'Client', 'Status', 'Fixed Price', 'Bookings in Period', 'Additional Costs']
+            for p in projects:
+                rows.append([p.get('franchisee_name') or '', p.get('project_name') or '', p.get('project_code') or '', _franchise_client_display(p), p.get('status') or '', _report_money(p.get('fixed_price')), int(p.get('booking_count') or 0), _report_money(p.get('additional_costs'))])
+
+        elif report_type == 'invoice_summary':
+            invoices = _franchise_invoice_rows(conn, filters, allowed_company_ids, outstanding_only=False)
+            grouped = {}
+            for inv in invoices:
+                name = inv.get('franchisee_name') or ''
+                g = grouped.setdefault(name, {'franchisee': name, 'count': 0, 'total': 0.0, 'outstanding': 0.0, 'paid': 0.0})
+                total = _report_money(inv.get('total'))
+                outstanding = _report_money(inv.get('balance_remaining') if inv.get('balance_remaining') is not None else (inv.get('amount_due_now') if inv.get('amount_due_now') is not None else inv.get('total')))
+                g['count'] += 1
+                g['total'] += total
+                g['outstanding'] += outstanding
+                g['paid'] += max(0.0, total - outstanding)
+            columns = ['Franchisee', 'Invoices', 'Total Invoiced', 'Paid/Settled', 'Outstanding']
+            for g in sorted(grouped.values(), key=lambda x: x['franchisee'].lower()):
+                rows.append([g['franchisee'], g['count'], _report_money(g['total']), _report_money(g['paid']), _report_money(g['outstanding'])])
+
+        elif report_type == 'outstanding_invoices':
+            invoices = _franchise_invoice_rows(conn, filters, allowed_company_ids, outstanding_only=True)
+            columns = ['Date', 'Franchisee', 'Client', 'Invoice No.', 'Status', 'Total', 'Outstanding', 'Project']
+            for inv in invoices:
+                outstanding = inv.get('balance_remaining') if inv.get('balance_remaining') is not None else (inv.get('amount_due_now') if inv.get('amount_due_now') is not None else inv.get('total'))
+                rows.append([inv.get('date') or '', inv.get('franchisee_name') or '', inv.get('client_name') or '', inv.get('invoice_number') or inv.get('id') or '', inv.get('status') or 'Unpaid', _report_money(inv.get('total')), _report_money(outstanding), inv.get('project_name') or ''])
+
+        summary = {
+            'row_count': len(rows),
+            'booking_count': len(bookings),
+            'franchisee_count': len(allowed_companies),
+            'selected_franchisee': filters.get('company_id') or 'all'
+        }
+        return {
+            'status': 'success',
+            'report_type': report_type,
+            'title': FRANCHISE_REPORT_TYPES[report_type]['title'],
+            'franchise_group': group or {},
+            'filters': filters,
+            'columns': columns,
+            'rows': rows,
+            'summary': summary,
+            'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M')
+        }
+    finally:
+        conn.close()
+
+
+@app.route('/franchise_reports')
+def franchise_reports_index():
+    conn = get_db_connection()
+    try:
+        group_options = []
+        selected_group_id = _franchise_user_group_id()
+        if session.get('is_superadmin'):
+            group_options = [dict(r) for r in conn.execute("SELECT id, name FROM franchise_groups WHERE COALESCE(active, 1)=1 ORDER BY name ASC").fetchall()]
+            if not selected_group_id and group_options:
+                selected_group_id = group_options[0]['id']
+        allowed_companies, group = _franchise_allowed_companies(conn, selected_group_id)
+        if not group:
+            return 'Access Denied: No active franchise group is linked to this login.', 403
+        if not allowed_companies:
+            return 'No franchisee tenants have been linked to this franchise group yet.', 403
+        start_date, end_date = _franchise_report_default_dates()
+        company_ids = [c['id'] for c in allowed_companies]
+        services = [dict(r) for r in conn.execute(f"SELECT name FROM services WHERE company_id IN ({_franchise_placeholders(company_ids)}) GROUP BY name ORDER BY name ASC", company_ids).fetchall()] if company_ids else []
+        return render_template('franchise_reports_index.html', session=session, group=group, group_options=group_options, selected_group_id=selected_group_id, report_types=FRANCHISE_REPORT_TYPES, report_groups=_franchise_report_groups(), franchisees=allowed_companies, services=services, start_date=start_date, end_date=end_date)
+    finally:
+        conn.close()
+
+
+@app.route('/api/franchise_reports/overview')
+def api_franchise_reports_overview():
+    conn = get_db_connection()
+    try:
+        group_id = _franchise_user_group_id()
+        if session.get('is_superadmin') and request.args.get('franchise_group_id'):
+            group_id = int(request.args.get('franchise_group_id') or 0)
+        allowed_companies, group = _franchise_allowed_companies(conn, group_id)
+        allowed_ids = [c['id'] for c in allowed_companies]
+        filters = _franchise_report_filters(request.args, allowed_ids)
+        if not allowed_ids:
+            return jsonify({'status': 'error', 'message': 'No franchisee tenants are linked to this franchise group.'}), 403
+        scope_sql, params = _franchise_company_scope(filters, allowed_ids, 'b')
+        booking_row = conn.execute(f"""SELECT COUNT(*) AS total,
+                                             SUM(CASE WHEN COALESCE(b.mobile_status, 'Scheduled')='Completed' THEN 1 ELSE 0 END) AS completed,
+                                             COUNT(DISTINCT b.company_id) AS franchisees
+                                      FROM bookings b
+                                      WHERE {scope_sql} AND substr(COALESCE(CAST(b.start AS TEXT), ''), 1, 10) BETWEEN ? AND ?""", params + [filters['start_date'], filters['end_date']]).fetchone()
+        invoice_scope, invoice_params = _franchise_company_scope(filters, allowed_ids, 'i')
+        invoice_row = conn.execute(f"""SELECT COUNT(*) AS invoice_count,
+                                             SUM(COALESCE(i.total, 0)) AS invoice_total,
+                                             SUM(COALESCE(i.balance_remaining, COALESCE(i.amount_due_now, i.total), 0)) AS outstanding
+                                      FROM invoices i
+                                      WHERE {invoice_scope} AND i.date BETWEEN ? AND ?""", invoice_params + [filters['start_date'], filters['end_date']]).fetchone()
+        project_scope, project_params = _franchise_company_scope(filters, allowed_ids, 'p')
+        project_row = conn.execute(f"""SELECT COUNT(*) AS project_count,
+                                             SUM(COALESCE(p.fixed_price, 0)) AS fixed_value
+                                      FROM projects p WHERE {project_scope}""", project_params).fetchone()
+        booking_data = dict(booking_row) if booking_row else {}
+        invoice_data = dict(invoice_row) if invoice_row else {}
+        project_data = dict(project_row) if project_row else {}
+        metrics = {
+            'linked_franchisees': len(allowed_ids),
+            'bookings': int(booking_data.get('total') or 0),
+            'completed_bookings': int(booking_data.get('completed') or 0),
+            'invoice_count': int(invoice_data.get('invoice_count') or 0),
+            'invoice_total': _report_money(invoice_data.get('invoice_total')),
+            'outstanding_balance': _report_money(invoice_data.get('outstanding')),
+            'project_count': int(project_data.get('project_count') or 0),
+            'project_fixed_value': _report_money(project_data.get('fixed_value')),
+        }
+        return jsonify({'status': 'success', 'metrics': metrics, 'filters': filters, 'franchise_group': group})
+    except PermissionError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 403
+    finally:
+        conn.close()
+
+
+@app.route('/api/franchise_reports/run', methods=['POST'])
+def api_franchise_reports_run():
+    data = request.get_json(silent=True) or {}
+    report_type = (data.get('report_type') or 'booking_summary').strip()
+    conn = get_db_connection()
+    try:
+        group_id = int(data.get('franchise_group_id') or _franchise_user_group_id() or 0) if session.get('is_superadmin') else _franchise_user_group_id()
+        allowed_companies, group = _franchise_allowed_companies(conn, group_id)
+        allowed_ids = [c['id'] for c in allowed_companies]
+        filters = _franchise_report_filters(data, allowed_ids)
+        if session.get('is_superadmin'):
+            filters['franchise_group_id'] = group_id
+        payload = _build_franchise_report_payload(report_type, filters, allowed_companies, group)
+        log_action('Franchise Reports', 'Run Report', f"Ran {payload['title']} for franchise group {group.get('name') if group else ''}.")
+        return jsonify(payload)
+    except PermissionError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': f'Franchise report could not be generated: {exc}'}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/export/franchise_reports/<report_type>.csv')
+def export_franchise_reports_csv(report_type):
+    conn = get_db_connection()
+    try:
+        group_id = int(request.args.get('franchise_group_id') or _franchise_user_group_id() or 0) if session.get('is_superadmin') else _franchise_user_group_id()
+        allowed_companies, group = _franchise_allowed_companies(conn, group_id)
+        allowed_ids = [c['id'] for c in allowed_companies]
+        filters = _franchise_report_filters(request.args, allowed_ids)
+        if session.get('is_superadmin'):
+            filters['franchise_group_id'] = group_id
+        payload = _build_franchise_report_payload((report_type or '').strip(), filters, allowed_companies, group)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([payload['title']])
+        writer.writerow(['Franchise Group', (group or {}).get('name') or ''])
+        writer.writerow(['Period', f"{filters['start_date']} to {filters['end_date']}"])
+        writer.writerow(['Generated', payload['generated_at']])
+        writer.writerow([])
+        writer.writerow(payload['columns'])
+        for row in payload['rows']:
+            writer.writerow(row)
+        filename = f"Easy_Admin_Franchise_{report_type}_{filters['start_date']}_to_{filters['end_date']}.csv"
+        log_action('Franchise Reports', 'Export Report', f"Exported {payload['title']} for franchise group {(group or {}).get('name') or ''}.")
+        response = Response(output.getvalue(), mimetype='text/csv')
+        response.headers['Content-Disposition'] = f'attachment; filename={filename}'
+        return response
+    except PermissionError as exc:
+        return str(exc), 403
+    except ValueError as exc:
+        return str(exc), 400
+    finally:
+        conn.close()
+
+
+@app.route('/admin/franchise_groups', methods=['GET'])
+def admin_franchise_groups():
+    if not session.get('is_superadmin'):
+        return jsonify({'status': 'error', 'message': 'Super Admin access required.'}), 403
+    conn = get_db_connection()
+    try:
+        groups = [dict(r) for r in conn.execute('SELECT * FROM franchise_groups ORDER BY COALESCE(active, 1) DESC, name ASC').fetchall()]
+        companies = [dict(r) for r in conn.execute('SELECT id, name FROM companies ORDER BY name ASC').fetchall()]
+        users = [dict(r) for r in conn.execute('''SELECT u.id, u.username, u.email, u.company_id, c.name AS company_name
+                                                  FROM users u
+                                                  LEFT JOIN companies c ON c.id=u.company_id
+                                                  WHERE COALESCE(u.is_staff, 0)=0
+                                                  ORDER BY u.username ASC''').fetchall()]
+        company_links = [dict(r) for r in conn.execute('SELECT franchise_group_id, company_id FROM franchise_group_companies').fetchall()]
+        user_links = [dict(r) for r in conn.execute('SELECT franchise_group_id, user_id, access_level FROM franchise_group_users').fetchall()]
+        return jsonify({'status': 'success', 'groups': groups, 'companies': companies, 'users': users, 'company_links': company_links, 'user_links': user_links})
+    finally:
+        conn.close()
+
+
+@app.route('/admin/franchise_groups/save', methods=['POST'])
+def admin_franchise_groups_save():
+    if not session.get('is_superadmin'):
+        return jsonify({'status': 'error', 'message': 'Super Admin access required.'}), 403
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'status': 'error', 'message': 'Franchise group name is required.'}), 400
+    description = (data.get('description') or '').strip()
+    active = 1 if data.get('active', True) else 0
+    try:
+        group_id = int(data.get('id') or 0)
+    except Exception:
+        group_id = 0
+    company_ids = []
+    user_ids = []
+    for raw in data.get('company_ids') or []:
+        try:
+            cid = int(raw)
+            if cid not in company_ids:
+                company_ids.append(cid)
+        except Exception:
+            pass
+    for raw in data.get('user_ids') or []:
+        try:
+            uid = int(raw)
+            if uid not in user_ids:
+                user_ids.append(uid)
+        except Exception:
+            pass
+    conn = get_db_connection()
+    try:
+        if group_id:
+            conn.execute('UPDATE franchise_groups SET name=?, description=?, active=? WHERE id=?', (name, description, active, group_id))
+        else:
+            cur = conn.execute('INSERT INTO franchise_groups (name, description, active) VALUES (?, ?, ?)', (name, description, active))
+            group_id = cur.lastrowid
+        conn.execute('DELETE FROM franchise_group_companies WHERE franchise_group_id=?', (group_id,))
+        for cid in company_ids:
+            conn.execute('INSERT OR IGNORE INTO franchise_group_companies (franchise_group_id, company_id) VALUES (?, ?)', (group_id, cid))
+        conn.execute('DELETE FROM franchise_group_users WHERE franchise_group_id=?', (group_id,))
+        for uid in user_ids:
+            conn.execute('INSERT OR IGNORE INTO franchise_group_users (franchise_group_id, user_id, access_level) VALUES (?, ?, ?)', (group_id, uid, 'reports_only'))
+        conn.commit()
+        log_action('Franchise Admin', 'Save Franchise Group', f"Saved franchise group {name} with {len(company_ids)} franchisees and {len(user_ids)} reporting users.")
+        return jsonify({'status': 'success', 'group_id': group_id})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': f'Franchise group could not be saved: {exc}'}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/admin/franchise_groups/delete', methods=['POST'])
+def admin_franchise_groups_delete():
+    if not session.get('is_superadmin'):
+        return jsonify({'status': 'error', 'message': 'Super Admin access required.'}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        group_id = int(data.get('id') or 0)
+    except Exception:
+        group_id = 0
+    if not group_id:
+        return jsonify({'status': 'error', 'message': 'Franchise group ID is required.'}), 400
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT name FROM franchise_groups WHERE id=?', (group_id,)).fetchone()
+        conn.execute('UPDATE franchise_groups SET active=0 WHERE id=?', (group_id,))
+        conn.commit()
+        log_action('Franchise Admin', 'Deactivate Franchise Group', f"Deactivated franchise group {dict(row).get('name') if row else group_id}.")
+        return jsonify({'status': 'success'})
+    finally:
+        conn.close()
 
 # ==========================================================
 # STAFF PORTAL ROUTES
