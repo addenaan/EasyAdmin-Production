@@ -502,11 +502,10 @@
                             </select>
                         </div>
                         <div class="col-md-4" id="projectInvoiceSelectWrap" style="display:none;">
-                            <label class="small fw-bold text-muted">Select Project</label>
-                            <select id="invProjectSelect" class="form-select border-dark" onchange="populateProjectInvoiceLine()">
-                                <option value="">-- Choose Project --</option>
+                            <label class="small fw-bold text-muted">Select Project(s)</label>
+                            <select id="invProjectSelect" class="form-select border-dark" multiple size="5" onchange="populateProjectInvoiceLines()">
                             </select>
-                            <small class="text-muted">The project fixed price will populate the invoice line.</small>
+                            <small class="text-muted">Hold Ctrl/Cmd to select multiple projects. Each selected project becomes its own editable invoice line.</small>
                         </div>
                         <div class="col-md-4">
                             <label class="small fw-bold text-muted">Issue Date</label>
@@ -552,7 +551,7 @@
                     </div>
 
                     <div id="projectInvoiceNotice" class="alert alert-dark small" style="display:none;">
-                        Select a project above. The fixed project price will populate as an editable invoice line. You can also add extra project costs or select services from the service list before generating the invoice.
+                        Select one or more projects for the chosen client. Each selected project fixed price will populate as a separate editable invoice line. You can also add extra project costs or select services from the service list before generating the invoice.
                     </div>
 
                     <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-2">
@@ -1310,7 +1309,7 @@
         function openCreateInvoiceModal() {
             document.getElementById('invInvoiceType').value = 'standard';
             document.getElementById('invClientSelect').value = '';
-            document.getElementById('invProjectSelect').innerHTML = '<option value="">-- Choose Project --</option>';
+            document.getElementById('invProjectSelect').innerHTML = '';
             document.getElementById('uninvoicedBody').innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">Select a client above to view un-invoiced bookings.</td></tr>';
             document.getElementById('invCustomRows').innerHTML = '';
             document.getElementById('invApplyVat').checked = false;
@@ -1325,7 +1324,7 @@
             setInvoiceDiscountFromClient();
             if(document.getElementById('invInvoiceType').value === 'project') {
                 populateProjectOptionsForClient();
-                populateProjectInvoiceLine();
+                populateProjectInvoiceLines();
             } else {
                 fetchUninvoicedBookings();
             }
@@ -1344,7 +1343,7 @@
             if(isProject) {
                 document.getElementById('uninvoicedBody').innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">Project invoice selected.</td></tr>';
                 populateProjectOptionsForClient();
-                populateProjectInvoiceLine();
+                populateProjectInvoiceLines();
             } else {
                 document.getElementById('invProjectSelect').value = '';
                 fetchUninvoicedBookings();
@@ -1352,43 +1351,72 @@
             calculateInvTotals();
         }
 
+        function getSelectedInvoiceProjectIds() {
+            const select = document.getElementById('invProjectSelect');
+            return Array.from(select.selectedOptions || []).map(opt => String(opt.value || '')).filter(Boolean);
+        }
+
         function populateProjectOptionsForClient() {
             const client = document.getElementById('invClientSelect').value;
             const select = document.getElementById('invProjectSelect');
-            const currentValue = select.value;
-            select.innerHTML = '<option value="">-- Choose Project --</option>';
-            (invoiceProjects || []).filter(p => !client || String(p.client_id || p.linked_client_id || '') === String(client)).forEach(p => {
-                const opt = document.createElement('option');
-                opt.value = p.id;
-                const code = p.project_code ? ` (${p.project_code})` : '';
-                opt.textContent = `${p.project_name}${code} - ${money(p.fixed_price || 0)}`;
-                opt.dataset.clientId = String(p.client_id || p.linked_client_id || '');
-                select.appendChild(opt);
-            });
-            if(currentValue && Array.from(select.options).some(o => o.value === currentValue)) select.value = currentValue;
+            const selectedValues = new Set(getSelectedInvoiceProjectIds());
+            select.innerHTML = '';
+            (invoiceProjects || [])
+                .filter(p => !client || String(p.client_id || p.linked_client_id || '') === String(client))
+                .forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p.id;
+                    const code = p.project_code ? ` (${p.project_code})` : '';
+                    const status = p.status ? ` - ${p.status}` : '';
+                    opt.textContent = `${p.project_name}${code} - ${money(p.fixed_price || 0)}${status}`;
+                    opt.dataset.clientId = String(p.client_id || p.linked_client_id || '');
+                    if(selectedValues.has(String(p.id))) opt.selected = true;
+                    select.appendChild(opt);
+                });
         }
 
-        function populateProjectInvoiceLine() {
+        function populateProjectInvoiceLines() {
             if(document.getElementById('invInvoiceType').value !== 'project') return;
-            const projectId = document.getElementById('invProjectSelect').value;
+            const selectedProjectIds = getSelectedInvoiceProjectIds();
             document.getElementById('invCustomRows').innerHTML = '';
-            const project = invoiceProjectMap[String(projectId)];
-            if(!project) { calculateInvTotals(); return; }
-            if(project.client_id || project.linked_client_id) document.getElementById('invClientSelect').value = String(project.client_id || project.linked_client_id || '');
+            if(!selectedProjectIds.length) { calculateInvTotals(); return; }
+
+            const selectedProjects = selectedProjectIds.map(id => invoiceProjectMap[String(id)]).filter(Boolean);
+            const clientIds = Array.from(new Set(selectedProjects.map(p => String(p.client_id || p.linked_client_id || '')).filter(Boolean)));
+            const clientSelect = document.getElementById('invClientSelect');
+            if(!clientSelect.value && clientIds.length === 1) {
+                clientSelect.value = clientIds[0];
+                setInvoiceDiscountFromClient();
+                populateProjectOptionsForClient();
+                selectedProjectIds.forEach(id => {
+                    const opt = Array.from(document.getElementById('invProjectSelect').options).find(o => String(o.value) === String(id));
+                    if(opt) opt.selected = true;
+                });
+            }
+            if(clientIds.length > 1) {
+                alert('Please select projects for one client only. One invoice cannot combine projects from different clients.');
+                calculateInvTotals();
+                return;
+            }
             setInvoiceDiscountFromClient();
-            const div = document.createElement('div');
-            div.className = 'd-flex mb-2 gap-2 custom-inv-row project-inv-row';
+
             const today = document.getElementById('invDate').value || new Date().toISOString().split('T')[0];
-            const code = project.project_code ? ` (${project.project_code})` : '';
-            div.innerHTML = `
-                <input type="date" class="form-control form-control-sm date-input" style="width: 140px;" value="${project.start_date || today}">
-                <input type="text" class="form-control form-control-sm desc-input" value="Project: ${escapeAttr((project.project_name || 'Project') + code)}" placeholder="Project invoice description...">
-                <input type="number" class="form-control form-control-sm qty-input text-end" style="width: 80px;" min="0.01" step="0.01" value="1" readonly oninput="clearManualLineTotal(this); calculateInvTotals()">
-                <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" value="${(parseFloat(project.fixed_price || 0)).toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()">
-                <input type="number" class="form-control form-control-sm line-total-display text-end" style="width: 120px;" min="0" step="0.01" value="${(parseFloat(project.fixed_price || 0)).toFixed(2)}" oninput="setManualInvoiceLineTotal(this)" title="Line Total">
-                <span class="badge bg-dark d-flex align-items-center">Fixed Project Price</span>
-            `;
-            document.getElementById('invCustomRows').appendChild(div);
+            selectedProjects.forEach(project => {
+                const div = document.createElement('div');
+                div.className = 'd-flex mb-2 gap-2 custom-inv-row project-inv-row';
+                div.dataset.projectId = String(project.id || '');
+                const code = project.project_code ? ` (${project.project_code})` : '';
+                const fixedPrice = parseFloat(project.fixed_price || 0) || 0;
+                div.innerHTML = `
+                    <input type="date" class="form-control form-control-sm date-input" style="width: 140px;" value="${project.start_date || today}">
+                    <input type="text" class="form-control form-control-sm desc-input" value="Project: ${escapeAttr((project.project_name || 'Project') + code)}" placeholder="Project invoice description...">
+                    <input type="number" class="form-control form-control-sm qty-input text-end" style="width: 80px;" min="0.01" step="0.01" value="1" readonly oninput="clearManualLineTotal(this); calculateInvTotals()">
+                    <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" value="${fixedPrice.toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()">
+                    <input type="number" class="form-control form-control-sm line-total-display text-end" style="width: 120px;" min="0" step="0.01" value="${fixedPrice.toFixed(2)}" oninput="setManualInvoiceLineTotal(this)" title="Line Total">
+                    <span class="badge bg-dark d-flex align-items-center">Project Fixed Price</span>
+                `;
+                document.getElementById('invCustomRows').appendChild(div);
+            });
             calculateInvTotals();
         }
 
@@ -1605,8 +1633,9 @@
             const totals = calculateInvTotals();
             if(totals.total === 0) return alert("Invoice total cannot be zero.");
             const invoiceType = document.getElementById('invInvoiceType').value;
-            const projectId = document.getElementById('invProjectSelect').value;
-            if(invoiceType === 'project' && !projectId) return alert('Select a project to invoice.');
+            const projectIds = getSelectedInvoiceProjectIds();
+            const projectId = projectIds.length ? projectIds[0] : '';
+            if(invoiceType === 'project' && !projectIds.length) return alert('Select at least one project to invoice.');
 
             const items = [];
             const selectedBookingIds = getSelectedInvoiceBookingIds();
@@ -1630,7 +1659,7 @@
                 const desc = row.querySelector('.desc-input').value;
                 const lineValues = getInvoiceLineValues(row, '.qty-input', '.price-input');
                 const amt = lineValues.amount;
-                if(desc && amt > 0) items.push({ service_date: dateVal, description: desc, quantity: lineValues.quantity, unit_price: lineValues.unitPrice, amount: amt });
+                if(desc && amt > 0) items.push({ service_date: dateVal, description: desc, quantity: lineValues.quantity, unit_price: lineValues.unitPrice, amount: amt, project_id: row.dataset.projectId || null });
             });
 
             const data = {
@@ -1648,6 +1677,7 @@
                 apply_vat: document.getElementById('invApplyVat').checked,
                 invoice_type: invoiceType,
                 project_id: invoiceType === 'project' ? projectId : null,
+                project_ids: invoiceType === 'project' ? projectIds : [],
                 items: items
             };
 

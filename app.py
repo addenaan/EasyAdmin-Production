@@ -1360,9 +1360,30 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE invoice_items ADD COLUMN unit_price REAL')
     except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE invoice_items ADD COLUMN project_id INTEGER')
+    except sqlite3.OperationalError: pass
     try: conn.execute('UPDATE invoice_items SET quantity=1 WHERE quantity IS NULL OR quantity<=0')
     except sqlite3.OperationalError: pass
     try: conn.execute('UPDATE invoice_items SET unit_price=amount WHERE unit_price IS NULL')
+    except sqlite3.OperationalError: pass
+    conn.execute('''CREATE TABLE IF NOT EXISTS invoice_projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER,
+        invoice_id INTEGER,
+        project_id INTEGER,
+        amount REAL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(company_id, invoice_id, project_id)
+    )''')
+    for c_name, c_type in [
+        ('company_id', 'INTEGER'), ('invoice_id', 'INTEGER'), ('project_id', 'INTEGER'),
+        ('amount', 'REAL DEFAULT 0'), ('created_at', 'DATETIME DEFAULT CURRENT_TIMESTAMP')
+    ]:
+        try: conn.execute(f'ALTER TABLE invoice_projects ADD COLUMN {c_name} {c_type}')
+        except sqlite3.OperationalError: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_projects_invoice ON invoice_projects(company_id, invoice_id)')
+    except sqlite3.OperationalError: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_projects_project ON invoice_projects(company_id, project_id)')
     except sqlite3.OperationalError: pass
     conn.execute('''CREATE TABLE IF NOT EXISTS invoice_payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2341,8 +2362,14 @@ def normalise_billing_item(item):
     else:
         unit_price = sanitize_money(item.get('unit_price'), 0)
         amount = round(quantity * unit_price, 2)
+    project_id = None
+    try:
+        project_id = int(item.get('project_id') or 0) or None
+    except Exception:
+        project_id = None
     return {
         'booking_id': item.get('booking_id'),
+        'project_id': project_id,
         'service_date': item.get('service_date'),
         'description': item.get('description') or '',
         'quantity': quantity,
@@ -12836,11 +12863,10 @@ def invoicing_index():
             d['formatted_num'] = f"{inv_prefix}{int(inv_start) + d['id'] - 1:04d}"
         except:
             d['formatted_num'] = f"{inv_prefix}{d['id']:04d}"
-        project = None
-        if d.get('project_id'):
-            project = conn.execute('SELECT project_name, project_code FROM projects WHERE id=? AND company_id=?', (d.get('project_id'), cid)).fetchone()
-        d['project_name'] = project['project_name'] if project else ''
-        d['project_code'] = project['project_code'] if project else ''
+        project_summary = get_invoice_project_summary(conn, cid, d['id'], d.get('project_id'))
+        d['project_name'] = project_summary['project_name']
+        d['project_code'] = project_summary['project_code']
+        d['project_count'] = project_summary['project_count']
         payments = [dict(p) for p in conn.execute(
             "SELECT id, payment_date, amount, payment_method, reference FROM invoice_payments WHERE company_id=? AND invoice_id=? ORDER BY payment_date ASC, id ASC",
             (cid, d['id'])
@@ -12966,6 +12992,65 @@ def get_uninvoiced():
     conn.close()
     return jsonify(res)
 
+
+def get_invoice_project_summary(conn, company_id, invoice_id, fallback_project_id=None):
+    """Return linked project names/codes for an invoice, including legacy single-project invoices."""
+    rows = []
+    try:
+        rows = conn.execute('''SELECT p.id, p.project_name, p.project_code
+                               FROM invoice_projects ip
+                               JOIN projects p ON p.id=ip.project_id AND p.company_id=ip.company_id
+                               WHERE ip.company_id=? AND ip.invoice_id=?
+                               ORDER BY p.start_date ASC, p.project_name ASC''', (company_id, invoice_id)).fetchall()
+    except Exception:
+        rows = []
+    if not rows and fallback_project_id:
+        try:
+            row = conn.execute('SELECT id, project_name, project_code FROM projects WHERE id=? AND company_id=?', (fallback_project_id, company_id)).fetchone()
+            if row:
+                rows = [row]
+        except Exception:
+            rows = []
+    labels = []
+    codes = []
+    ids = []
+    for row in rows:
+        d = dict(row)
+        ids.append(d.get('id'))
+        name = d.get('project_name') or 'Project'
+        code = d.get('project_code') or ''
+        labels.append(f"{name} ({code})" if code else name)
+        if code:
+            codes.append(code)
+    return {
+        'project_ids': ids,
+        'project_name': ', '.join(labels),
+        'project_code': ', '.join(codes),
+        'project_count': len(labels)
+    }
+
+
+def parse_project_id_list_from_invoice_payload(data):
+    raw_ids = data.get('project_ids') if isinstance(data, dict) else None
+    if raw_ids is None:
+        raw_ids = []
+    if not isinstance(raw_ids, list):
+        raw_ids = [raw_ids]
+    if data.get('project_id') not in (None, ''):
+        raw_ids.insert(0, data.get('project_id'))
+    seen = set()
+    project_ids = []
+    for raw in raw_ids:
+        try:
+            pid = int(raw or 0)
+        except Exception:
+            pid = 0
+        if pid and pid not in seen:
+            seen.add(pid)
+            project_ids.append(pid)
+    return project_ids
+
+
 @app.route('/api/save_invoice', methods=['POST'])
 def save_invoice():
     data = request.json
@@ -12979,42 +13064,63 @@ def save_invoice():
     # The client profile discount is only a default that pre-populates the form;
     # users may override it for this individual invoice.
     if invoice_type == 'project':
+        project_ids = parse_project_id_list_from_invoice_payload(data)
+        if not project_ids:
+            conn.close()
+            return jsonify({"status": "error", "message": "Select at least one project to invoice."}), 400
+        project_id = project_ids[0]
+        placeholders = ','.join(['?'] * len(project_ids))
+        projects = conn.execute(f'''SELECT p.*, c.id AS linked_client_id, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
+                                   FROM projects p
+                                   LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
+                                   WHERE p.id IN ({placeholders}) AND p.company_id=?
+                                   ORDER BY p.start_date ASC, p.project_name ASC''', project_ids + [cid]).fetchall()
+        if len(projects) != len(project_ids):
+            conn.close()
+            return jsonify({"status": "error", "message": "One or more selected projects could not be found for this company."}), 400
+        for project in projects:
+            if (project['status'] or '').lower() == 'cancelled':
+                conn.close()
+                return jsonify({"status": "error", "message": f"Cancelled projects cannot be invoiced: {project['project_name'] or 'Project'}."}), 400
+            if not project['linked_client_id']:
+                conn.close()
+                return jsonify({"status": "error", "message": f"Project is not linked to a valid client: {project['project_name'] or 'Project'}."}), 400
+        project_client_ids = {int(p['linked_client_id']) for p in projects if p['linked_client_id']}
+        if len(project_client_ids) != 1:
+            conn.close()
+            return jsonify({"status": "error", "message": "One invoice can only include projects for the same client."}), 400
+        project_client_id = next(iter(project_client_ids))
+        submitted_client_id = None
         try:
-            project_id = int(data.get('project_id') or 0)
+            submitted_client_id = int(data.get('client_id') or 0) or None
         except Exception:
-            project_id = 0
-        project = conn.execute('''SELECT p.*, c.id AS linked_client_id, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
-                                  FROM projects p
-                                  LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
-                                  WHERE p.id=? AND p.company_id=?''', (project_id, cid)).fetchone()
-        if not project:
+            submitted_client_id = None
+        if submitted_client_id and submitted_client_id != project_client_id:
             conn.close()
-            return jsonify({"status": "error", "message": "Project not found for this company."}), 400
-        if (project['status'] or '').lower() == 'cancelled':
-            conn.close()
-            return jsonify({"status": "error", "message": "Cancelled projects cannot be invoiced."}), 400
-        if not project['linked_client_id']:
-            conn.close()
-            return jsonify({"status": "error", "message": "This project is not linked to a valid client."}), 400
-        project_client = get_client_by_id(conn, cid, project['linked_client_id'])
+            return jsonify({"status": "error", "message": "Selected projects do not belong to the selected client."}), 400
+        project_client = get_client_by_id(conn, cid, project_client_id)
         client_id = project_client['id']
         client_name = client_display_name(project_client)
-        project_label = project['project_name'] or 'Project'
-        if project['project_code']:
-            project_label = f"{project_label} ({project['project_code']})"
-        project_fixed_price = float(project['fixed_price'] or 0)
+        project_lookup = {int(p['id']): p for p in projects}
         submitted_items = data.get('items') or []
         if submitted_items:
             items = submitted_items
         else:
-            items = [{
-                'booking_id': None,
-                'service_date': project['start_date'] or data.get('date'),
-                'description': f"Project: {project_label}",
-                'quantity': 1,
-                'unit_price': project_fixed_price,
-                'amount': project_fixed_price
-            }]
+            items = []
+            for project in projects:
+                project_label = project['project_name'] or 'Project'
+                if project['project_code']:
+                    project_label = f"{project_label} ({project['project_code']})"
+                project_fixed_price = float(project['fixed_price'] or 0)
+                items.append({
+                    'booking_id': None,
+                    'project_id': project['id'],
+                    'service_date': project['start_date'] or data.get('date'),
+                    'description': f"Project: {project_label}",
+                    'quantity': 1,
+                    'unit_price': project_fixed_price,
+                    'amount': project_fixed_price
+                })
     else:
         try:
             client = resolve_client_from_payload(conn, cid, data, id_key='client_id', name_key='client_name')
@@ -13041,15 +13147,27 @@ def save_invoice():
                    (cid, client_id, client_name, data['date'], data['due_date'], original_subtotal, vat_amount, total, 'Unpaid', discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id))
     inv_id = cursor.lastrowid
     
+    project_line_amounts = {}
     for item in items:
-        cursor.execute("INSERT INTO invoice_items (invoice_id, booking_id, service_date, description, quantity, unit_price, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                       (inv_id, item.get('booking_id'), item.get('service_date'), item['description'], item.get('quantity', 1), item.get('unit_price', item['amount']), item['amount']))
-        
+        item_project_id = item.get('project_id')
+        cursor.execute("INSERT INTO invoice_items (invoice_id, booking_id, project_id, service_date, description, quantity, unit_price, amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (inv_id, item.get('booking_id'), item_project_id, item.get('service_date'), item['description'], item.get('quantity', 1), item.get('unit_price', item['amount']), item['amount']))
+        if item_project_id:
+            project_line_amounts[item_project_id] = project_line_amounts.get(item_project_id, 0.0) + float(item.get('amount') or 0)
         if item.get('booking_id'):
             cursor.execute("UPDATE bookings SET is_invoiced=1 WHERE id=? AND company_id=?", (item['booking_id'], cid))
 
     if invoice_type == 'project' and project_id:
-        cursor.execute("UPDATE projects SET status='Invoiced', updated_at=CURRENT_TIMESTAMP WHERE id=? AND company_id=?", (project_id, cid))
+        for linked_project_id in project_ids:
+            linked_amount = project_line_amounts.get(linked_project_id)
+            if linked_amount is None:
+                linked_project = project_lookup.get(linked_project_id) if 'project_lookup' in locals() else None
+                linked_amount = float(linked_project['fixed_price'] or 0) if linked_project else 0.0
+            cursor.execute("INSERT OR IGNORE INTO invoice_projects (company_id, invoice_id, project_id, amount) VALUES (?, ?, ?, ?)",
+                           (cid, inv_id, linked_project_id, linked_amount))
+            cursor.execute("UPDATE invoice_projects SET amount=? WHERE company_id=? AND invoice_id=? AND project_id=?",
+                           (linked_amount, cid, inv_id, linked_project_id))
+            cursor.execute("UPDATE projects SET status='Invoiced', updated_at=CURRENT_TIMESTAMP WHERE id=? AND company_id=?", (linked_project_id, cid))
 
     accounting_result = _auto_post_invoice_to_accounting_if_enabled(conn, cid, inv_id)
 
@@ -13101,11 +13219,11 @@ def get_invoice(inv_id):
         if 'email' in client_dict and client_dict['email']:
             client_email = client_dict['email']
 
-    project = None
-    if d.get('project_id'):
-        project = conn.execute('SELECT * FROM projects WHERE id=? AND company_id=?', (d.get('project_id'), cid)).fetchone()
-    d['project_name'] = project['project_name'] if project else ''
-    d['project_code'] = project['project_code'] if project else ''
+    project_summary = get_invoice_project_summary(conn, cid, inv_id, d.get('project_id'))
+    d['project_name'] = project_summary['project_name']
+    d['project_code'] = project_summary['project_code']
+    d['project_count'] = project_summary['project_count']
+    d['project_ids'] = project_summary['project_ids']
     d['invoice_type'] = d.get('invoice_type') or 'standard'
 
     totals = get_invoice_financial_totals(conn, cid, inv_id)
