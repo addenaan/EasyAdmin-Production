@@ -1154,6 +1154,8 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE companies ADD COLUMN can_accounting INTEGER DEFAULT 0')
     except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE companies ADD COLUMN can_franchise_reports INTEGER DEFAULT 0')
+    except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE companies ADD COLUMN google_calendar_sync INTEGER DEFAULT 0')
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE companies ADD COLUMN address TEXT')
@@ -3297,7 +3299,8 @@ def _session_has_franchise_reports_access():
     return bool(
         session.get('is_superadmin')
         or (
-            session.get('can_franchise_reports')
+            session.get('comp_can_franchise_reports')
+            and session.get('can_franchise_reports')
             and session.get('is_franchise_reporting')
             and session.get('franchise_group_id')
         )
@@ -3777,6 +3780,7 @@ def login():
             session['comp_can_payroll'] = bool(dict(comp).get('can_payroll', 0)) if comp else False
             session['comp_can_invoicing'] = bool(dict(comp).get('can_invoicing', 0)) if comp else False
             session['comp_can_accounting'] = bool(dict(comp).get('can_accounting', 0)) if comp else False
+            session['comp_can_franchise_reports'] = bool(dict(comp).get('can_franchise_reports', 0)) if comp else False
             session['comp_google_calendar'] = bool(dict(comp).get('google_calendar_sync', 0)) if comp else False
 
             franchise_membership = conn.execute('''SELECT fg.id AS franchise_group_id,
@@ -3786,7 +3790,7 @@ def login():
                                                   JOIN franchise_groups fg ON fg.id=fgu.franchise_group_id
                                                   WHERE fgu.user_id=? AND COALESCE(fg.active, 1)=1
                                                   ORDER BY fg.name ASC LIMIT 1''', (user['id'],)).fetchone()
-            if franchise_membership and session.get('can_franchise_reports'):
+            if franchise_membership and session.get('can_franchise_reports') and session.get('comp_can_franchise_reports'):
                 session['is_franchise_reporting'] = True
                 session['franchise_group_id'] = franchise_membership['franchise_group_id']
                 session['franchise_group_name'] = franchise_membership['franchise_group_name']
@@ -5802,11 +5806,13 @@ def admin_franchise_groups():
     try:
         groups = [dict(r) for r in conn.execute('SELECT * FROM franchise_groups ORDER BY COALESCE(active, 1) DESC, name ASC').fetchall()]
         companies = [dict(r) for r in conn.execute('SELECT id, name FROM companies ORDER BY name ASC').fetchall()]
-        users = [dict(r) for r in conn.execute('''SELECT u.id, u.username, u.email, u.company_id, c.name AS company_name, COALESCE(u.can_franchise_reports, 0) AS can_franchise_reports
+        users = [dict(r) for r in conn.execute('''SELECT u.id, u.username, u.email, u.company_id, c.name AS company_name,
+                                                         COALESCE(u.can_franchise_reports, 0) AS can_franchise_reports,
+                                                         COALESCE(c.can_franchise_reports, 0) AS company_can_franchise_reports
                                                   FROM users u
                                                   LEFT JOIN companies c ON c.id=u.company_id
                                                   WHERE COALESCE(u.is_staff, 0)=0
-                                                  ORDER BY COALESCE(u.can_franchise_reports, 0) DESC, u.username ASC''').fetchall()]
+                                                  ORDER BY COALESCE(c.can_franchise_reports, 0) DESC, COALESCE(u.can_franchise_reports, 0) DESC, u.username ASC''').fetchall()]
         company_links = [dict(r) for r in conn.execute('SELECT franchise_group_id, company_id FROM franchise_group_companies').fetchall()]
         user_links = [dict(r) for r in conn.execute('SELECT franchise_group_id, user_id, access_level FROM franchise_group_users').fetchall()]
         return jsonify({'status': 'success', 'groups': groups, 'companies': companies, 'users': users, 'company_links': company_links, 'user_links': user_links})
@@ -5848,14 +5854,16 @@ def admin_franchise_groups_save():
     try:
         if user_ids:
             placeholders = _franchise_placeholders(user_ids)
-            eligible_rows = conn.execute(f'''SELECT id FROM users
-                                             WHERE id IN ({placeholders})
-                                               AND COALESCE(is_staff, 0)=0
-                                               AND COALESCE(can_franchise_reports, 0)=1''', user_ids).fetchall()
+            eligible_rows = conn.execute(f'''SELECT u.id FROM users u
+                                             JOIN companies c ON c.id=u.company_id
+                                             WHERE u.id IN ({placeholders})
+                                               AND COALESCE(u.is_staff, 0)=0
+                                               AND COALESCE(u.can_franchise_reports, 0)=1
+                                               AND COALESCE(c.can_franchise_reports, 0)=1''', user_ids).fetchall()
             eligible_user_ids = {int(dict(r).get('id')) for r in eligible_rows}
             blocked_user_ids = [uid for uid in user_ids if uid not in eligible_user_ids]
             if blocked_user_ids:
-                return jsonify({'status': 'error', 'message': 'Every franchisor reporting user must first be granted Franchise Reports app access under Accounts.'}), 400
+                return jsonify({'status': 'error', 'message': 'Every franchisor reporting user must first be assigned to a company with Franchise Reports activated and then granted Franchise Reports app access under Accounts.'}), 400
 
         if group_id:
             conn.execute('UPDATE franchise_groups SET name=?, description=?, active=? WHERE id=?', (name, description, active, group_id))
@@ -8404,6 +8412,7 @@ def switch_company():
         session['comp_can_payroll'] = bool(comp['can_payroll'])
         session['comp_can_invoicing'] = bool(dict(comp).get('can_invoicing', 0))
         session['comp_can_accounting'] = bool(dict(comp).get('can_accounting', 0))
+        session['comp_can_franchise_reports'] = bool(dict(comp).get('can_franchise_reports', 0))
         session['comp_google_calendar'] = bool(dict(comp).get('google_calendar_sync', 0))
     return jsonify({"status": "success"})
 
@@ -8429,6 +8438,7 @@ def save_company():
     c_cp = 1 if request.form.get('can_payroll') == 'true' else 0
     c_ci = 1 if request.form.get('can_invoicing') == 'true' else 0
     c_ca = 1 if request.form.get('can_accounting') == 'true' else 0
+    c_cfr = 1 if request.form.get('can_franchise_reports') == 'true' else 0
     c_gcal = 1 if request.form.get('google_calendar_sync') == 'true' else 0
     try:
         c_transport_per_lift = max(0.0, float(request.form.get('transport_amount_per_lift') or 25))
@@ -8458,17 +8468,20 @@ def save_company():
     try:
         if c_id:
             if filename:
-                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, google_calendar_sync=?, address=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_gcal, c_address, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_reg_no, c_vat_no, c_industry, c_id))
             else:
-                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, google_calendar_sync=?, address=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_gcal, c_address, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_reg_no, c_vat_no, c_industry, c_id))
         else:
-            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, google_calendar_sync, address, registration_number, vat_number, industry_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_gcal, c_address, c_reg_no, c_vat_no, c_industry))
+            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports, google_calendar_sync, address, registration_number, vat_number, industry_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_reg_no, c_vat_no, c_industry))
             target_company_id = getattr(cur, 'lastrowid', None)
             if not target_company_id:
                 row = conn.execute('SELECT id FROM companies WHERE name=? ORDER BY id DESC LIMIT 1', (c_name,)).fetchone()
                 target_company_id = row['id'] if row else None
 
         ensure_tenant_template(conn, target_company_id, c_industry, force_reset=False)
+        if target_company_id and not c_cfr:
+            conn.execute('UPDATE users SET can_franchise_reports=0 WHERE company_id=?', (target_company_id,))
+            conn.execute('DELETE FROM franchise_group_users WHERE user_id IN (SELECT id FROM users WHERE company_id=?)', (target_company_id,))
         conn.commit()
 
         saved_company = conn.execute('SELECT * FROM companies WHERE id=?', (target_company_id,)).fetchone() if target_company_id else None
@@ -8497,6 +8510,7 @@ def save_company():
         session['comp_can_payroll'] = bool(c_cp)
         session['comp_can_invoicing'] = bool(c_ci)
         session['comp_can_accounting'] = bool(c_ca)
+        session['comp_can_franchise_reports'] = bool(c_cfr)
         session['comp_google_calendar'] = bool(c_gcal)
 
     logo_file = dict(saved_company).get('logo_file') if saved_company else filename
@@ -9076,7 +9090,7 @@ def save_user():
     if not session.get('is_superadmin'):
         cid = session['company_id']
         is_comp_admin = 0
-        comp = conn.execute('SELECT can_booking, can_finance, can_payroll, can_invoicing, can_accounting FROM companies WHERE id=?', (cid,)).fetchone()
+        comp = conn.execute('SELECT can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports FROM companies WHERE id=?', (cid,)).fetchone()
         comp_dict = dict(comp or {})
         can_b = 1 if data.get('can_booking') and comp_dict.get('can_booking') else 0
         can_f = 1 if data.get('can_finance') and comp_dict.get('can_finance') else 0
@@ -9090,7 +9104,7 @@ def save_user():
         can_h_ro = 1 if data.get('can_hiring_readonly') and comp_dict.get('can_payroll') and not can_h else 0
         can_i_ro = 1 if data.get('can_invoicing_readonly') and comp_dict.get('can_invoicing') and not can_i else 0
         can_a_ro = 1 if data.get('can_accounting_readonly') and comp_dict.get('can_accounting') and not can_a else 0
-        can_fr = 1 if data.get('can_franchise_reports') else 0
+        can_fr = 1 if data.get('can_franchise_reports') and comp_dict.get('can_franchise_reports') else 0
     else:
         cid = data.get('company_id')
         is_comp_admin = 1 if data.get('is_company_admin') else 0
@@ -9106,7 +9120,8 @@ def save_user():
         can_h_ro = 1 if data.get('can_hiring_readonly') and not can_h else 0
         can_i_ro = 1 if data.get('can_invoicing_readonly') and not can_i else 0
         can_a_ro = 1 if data.get('can_accounting_readonly') and not can_a else 0
-        can_fr = 1 if data.get('can_franchise_reports') else 0
+        selected_company = conn.execute('SELECT COALESCE(can_franchise_reports, 0) AS can_franchise_reports FROM companies WHERE id=?', (cid,)).fetchone() if cid else None
+        can_fr = 1 if data.get('can_franchise_reports') and dict(selected_company or {}).get('can_franchise_reports') else 0
 
     action_msg = None
     try:
@@ -9136,11 +9151,11 @@ def get_users():
     if not session.get('is_superadmin') and not session.get('is_company_admin'): return "Forbidden", 403
     conn = get_db_connection()
     if session.get('is_superadmin'):
-        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_franchise_reports, 0) AS can_franchise_reports, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_franchise_reports, 0) AS can_franchise_reports, COALESCE(c.can_franchise_reports, 0) AS company_can_franchise_reports, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 ORDER BY u.is_superadmin DESC, u.username ASC''').fetchall()
     else:
-        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_franchise_reports, 0) AS can_franchise_reports, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_franchise_reports, 0) AS can_franchise_reports, COALESCE(c.can_franchise_reports, 0) AS company_can_franchise_reports, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 WHERE u.company_id = ? ORDER BY u.is_company_admin DESC, u.username ASC''', (session['company_id'],)).fetchall()
     conn.close()

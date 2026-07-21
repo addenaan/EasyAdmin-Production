@@ -148,7 +148,7 @@
             </div>
             {% endif %}
 
-            {% if session.get('is_franchise_reporting') or session.get('is_superadmin') %}
+            {% if session.get('is_superadmin') or (session.get('comp_can_franchise_reports') and session.get('can_franchise_reports') and session.get('is_franchise_reporting')) %}
             <div class="col-md-3">
                 <div class="card app-card text-center border border-primary shadow-sm" onclick="window.location.href='/franchise_reports'">
                     <div class="card-body p-4">
@@ -174,7 +174,7 @@
             </div>
             {% endif %}
 
-            {% if not session.get('can_booking') and not session.get('can_booking_readonly') and not session.get('can_finance') and not session.get('can_finance_readonly') and not session.get('can_payroll') and not session.get('can_payroll_readonly') and not session.get('can_hiring') and not session.get('can_hiring_readonly') and not session.get('can_invoicing') and not session.get('can_invoicing_readonly') and not session.get('can_accounting') and not session.get('can_accounting_readonly') and not session.get('is_superadmin') and not session.get('is_franchise_reporting') %}
+            {% if not session.get('can_booking') and not session.get('can_booking_readonly') and not session.get('can_finance') and not session.get('can_finance_readonly') and not session.get('can_payroll') and not session.get('can_payroll_readonly') and not session.get('can_hiring') and not session.get('can_hiring_readonly') and not session.get('can_invoicing') and not session.get('can_invoicing_readonly') and not session.get('can_accounting') and not session.get('can_accounting_readonly') and not session.get('is_superadmin') and not (session.get('comp_can_franchise_reports') and session.get('can_franchise_reports') and session.get('is_franchise_reporting')) %}
             <div class="col-12">
                 <div class="alert alert-warning text-center shadow-sm">
                     You do not currently have access to any applications. Please contact your Company Admin.
@@ -506,7 +506,7 @@
                 </div>
                 <div class="modal-body bg-light">
                     <div class="alert alert-info small">
-                        Link franchisee tenants to a franchise group and assign reporting users. Reporting users can only run reports for tenants linked here.
+                        Link franchisee tenants to a franchise group and assign reporting users. Users must first be granted Franchise Reports app access in Accounts, and can only run reports for tenants linked here.
                     </div>
                     <div class="row g-3">
                         <div class="col-lg-5">
@@ -699,6 +699,9 @@
                         <div class="col-md-2 col-6">
                             <div class="form-check form-switch"><input class="form-check-input border-success" type="checkbox" id="compAppPayroll"><label class="form-check-label small fw-bold">HR & Payroll</label></div>
                         </div>
+                        <div class="col-md-2 col-6">
+                            <div class="form-check form-switch"><input class="form-check-input border-primary" type="checkbox" id="compAppFranchiseReports"><label class="form-check-label small fw-bold">Franchise Reports</label></div>
+                        </div>
                     </div>
                     
                     <h6 class="fw-bold text-dark border-bottom pb-2 mt-4">Integrations</h6>
@@ -806,12 +809,20 @@
                             <div class="form-check"><input class="form-check-input border-secondary" type="checkbox" id="userCanPayrollReadonly"><label class="form-check-label" for="userCanPayrollReadonly">Read only</label></div>
                         </div>
                     </div>
-                    <div class="border rounded p-2 mb-3" id="wrapperCanHiring">
+                    <div class="border rounded p-2 mb-2" id="wrapperCanHiring">
                         <div class="fw-bold small mb-1">Interviews & Hiring</div>
                         <div class="d-flex gap-3 flex-wrap">
                             <div class="form-check"><input class="form-check-input border-primary" type="checkbox" id="userCanHiring"><label class="form-check-label" for="userCanHiring">Full access</label></div>
                             <div class="form-check"><input class="form-check-input border-secondary" type="checkbox" id="userCanHiringReadonly"><label class="form-check-label" for="userCanHiringReadonly">Read only</label></div>
                         </div>
+                    </div>
+                    <div class="border rounded p-2 mb-3" id="wrapperCanFranchiseReports">
+                        <div class="fw-bold small mb-1">Franchise Reports</div>
+                        <div class="form-check">
+                            <input class="form-check-input border-primary" type="checkbox" id="userCanFranchiseReports">
+                            <label class="form-check-label" for="userCanFranchiseReports">Grant Franchise Reports app access</label>
+                        </div>
+                        <div class="form-text small">The user's company must have Franchise Reports activated and the user must also be linked to an active Franchise Group before the app appears.</div>
                     </div>
 
                     {% if session.get('is_superadmin') %}
@@ -965,6 +976,7 @@
         const companyHasPayroll = {{ 'true' if session.get('comp_can_payroll') else 'false' }};
         const companyHasInvoicing = {{ 'true' if session.get('comp_can_invoicing') else 'false' }};
         const companyHasAccounting = {{ 'true' if session.get('comp_can_accounting') else 'false' }};
+        const companyHasFranchiseReports = {{ 'true' if session.get('comp_can_franchise_reports') else 'false' }};
 
         let companiesList = [];
         let templateUploadModal = null;
@@ -983,7 +995,11 @@
                 }
                 if(!companyHasInvoicing) document.getElementById('wrapperCanInvoicing').style.display = 'none';
                 if(!companyHasAccounting) document.getElementById('wrapperCanAccounting').style.display = 'none';
-                if(!companyHasBooking && !companyHasFinance && !companyHasPayroll && !companyHasInvoicing && !companyHasAccounting) {
+                if(!companyHasFranchiseReports) {
+                    const franchiseWrapper = document.getElementById('wrapperCanFranchiseReports');
+                    if(franchiseWrapper) franchiseWrapper.style.display = 'none';
+                }
+                if(!companyHasBooking && !companyHasFinance && !companyHasPayroll && !companyHasInvoicing && !companyHasAccounting && !companyHasFranchiseReports) {
                     document.getElementById('appPermText').innerText = "Your company currently has no app licenses. Please contact support.";
                     document.getElementById('appPermText').className = "text-danger small fw-bold";
                 }
@@ -1378,6 +1394,7 @@
                         if(c.can_finance) apps.push('Finance');
                         if(c.can_accounting) apps.push('Accounting');
                         if(c.can_payroll) apps.push('Payroll');
+                        if(c.can_franchise_reports) apps.push('Franchise Reports');
 
                         tbody.innerHTML += `
                             <tr>
@@ -1448,6 +1465,7 @@
             document.getElementById('compAppFinance').checked = company ? company.can_finance : false;
             document.getElementById('compAppAccounting').checked = company ? company.can_accounting : false;
             document.getElementById('compAppPayroll').checked = company ? company.can_payroll : false;
+            document.getElementById('compAppFranchiseReports').checked = company ? !!company.can_franchise_reports : false;
             
             document.getElementById('compGoogleSync').checked = company ? company.google_calendar_sync : false;
 
@@ -1481,6 +1499,7 @@
             fd.append('can_finance', document.getElementById('compAppFinance').checked);
             fd.append('can_accounting', document.getElementById('compAppAccounting').checked);
             fd.append('can_payroll', document.getElementById('compAppPayroll').checked);
+            fd.append('can_franchise_reports', document.getElementById('compAppFranchiseReports').checked);
             
             fd.append('google_calendar_sync', document.getElementById('compGoogleSync').checked);
 
@@ -1823,11 +1842,18 @@
                     </div>`).join('') || '<div class="text-muted small">No companies found.</div>';
             }
             if(userWrap) {
-                userWrap.innerHTML = (franchiseAdminData.users || []).map(u => `
-                    <div class="form-check">
-                        <input class="form-check-input franchise-user-cb" type="checkbox" value="${u.id}" id="fgu_${u.id}" ${selectedUsers.includes(String(u.id)) ? 'checked' : ''}>
-                        <label class="form-check-label small" for="fgu_${u.id}">${escapeHtml(u.username || '')}<span class="text-muted">${u.company_name ? ' - ' + escapeHtml(u.company_name) : ''}</span></label>
-                    </div>`).join('') || '<div class="text-muted small">No users found.</div>';
+                userWrap.innerHTML = (franchiseAdminData.users || []).map(u => {
+                    const companyCanFranchise = !!u.company_can_franchise_reports;
+                    const canFranchise = !!u.can_franchise_reports && companyCanFranchise;
+                    const disabled = canFranchise ? '' : 'disabled';
+                    const checked = canFranchise && selectedUsers.includes(String(u.id)) ? 'checked' : '';
+                    const note = canFranchise ? '' : (companyCanFranchise ? '<span class="text-danger"> - grant Franchise Reports access in Accounts first</span>' : '<span class="text-danger"> - activate Franchise Reports for this user\'s company first</span>');
+                    return `
+                    <div class="form-check ${canFranchise ? '' : 'text-muted'}">
+                        <input class="form-check-input franchise-user-cb" type="checkbox" value="${u.id}" id="fgu_${u.id}" ${checked} ${disabled}>
+                        <label class="form-check-label small" for="fgu_${u.id}">${escapeHtml(u.username || '')}<span class="text-muted">${u.company_name ? ' - ' + escapeHtml(u.company_name) : ''}</span>${note}</label>
+                    </div>`;
+                }).join('') || '<div class="text-muted small">No users found.</div>';
             }
         }
 
@@ -1871,7 +1897,7 @@
                 method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
             }).then(r => r.json()).then(res => {
                 if(res.status === 'error') return alert(res.message || 'Could not save franchise group.');
-                alert('Franchise group saved. Reporting users must log out and back in to receive access.');
+                alert('Franchise group saved. Reporting users must have Franchise Reports app access and must log out and back in to receive access.');
                 loadFranchiseGroups();
             }).catch(err => alert(err.message || err));
         }
@@ -1978,6 +2004,8 @@
                     addAppBadge(u.can_accounting, u.can_accounting_readonly, 'Accounting', 'Accounting', 'bg-dark');
                     addAppBadge(u.can_payroll, u.can_payroll_readonly, 'Employee Admin + Payroll', 'Employee Admin + Payroll', 'bg-success');
                     addAppBadge(u.can_hiring, u.can_hiring_readonly, 'Hiring', 'Hiring', 'bg-primary');
+                    if(u.can_franchise_reports && u.company_can_franchise_reports) apps.push('<span class="badge bg-primary">Franchise Reports</span>');
+                    else if(u.can_franchise_reports && !u.company_can_franchise_reports) apps.push('<span class="badge bg-warning text-dark">Franchise Reports Disabled at Company</span>');
 
                     let actions = u.is_superadmin ? '' : `
                         <button class="btn btn-sm btn-outline-primary fw-bold" onclick='openUserForm(${JSON.stringify(u).replace(/'/g, "&#39;")})'>Edit</button>
@@ -2022,6 +2050,8 @@
             if(userCanHiring) userCanHiring.checked = user ? !!user.can_hiring : false;
             const userCanHiringReadonly = document.getElementById('userCanHiringReadonly');
             if(userCanHiringReadonly) userCanHiringReadonly.checked = user ? !!user.can_hiring_readonly && !user.can_hiring : false;
+            const userCanFranchiseReports = document.getElementById('userCanFranchiseReports');
+            if(userCanFranchiseReports) userCanFranchiseReports.checked = user ? !!user.can_franchise_reports : false;
             
             const isCompAdminCb = document.getElementById('userIsCompanyAdmin');
             if(isCompAdminCb) isCompAdminCb.checked = user ? user.is_company_admin : false;
@@ -2047,7 +2077,8 @@
                 can_payroll: document.getElementById('userCanPayroll').checked,
                 can_payroll_readonly: document.getElementById('userCanPayrollReadonly').checked,
                 can_hiring: document.getElementById('userCanHiring') ? document.getElementById('userCanHiring').checked : false,
-                can_hiring_readonly: document.getElementById('userCanHiringReadonly') ? document.getElementById('userCanHiringReadonly').checked : false
+                can_hiring_readonly: document.getElementById('userCanHiringReadonly') ? document.getElementById('userCanHiringReadonly').checked : false,
+                can_franchise_reports: document.getElementById('userCanFranchiseReports') ? document.getElementById('userCanFranchiseReports').checked : false
             };
 
             const isCompAdminCb = document.getElementById('userIsCompanyAdmin');
