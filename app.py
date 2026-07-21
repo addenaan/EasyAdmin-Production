@@ -5275,6 +5275,22 @@ def _franchise_invoice_rows(conn, filters, allowed_company_ids, outstanding_only
     joins = ['JOIN companies co ON co.id=i.company_id']
     select_extra = ['co.name AS franchisee_name']
 
+    # Franchise revenue/outstanding reporting must use the same live-settlement
+    # logic as the normal invoicing screen: invoice total less recorded payments
+    # and credit notes. Older invoices can have balance_remaining=0 because that
+    # field originally represented the portion not due immediately, not the
+    # actual unpaid balance.
+    has_invoice_payments = compat_table_exists(conn, 'invoice_payments')
+    has_invoice_credit_notes = compat_table_exists(conn, 'invoice_credit_notes')
+    if has_invoice_payments:
+        select_extra.append("(SELECT COALESCE(SUM(ip.amount), 0) FROM invoice_payments ip WHERE ip.company_id=i.company_id AND ip.invoice_id=i.id) AS payment_total")
+    else:
+        select_extra.append('0 AS payment_total')
+    if has_invoice_credit_notes:
+        select_extra.append("(SELECT COALESCE(SUM(icn.amount), 0) FROM invoice_credit_notes icn WHERE icn.company_id=i.company_id AND icn.invoice_id=i.id) AS credit_note_total")
+    else:
+        select_extra.append('0 AS credit_note_total')
+
     if 'client_id' in invoice_cols and compat_table_exists(conn, 'clients'):
         joins.append('LEFT JOIN clients c ON c.id=i.client_id AND c.company_id=i.company_id')
         select_extra.extend([
@@ -5311,22 +5327,38 @@ def _franchise_invoice_rows(conn, filters, allowed_company_ids, outstanding_only
         total = _report_money(inv.get('total'))
         if not total and inv.get('subtotal') is not None:
             total = _report_money(inv.get('subtotal')) + _report_money(inv.get('vat_amount')) - _report_money(inv.get('discount_amount'))
-        balance_source = inv.get('balance_remaining')
-        if balance_source is None:
-            balance_source = inv.get('amount_due_now') if inv.get('amount_due_now') is not None else total
-        balance = _report_money(balance_source)
-        paid = _report_money(total - balance)
+        payments_total = _report_money(inv.get('payment_total'))
+        credit_notes_total = _report_money(inv.get('credit_note_total'))
+
+        if has_invoice_payments or has_invoice_credit_notes:
+            balance = _report_money(max(total - payments_total - credit_notes_total, 0.0))
+            paid = _report_money(total - balance)
+        else:
+            balance_source = inv.get('balance_remaining')
+            if balance_source is None:
+                balance_source = inv.get('amount_due_now') if inv.get('amount_due_now') is not None else total
+            balance = _report_money(balance_source)
+            paid = _report_money(total - balance)
+
         due_date = str(inv.get('due_date') or inv.get('date') or '')
         overdue_days = 0
         try:
             overdue_days = max((today - datetime.strptime(due_date[:10], '%Y-%m-%d').date()).days, 0)
         except Exception:
             overdue_days = 0
-        status = str(inv.get('status') or '').strip() or ('Paid' if balance <= 0.004 else 'Unpaid')
+        status = str(inv.get('status') or '').strip()
+        if balance <= 0.004:
+            status = 'Paid'
+        elif payments_total > 0.004 or credit_notes_total > 0.004 or status.lower() in {'partial', 'partially paid'}:
+            status = 'Partial'
+        else:
+            status = status or 'Unpaid'
         inv.update({
             'computed_total': total,
             'computed_balance': balance,
             'computed_paid': paid,
+            'computed_payment_total': payments_total,
+            'computed_credit_note_total': credit_notes_total,
             'computed_status': status,
             'overdue_days': overdue_days,
         })
