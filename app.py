@@ -1297,13 +1297,6 @@ def init_db():
             try: conn.execute(f'ALTER TABLE users ADD COLUMN {ro_col} INTEGER DEFAULT 0')
             except Exception: pass
 
-    # Franchise Reports is a separate read-only app permission. A user must have
-    # this permission and be linked to an active franchise group before the
-    # Franchise Reports app is visible or accessible.
-    if 'can_franchise_reports' not in set(compat_table_columns(conn, 'users')):
-        try: conn.execute('ALTER TABLE users ADD COLUMN can_franchise_reports INTEGER DEFAULT 0')
-        except Exception: pass
-
     # Franchise group reporting keeps franchisees as separate tenants while giving
     # franchisors one reporting-only login over explicitly linked companies only.
     conn.execute('''CREATE TABLE IF NOT EXISTS franchise_groups (
@@ -3293,17 +3286,6 @@ def _session_has_reports_access():
     )
 
 
-def _session_has_franchise_reports_access():
-    return bool(
-        session.get('is_superadmin')
-        or (
-            session.get('can_franchise_reports')
-            and session.get('is_franchise_reporting')
-            and session.get('franchise_group_id')
-        )
-    )
-
-
 def _access_denied(message='Access Denied: You do not have permission for this action.'):
     log_security_event('Access Denied', {
         'path': request.path,
@@ -3614,8 +3596,8 @@ def restrict_access():
             return "Access Denied: You do not have permissions to access Reports.", 403
 
     if path == '/franchise_reports' or path.startswith('/api/franchise_reports') or path.startswith('/export/franchise_reports'):
-        if not _session_has_franchise_reports_access():
-            return "Access Denied: Franchise Reports app access and an active franchise group link are required.", 403
+        if not (session.get('is_franchise_reporting') or session.get('is_superadmin')):
+            return "Access Denied: Franchise reporting access required.", 403
 
     if session.get('is_staff'):
         allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/staff/download_payslip/', '/api/staff/', '/api/session/', '/change_password', '/change-password', '/password/change', '/logout')
@@ -3755,7 +3737,6 @@ def login():
             session['can_hiring'] = bool(dict(user).get('can_hiring', 0))
             session['can_invoicing'] = bool(dict(user).get('can_invoicing', 0))
             session['can_accounting'] = bool(dict(user).get('can_accounting', 0))
-            session['can_franchise_reports'] = bool(dict(user).get('can_franchise_reports', 0))
             session['can_booking_readonly'] = bool(dict(user).get('can_booking_readonly', 0))
             session['can_finance_readonly'] = bool(dict(user).get('can_finance_readonly', 0))
             session['can_payroll_readonly'] = bool(dict(user).get('can_payroll_readonly', 0))
@@ -3786,7 +3767,7 @@ def login():
                                                   JOIN franchise_groups fg ON fg.id=fgu.franchise_group_id
                                                   WHERE fgu.user_id=? AND COALESCE(fg.active, 1)=1
                                                   ORDER BY fg.name ASC LIMIT 1''', (user['id'],)).fetchone()
-            if franchise_membership and session.get('can_franchise_reports'):
+            if franchise_membership:
                 session['is_franchise_reporting'] = True
                 session['franchise_group_id'] = franchise_membership['franchise_group_id']
                 session['franchise_group_name'] = franchise_membership['franchise_group_name']
@@ -5241,101 +5222,23 @@ def _franchise_booking_rows(conn, filters, allowed_company_ids):
                                               ORDER BY co.name ASC, b.start ASC, b.id ASC''', params).fetchall()]
 
 
-def _franchise_invoice_status_matches(inv, desired):
-    desired = (desired or '').strip().lower()
-    if not desired:
-        return True
-    status = str(inv.get('computed_status') or inv.get('status') or '').strip().lower()
-    balance = _report_money(inv.get('computed_balance'))
-    paid = _report_money(inv.get('computed_paid'))
-    overdue_days = int(inv.get('overdue_days') or 0)
-    if desired in {'paid', 'settled', 'closed'}:
-        return balance <= 0.004 or status in {'paid', 'settled', 'closed'}
-    if desired in {'unpaid', 'outstanding'}:
-        return balance > 0.004
-    if desired == 'partial':
-        return balance > 0.004 and paid > 0.004
-    if desired == 'overdue':
-        return balance > 0.004 and overdue_days > 0
-    return status == desired
-
-
 def _franchise_invoice_rows(conn, filters, allowed_company_ids, outstanding_only=False):
-    """Return franchise invoice rows without assuming every production database
-    already has every newer invoice column. This keeps franchisor invoicing
-    reports working on tenants created before later invoicing/project updates.
-    """
-    invoice_cols = set(compat_table_columns(conn, 'invoices') or [])
     scope_sql, params = _franchise_company_scope(filters, allowed_company_ids, 'i')
-    where = [scope_sql]
-    if 'date' in invoice_cols:
-        where.append("substr(COALESCE(CAST(i.date AS TEXT), ''), 1, 10) BETWEEN ? AND ?")
-        params.extend([filters['start_date'], filters['end_date']])
+    where = [scope_sql, 'i.date BETWEEN ? AND ?']
+    params.extend([filters['start_date'], filters['end_date']])
+    if outstanding_only:
+        where.append("COALESCE(i.balance_remaining, COALESCE(i.amount_due_now, i.total, 0)) > 0.004")
+    if filters.get('status_filter'):
+        where.append("LOWER(COALESCE(i.status, 'Unpaid')) = LOWER(?)")
+        params.append(filters['status_filter'])
+    return [dict(r) for r in conn.execute(f'''SELECT i.*, co.name AS franchisee_name,
+                                                     p.project_name
+                                              FROM invoices i
+                                              JOIN companies co ON co.id=i.company_id
+                                              LEFT JOIN projects p ON p.id=i.project_id AND p.company_id=i.company_id
+                                              WHERE {' AND '.join(where)}
+                                              ORDER BY co.name ASC, i.date ASC, i.id ASC''', params).fetchall()]
 
-    joins = ['JOIN companies co ON co.id=i.company_id']
-    select_extra = ['co.name AS franchisee_name']
-
-    if 'client_id' in invoice_cols and compat_table_exists(conn, 'clients'):
-        joins.append('LEFT JOIN clients c ON c.id=i.client_id AND c.company_id=i.company_id')
-        select_extra.extend([
-            'c.name AS client_first_name',
-            'c.surname AS client_surname',
-            'c.company_name AS client_company_name'
-        ])
-    else:
-        select_extra.extend([
-            'NULL AS client_first_name',
-            'NULL AS client_surname',
-            'NULL AS client_company_name'
-        ])
-
-    if 'project_id' in invoice_cols and compat_table_exists(conn, 'projects'):
-        joins.append('LEFT JOIN projects p ON p.id=i.project_id AND p.company_id=i.company_id')
-        select_extra.append('p.project_name AS project_name')
-    else:
-        select_extra.append('NULL AS project_name')
-
-    order_by = 'co.name ASC, i.id ASC'
-    if 'date' in invoice_cols:
-        order_by = 'co.name ASC, i.date ASC, i.id ASC'
-
-    raw_rows = [dict(r) for r in conn.execute(f"""SELECT i.*, {', '.join(select_extra)}
-                                                   FROM invoices i
-                                                   {' '.join(joins)}
-                                                   WHERE {' AND '.join(where)}
-                                                   ORDER BY {order_by}""", params).fetchall()]
-
-    today = datetime.now().date()
-    rows = []
-    for inv in raw_rows:
-        total = _report_money(inv.get('total'))
-        if not total and inv.get('subtotal') is not None:
-            total = _report_money(inv.get('subtotal')) + _report_money(inv.get('vat_amount')) - _report_money(inv.get('discount_amount'))
-        balance_source = inv.get('balance_remaining')
-        if balance_source is None:
-            balance_source = inv.get('amount_due_now') if inv.get('amount_due_now') is not None else total
-        balance = _report_money(balance_source)
-        paid = _report_money(total - balance)
-        due_date = str(inv.get('due_date') or inv.get('date') or '')
-        overdue_days = 0
-        try:
-            overdue_days = max((today - datetime.strptime(due_date[:10], '%Y-%m-%d').date()).days, 0)
-        except Exception:
-            overdue_days = 0
-        status = str(inv.get('status') or '').strip() or ('Paid' if balance <= 0.004 else 'Unpaid')
-        inv.update({
-            'computed_total': total,
-            'computed_balance': balance,
-            'computed_paid': paid,
-            'computed_status': status,
-            'overdue_days': overdue_days,
-        })
-        if outstanding_only and balance <= 0.004:
-            continue
-        if filters.get('status_filter') and not _franchise_invoice_status_matches(inv, filters.get('status_filter')):
-            continue
-        rows.append(inv)
-    return rows
 
 def _franchise_project_rows(conn, filters, allowed_company_ids):
     scope_sql, params = _franchise_company_scope(filters, allowed_company_ids, 'p')
@@ -5449,8 +5352,8 @@ def _build_franchise_report_payload(report_type, filters, allowed_companies, gro
             for inv in invoices:
                 name = inv.get('franchisee_name') or ''
                 g = grouped.setdefault(name, {'franchisee': name, 'count': 0, 'total': 0.0, 'outstanding': 0.0, 'paid': 0.0})
-                total = _report_money(inv.get('computed_total'))
-                outstanding = _report_money(inv.get('computed_balance'))
+                total = _report_money(inv.get('total'))
+                outstanding = _report_money(inv.get('balance_remaining') if inv.get('balance_remaining') is not None else (inv.get('amount_due_now') if inv.get('amount_due_now') is not None else inv.get('total')))
                 g['count'] += 1
                 g['total'] += total
                 g['outstanding'] += outstanding
@@ -5463,8 +5366,8 @@ def _build_franchise_report_payload(report_type, filters, allowed_companies, gro
             invoices = _franchise_invoice_rows(conn, filters, allowed_company_ids, outstanding_only=True)
             columns = ['Date', 'Franchisee', 'Client', 'Invoice No.', 'Status', 'Total', 'Outstanding', 'Project']
             for inv in invoices:
-                outstanding = inv.get('computed_balance')
-                rows.append([inv.get('date') or '', inv.get('franchisee_name') or '', _franchise_client_display(inv), inv.get('invoice_number') or inv.get('id') or '', inv.get('computed_status') or 'Unpaid', _report_money(inv.get('computed_total')), _report_money(outstanding), inv.get('project_name') or ''])
+                outstanding = inv.get('balance_remaining') if inv.get('balance_remaining') is not None else (inv.get('amount_due_now') if inv.get('amount_due_now') is not None else inv.get('total'))
+                rows.append([inv.get('date') or '', inv.get('franchisee_name') or '', inv.get('client_name') or '', inv.get('invoice_number') or inv.get('id') or '', inv.get('status') or 'Unpaid', _report_money(inv.get('total')), _report_money(outstanding), inv.get('project_name') or ''])
 
         summary = {
             'row_count': len(rows),
@@ -5528,20 +5431,26 @@ def api_franchise_reports_overview():
                                              COUNT(DISTINCT b.company_id) AS franchisees
                                       FROM bookings b
                                       WHERE {scope_sql} AND substr(COALESCE(CAST(b.start AS TEXT), ''), 1, 10) BETWEEN ? AND ?""", params + [filters['start_date'], filters['end_date']]).fetchone()
-        invoice_rows = _franchise_invoice_rows(conn, filters, allowed_ids, outstanding_only=False)
+        invoice_scope, invoice_params = _franchise_company_scope(filters, allowed_ids, 'i')
+        invoice_row = conn.execute(f"""SELECT COUNT(*) AS invoice_count,
+                                             SUM(COALESCE(i.total, 0)) AS invoice_total,
+                                             SUM(COALESCE(i.balance_remaining, COALESCE(i.amount_due_now, i.total), 0)) AS outstanding
+                                      FROM invoices i
+                                      WHERE {invoice_scope} AND i.date BETWEEN ? AND ?""", invoice_params + [filters['start_date'], filters['end_date']]).fetchone()
         project_scope, project_params = _franchise_company_scope(filters, allowed_ids, 'p')
         project_row = conn.execute(f"""SELECT COUNT(*) AS project_count,
                                              SUM(COALESCE(p.fixed_price, 0)) AS fixed_value
                                       FROM projects p WHERE {project_scope}""", project_params).fetchone()
         booking_data = dict(booking_row) if booking_row else {}
+        invoice_data = dict(invoice_row) if invoice_row else {}
         project_data = dict(project_row) if project_row else {}
         metrics = {
             'linked_franchisees': len(allowed_ids),
             'bookings': int(booking_data.get('total') or 0),
             'completed_bookings': int(booking_data.get('completed') or 0),
-            'invoice_count': len(invoice_rows),
-            'invoice_total': _report_money(sum(_report_money(i.get('computed_total')) for i in invoice_rows)),
-            'outstanding_balance': _report_money(sum(_report_money(i.get('computed_balance')) for i in invoice_rows)),
+            'invoice_count': int(invoice_data.get('invoice_count') or 0),
+            'invoice_total': _report_money(invoice_data.get('invoice_total')),
+            'outstanding_balance': _report_money(invoice_data.get('outstanding')),
             'project_count': int(project_data.get('project_count') or 0),
             'project_fixed_value': _report_money(project_data.get('fixed_value')),
         }
@@ -5619,11 +5528,11 @@ def admin_franchise_groups():
     try:
         groups = [dict(r) for r in conn.execute('SELECT * FROM franchise_groups ORDER BY COALESCE(active, 1) DESC, name ASC').fetchall()]
         companies = [dict(r) for r in conn.execute('SELECT id, name FROM companies ORDER BY name ASC').fetchall()]
-        users = [dict(r) for r in conn.execute('''SELECT u.id, u.username, u.email, u.company_id, c.name AS company_name, COALESCE(u.can_franchise_reports, 0) AS can_franchise_reports
+        users = [dict(r) for r in conn.execute('''SELECT u.id, u.username, u.email, u.company_id, c.name AS company_name
                                                   FROM users u
                                                   LEFT JOIN companies c ON c.id=u.company_id
                                                   WHERE COALESCE(u.is_staff, 0)=0
-                                                  ORDER BY COALESCE(u.can_franchise_reports, 0) DESC, u.username ASC''').fetchall()]
+                                                  ORDER BY u.username ASC''').fetchall()]
         company_links = [dict(r) for r in conn.execute('SELECT franchise_group_id, company_id FROM franchise_group_companies').fetchall()]
         user_links = [dict(r) for r in conn.execute('SELECT franchise_group_id, user_id, access_level FROM franchise_group_users').fetchall()]
         return jsonify({'status': 'success', 'groups': groups, 'companies': companies, 'users': users, 'company_links': company_links, 'user_links': user_links})
@@ -5663,17 +5572,6 @@ def admin_franchise_groups_save():
             pass
     conn = get_db_connection()
     try:
-        if user_ids:
-            placeholders = _franchise_placeholders(user_ids)
-            eligible_rows = conn.execute(f'''SELECT id FROM users
-                                             WHERE id IN ({placeholders})
-                                               AND COALESCE(is_staff, 0)=0
-                                               AND COALESCE(can_franchise_reports, 0)=1''', user_ids).fetchall()
-            eligible_user_ids = {int(dict(r).get('id')) for r in eligible_rows}
-            blocked_user_ids = [uid for uid in user_ids if uid not in eligible_user_ids]
-            if blocked_user_ids:
-                return jsonify({'status': 'error', 'message': 'Every franchisor reporting user must first be granted Franchise Reports app access under Accounts.'}), 400
-
         if group_id:
             conn.execute('UPDATE franchise_groups SET name=?, description=?, active=? WHERE id=?', (name, description, active, group_id))
         else:
@@ -8907,7 +8805,6 @@ def save_user():
         can_h_ro = 1 if data.get('can_hiring_readonly') and comp_dict.get('can_payroll') and not can_h else 0
         can_i_ro = 1 if data.get('can_invoicing_readonly') and comp_dict.get('can_invoicing') and not can_i else 0
         can_a_ro = 1 if data.get('can_accounting_readonly') and comp_dict.get('can_accounting') and not can_a else 0
-        can_fr = 1 if data.get('can_franchise_reports') else 0
     else:
         cid = data.get('company_id')
         is_comp_admin = 1 if data.get('is_company_admin') else 0
@@ -8923,24 +8820,21 @@ def save_user():
         can_h_ro = 1 if data.get('can_hiring_readonly') and not can_h else 0
         can_i_ro = 1 if data.get('can_invoicing_readonly') and not can_i else 0
         can_a_ro = 1 if data.get('can_accounting_readonly') and not can_a else 0
-        can_fr = 1 if data.get('can_franchise_reports') else 0
 
     action_msg = None
     try:
         if data.get('id'):
             if data.get('password'):
-                conn.execute('''UPDATE users SET username=?, email=?, company_id=?, password_hash=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, can_booking_readonly=?, can_finance_readonly=?, can_payroll_readonly=?, can_hiring_readonly=?, can_invoicing_readonly=?, can_accounting_readonly=?, can_franchise_reports=?, is_company_admin=? WHERE id=? AND is_superadmin=0''',
-                             (data['username'], user_email, cid, generate_password_hash(data['password']), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, can_fr, is_comp_admin, data['id']))
+                conn.execute('''UPDATE users SET username=?, email=?, company_id=?, password_hash=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, can_booking_readonly=?, can_finance_readonly=?, can_payroll_readonly=?, can_hiring_readonly=?, can_invoicing_readonly=?, can_accounting_readonly=?, is_company_admin=? WHERE id=? AND is_superadmin=0''',
+                             (data['username'], user_email, cid, generate_password_hash(data['password']), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, is_comp_admin, data['id']))
             else:
-                conn.execute('''UPDATE users SET username=?, email=?, company_id=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, can_booking_readonly=?, can_finance_readonly=?, can_payroll_readonly=?, can_hiring_readonly=?, can_invoicing_readonly=?, can_accounting_readonly=?, can_franchise_reports=?, is_company_admin=? WHERE id=? AND is_superadmin=0''',
-                             (data['username'], user_email, cid, can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, can_fr, is_comp_admin, data['id']))
+                conn.execute('''UPDATE users SET username=?, email=?, company_id=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, can_booking_readonly=?, can_finance_readonly=?, can_payroll_readonly=?, can_hiring_readonly=?, can_invoicing_readonly=?, can_accounting_readonly=?, is_company_admin=? WHERE id=? AND is_superadmin=0''',
+                             (data['username'], user_email, cid, can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, is_comp_admin, data['id']))
             action_msg = ('System Admin', 'Updated User', f"Updated settings for user: {data['username']}")
         else:
-            conn.execute('''INSERT INTO users (username, email, company_id, password_hash, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, can_booking_readonly, can_finance_readonly, can_payroll_readonly, can_hiring_readonly, can_invoicing_readonly, can_accounting_readonly, can_franchise_reports, is_superadmin, is_company_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)''',
-                         (data['username'], user_email, cid, generate_password_hash(data['password'] or 'Password123'), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, can_fr, is_comp_admin))
+            conn.execute('''INSERT INTO users (username, email, company_id, password_hash, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, can_booking_readonly, can_finance_readonly, can_payroll_readonly, can_hiring_readonly, can_invoicing_readonly, can_accounting_readonly, is_superadmin, is_company_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)''',
+                         (data['username'], user_email, cid, generate_password_hash(data['password'] or 'Password123'), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, is_comp_admin))
             action_msg = ('System Admin', 'Created User', f"Created new user account: {data['username']}")
-        if data.get('id') and not can_fr:
-            conn.execute('DELETE FROM franchise_group_users WHERE user_id=?', (data['id'],))
         conn.commit()
     except sqlite3.IntegrityError: return jsonify({"status": "error", "message": "Username already exists."})
     finally: conn.close()
@@ -8953,11 +8847,11 @@ def get_users():
     if not session.get('is_superadmin') and not session.get('is_company_admin'): return "Forbidden", 403
     conn = get_db_connection()
     if session.get('is_superadmin'):
-        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_franchise_reports, 0) AS can_franchise_reports, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 ORDER BY u.is_superadmin DESC, u.username ASC''').fetchall()
     else:
-        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_franchise_reports, 0) AS can_franchise_reports, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
+        users = conn.execute('''SELECT u.id, u.username, u.email, u.can_booking, u.can_finance, u.can_payroll, COALESCE(u.can_hiring, 0) AS can_hiring, u.can_invoicing, u.can_accounting, COALESCE(u.can_booking_readonly, 0) AS can_booking_readonly, COALESCE(u.can_finance_readonly, 0) AS can_finance_readonly, COALESCE(u.can_payroll_readonly, 0) AS can_payroll_readonly, COALESCE(u.can_hiring_readonly, 0) AS can_hiring_readonly, COALESCE(u.can_invoicing_readonly, 0) AS can_invoicing_readonly, COALESCE(u.can_accounting_readonly, 0) AS can_accounting_readonly, u.is_superadmin, u.is_company_admin, u.company_id, c.name as company_name 
                                 FROM users u LEFT JOIN companies c ON u.company_id = c.id 
                                 WHERE u.company_id = ? ORDER BY u.is_company_admin DESC, u.username ASC''', (session['company_id'],)).fetchall()
     conn.close()
