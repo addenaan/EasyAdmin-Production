@@ -35,9 +35,10 @@
 
     <div class="container my-4">
         <div class="row g-3 mb-4" id="metricsRow">
-            <div class="col-md-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Linked Franchisees</div><div class="h4 fw-bold" id="metricFranchisees">-</div></div></div></div>
-            <div class="col-md-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Bookings</div><div class="h4 fw-bold" id="metricBookings">-</div></div></div></div>
-            <div class="col-md-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Invoice Total</div><div class="h4 fw-bold" id="metricInvoiceTotal">-</div></div></div></div>
+            <div class="col-md-2"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Linked Franchisees</div><div class="h4 fw-bold" id="metricFranchisees">-</div></div></div></div>
+            <div class="col-md-2"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Bookings</div><div class="h4 fw-bold" id="metricBookings">-</div></div></div></div>
+            <div class="col-md-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Expected Booking Revenue</div><div class="h4 fw-bold" id="metricExpectedRevenue">-</div></div></div></div>
+            <div class="col-md-2"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Invoice Total</div><div class="h4 fw-bold" id="metricInvoiceTotal">-</div></div></div></div>
             <div class="col-md-3"><div class="card metric-card"><div class="card-body"><div class="text-muted small">Outstanding</div><div class="h4 fw-bold" id="metricOutstanding">-</div></div></div></div>
         </div>
 
@@ -146,6 +147,7 @@ function loadOverview() {
             const m = res.metrics || {};
             document.getElementById('metricFranchisees').textContent = m.linked_franchisees ?? '-';
             document.getElementById('metricBookings').textContent = m.bookings ?? '-';
+            document.getElementById('metricExpectedRevenue').textContent = m.expected_booking_revenue ?? '-';
             document.getElementById('metricInvoiceTotal').textContent = m.invoice_total ?? '-';
             document.getElementById('metricOutstanding').textContent = m.outstanding_balance ?? '-';
         });

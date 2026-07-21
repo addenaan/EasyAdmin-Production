@@ -5123,6 +5123,7 @@ FRANCHISE_REPORT_TYPES = {
     'bookings_by_service': {'title': 'Bookings by Service', 'group': 'Bookings'},
     'bookings_by_employee': {'title': 'Bookings by Employee', 'group': 'Bookings'},
     'project_summary': {'title': 'Project Summary by Franchisee', 'group': 'Projects'},
+    'expected_booking_revenue': {'title': 'Expected Booking Revenue', 'group': 'Invoicing'},
     'invoice_summary': {'title': 'Invoice / Revenue Summary by Franchisee', 'group': 'Invoicing'},
     'outstanding_invoices': {'title': 'Outstanding Invoice Summary', 'group': 'Invoicing'},
 }
@@ -5232,13 +5233,156 @@ def _franchise_booking_rows(conn, filters, allowed_company_ids):
         params.append(filters['status_filter'])
     return [dict(r) for r in conn.execute(f'''SELECT b.*, co.name AS franchisee_name,
                                                      c.name, c.surname, c.company_name,
-                                                     p.project_name
+                                                     p.project_name,
+                                                     COALESCE(p.fixed_price, 0) AS project_fixed_price
                                               FROM bookings b
                                               JOIN companies co ON co.id=b.company_id
                                               LEFT JOIN clients c ON c.id=b.client_id AND c.company_id=b.company_id
                                               LEFT JOIN projects p ON p.id=b.project_id AND p.company_id=b.company_id
                                               WHERE {' AND '.join(where)}
                                               ORDER BY co.name ASC, b.start ASC, b.id ASC''', params).fetchall()]
+
+
+
+def _franchise_service_price_map(conn, allowed_company_ids):
+    company_ids = [int(x) for x in (allowed_company_ids or [])]
+    if not company_ids or not compat_table_exists(conn, 'services'):
+        return {}
+    rows = conn.execute(f"""SELECT company_id, name, client_price
+                            FROM services
+                            WHERE company_id IN ({_franchise_placeholders(company_ids)})""", company_ids).fetchall()
+    service_map = {}
+    for row in rows:
+        name = str(row['name'] or '').strip()
+        if not name:
+            continue
+        service_map.setdefault(int(row['company_id']), {})[name.lower()] = {
+            'name': name,
+            'price': _report_money(row['client_price'])
+        }
+    return service_map
+
+
+def _franchise_booking_service_client_value(booking, service_map):
+    company_id = int(booking.get('company_id') or 0)
+    services = _report_split_list(booking.get('booking_type'))
+    if not services:
+        services = ['Unspecified Service']
+    company_services = service_map.get(company_id, {})
+    value = 0.0
+    missing = []
+    for service in services:
+        item = company_services.get(service.lower())
+        if item:
+            value += _report_money(item.get('price'))
+        else:
+            missing.append(service)
+    return _report_money(value), missing
+
+
+def _franchise_project_invoice_lookup(conn, allowed_company_ids):
+    company_ids = [int(x) for x in (allowed_company_ids or [])]
+    if not company_ids or not compat_table_exists(conn, 'invoices'):
+        return {}
+    invoice_cols = set(compat_table_columns(conn, 'invoices') or [])
+    if 'project_id' not in invoice_cols:
+        return {}
+    total_expr = 'COALESCE(total, 0)' if 'total' in invoice_cols else '0'
+    rows = conn.execute(f"""SELECT company_id, project_id, COUNT(*) AS invoice_count, SUM({total_expr}) AS invoice_total
+                            FROM invoices
+                            WHERE company_id IN ({_franchise_placeholders(company_ids)})
+                              AND COALESCE(project_id, 0) <> 0
+                            GROUP BY company_id, project_id""", company_ids).fetchall()
+    return {(int(r['company_id']), int(r['project_id'])): {'invoice_count': int(r['invoice_count'] or 0), 'invoice_total': _report_money(r['invoice_total'])} for r in rows}
+
+
+def _franchise_expected_booking_revenue_rows(conn, filters, allowed_company_ids):
+    bookings = _franchise_booking_rows(conn, filters, allowed_company_ids)
+    service_map = _franchise_service_price_map(conn, allowed_company_ids)
+    project_invoice_lookup = _franchise_project_invoice_lookup(conn, allowed_company_ids)
+    grouped = {}
+    counted_projects = set()
+
+    for b in bookings:
+        company_id = int(b.get('company_id') or 0)
+        franchisee = b.get('franchisee_name') or 'Unknown Franchisee'
+        g = grouped.setdefault(company_id, {
+            'franchisee': franchisee,
+            'bookings': 0,
+            'completed': 0,
+            'invoiced_bookings': 0,
+            'uninvoiced_bookings': 0,
+            'normal_booking_revenue': 0.0,
+            'project_fixed_revenue': 0.0,
+            'fallback_project_service_revenue': 0.0,
+            'total_expected_revenue': 0.0,
+            'uninvoiced_expected_revenue': 0.0,
+            'projects_counted': 0,
+            'unpriced_services': set(),
+            'missing_project_fixed_price': 0,
+        })
+        g['bookings'] += 1
+        if str(b.get('mobile_status') or 'Scheduled').strip().lower() == 'completed':
+            g['completed'] += 1
+        if b.get('is_invoiced'):
+            g['invoiced_bookings'] += 1
+        else:
+            g['uninvoiced_bookings'] += 1
+
+        service_value, missing_services = _franchise_booking_service_client_value(b, service_map)
+        for service in missing_services:
+            g['unpriced_services'].add(service)
+
+        project_id = int(b.get('project_id') or 0)
+        if project_id:
+            project_key = (company_id, project_id)
+            fixed_price = _report_money(b.get('project_fixed_price'))
+            if fixed_price > 0:
+                if project_key not in counted_projects:
+                    counted_projects.add(project_key)
+                    g['project_fixed_revenue'] += fixed_price
+                    g['total_expected_revenue'] += fixed_price
+                    g['projects_counted'] += 1
+                    if project_key not in project_invoice_lookup:
+                        g['uninvoiced_expected_revenue'] += fixed_price
+            else:
+                # If a project has no fixed price captured, avoid reporting a false zero by falling back to service prices.
+                # The missing fixed-price count highlights projects that should be corrected.
+                g['missing_project_fixed_price'] += 1
+                g['fallback_project_service_revenue'] += service_value
+                g['total_expected_revenue'] += service_value
+                if not b.get('is_invoiced'):
+                    g['uninvoiced_expected_revenue'] += service_value
+        else:
+            g['normal_booking_revenue'] += service_value
+            g['total_expected_revenue'] += service_value
+            if not b.get('is_invoiced'):
+                g['uninvoiced_expected_revenue'] += service_value
+
+    columns = ['Franchisee', 'Bookings', 'Completed', 'Invoiced Bookings', 'Uninvoiced Bookings', 'Normal Booking Revenue', 'Project Fixed Revenue', 'Project Service Fallback', 'Total Expected Revenue', 'Uninvoiced Expected Revenue', 'Projects Counted', 'Unpriced Services', 'Missing Project Fixed Price']
+    rows = []
+    for g in sorted(grouped.values(), key=lambda x: x['franchisee'].lower()):
+        rows.append([
+            g['franchisee'],
+            g['bookings'],
+            g['completed'],
+            g['invoiced_bookings'],
+            g['uninvoiced_bookings'],
+            _report_money(g['normal_booking_revenue']),
+            _report_money(g['project_fixed_revenue']),
+            _report_money(g['fallback_project_service_revenue']),
+            _report_money(g['total_expected_revenue']),
+            _report_money(g['uninvoiced_expected_revenue']),
+            g['projects_counted'],
+            ', '.join(sorted(g['unpriced_services'])),
+            g['missing_project_fixed_price'],
+        ])
+    summary = {
+        'booking_count': len(bookings),
+        'total_expected_revenue': _report_money(sum(_report_money(g['total_expected_revenue']) for g in grouped.values())),
+        'uninvoiced_expected_revenue': _report_money(sum(_report_money(g['uninvoiced_expected_revenue']) for g in grouped.values())),
+    }
+    return columns, rows, summary
 
 
 def _franchise_invoice_status_matches(inv, desired):
@@ -5475,6 +5619,10 @@ def _build_franchise_report_payload(report_type, filters, allowed_companies, gro
             for p in projects:
                 rows.append([p.get('franchisee_name') or '', p.get('project_name') or '', p.get('project_code') or '', _franchise_client_display(p), p.get('status') or '', _report_money(p.get('fixed_price')), int(p.get('booking_count') or 0), _report_money(p.get('additional_costs'))])
 
+        elif report_type == 'expected_booking_revenue':
+            columns, rows, expected_summary = _franchise_expected_booking_revenue_rows(conn, filters, allowed_company_ids)
+            bookings = [None] * int(expected_summary.get('booking_count') or 0)
+
         elif report_type == 'invoice_summary':
             invoices = _franchise_invoice_rows(conn, filters, allowed_company_ids, outstanding_only=False)
             grouped = {}
@@ -5565,12 +5713,15 @@ def api_franchise_reports_overview():
         project_row = conn.execute(f"""SELECT COUNT(*) AS project_count,
                                              SUM(COALESCE(p.fixed_price, 0)) AS fixed_value
                                       FROM projects p WHERE {project_scope}""", project_params).fetchone()
+        _, _, expected_summary = _franchise_expected_booking_revenue_rows(conn, filters, allowed_ids)
         booking_data = dict(booking_row) if booking_row else {}
         project_data = dict(project_row) if project_row else {}
         metrics = {
             'linked_franchisees': len(allowed_ids),
             'bookings': int(booking_data.get('total') or 0),
             'completed_bookings': int(booking_data.get('completed') or 0),
+            'expected_booking_revenue': _report_money(expected_summary.get('total_expected_revenue')),
+            'uninvoiced_expected_revenue': _report_money(expected_summary.get('uninvoiced_expected_revenue')),
             'invoice_count': len(invoice_rows),
             'invoice_total': _report_money(sum(_report_money(i.get('computed_total')) for i in invoice_rows)),
             'outstanding_balance': _report_money(sum(_report_money(i.get('computed_balance')) for i in invoice_rows)),
