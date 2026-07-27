@@ -45,13 +45,66 @@ except Exception:
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-app.secret_key = os.environ.get('SECRET_KEY', 'change-me-for-render-testing')
+
+
+def _is_production_runtime():
+    return bool(os.environ.get('RENDER') or os.environ.get('FLASK_ENV') == 'production' or os.environ.get('EASYADMIN_ENV') == 'production')
+
+
+def _load_secret_key():
+    secret_key = (os.environ.get('SECRET_KEY') or '').strip()
+    unsafe_values = {'change-me-for-render-testing', 'change-me', 'secret', 'password'}
+    if secret_key and secret_key not in unsafe_values:
+        return secret_key
+    if _is_production_runtime():
+        raise RuntimeError('SECRET_KEY must be set to a strong unique value in production.')
+    return secret_key or 'dev-only-secret-key-not-for-production'
+
+
+app.secret_key = _load_secret_key()
 
 # --- Security: session inactivity timeout ---
 DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS = int(os.environ.get('DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS', '900'))
 SESSION_IDLE_TIMEOUT_SECONDS = DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS
 SESSION_TIMEOUT_LOGIN_URL = '/login?timeout=1'
 app.config['SESSION_REFRESH_EACH_REQUEST'] = True
+
+
+def validate_password_strength(password, username=''):
+    password = password or ''
+    username = (username or '').strip().lower()
+    errors = []
+    if len(password) < 8:
+        errors.append('at least 8 characters')
+    if not re.search(r'[A-Z]', password):
+        errors.append('one uppercase letter')
+    if not re.search(r'[a-z]', password):
+        errors.append('one lowercase letter')
+    if not re.search(r'\d', password):
+        errors.append('one number')
+    if username and password.lower() == username:
+        errors.append('must not match the username')
+    return errors
+
+
+def password_strength_message(password, username=''):
+    errors = validate_password_strength(password, username=username)
+    if not errors:
+        return ''
+    return 'Password must contain ' + ', '.join(errors) + '.'
+
+
+def generate_bootstrap_password(length=18):
+    # Development-only helper. Production bootstrap credentials must come from Render environment variables.
+    alphabet = string.ascii_letters + string.digits + '!@#$%&*?'
+    while True:
+        password = ''.join(secrets.choice(alphabet) for _ in range(length))
+        if not validate_password_strength(password):
+            return password
+
+
+def _bootstrap_setting(name):
+    return (os.environ.get(name) or '').strip()
 
 
 # --- Render / Cloud-ready configuration ---
@@ -1258,7 +1311,12 @@ def init_db():
     conn.execute('CREATE INDEX IF NOT EXISTS idx_scorecard_questions_company_block ON tenant_scorecard_questions(company_id, block_id, sort_order)')
 
     if conn.execute('SELECT COUNT(*) FROM companies').fetchone()[0] == 0:
-        conn.execute('INSERT INTO companies (name, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, google_calendar_sync) VALUES ("Marvellous Maids", 1, 1, 1, 1, 1, 0)')
+        bootstrap_company_name = _bootstrap_setting('EASYADMIN_BOOTSTRAP_COMPANY_NAME')
+        if not bootstrap_company_name:
+            if _is_production_runtime():
+                raise RuntimeError('No company exists. Set EASYADMIN_BOOTSTRAP_COMPANY_NAME for first-run production bootstrap.')
+            bootstrap_company_name = 'Easy Admin Demo Company'
+        conn.execute('INSERT INTO companies (name, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, google_calendar_sync) VALUES (?, 1, 1, 1, 1, 1, 0)', (bootstrap_company_name,))
     default_company_id = conn.execute('SELECT id FROM companies LIMIT 1').fetchone()[0]
     for comp in conn.execute('SELECT id, industry_template FROM companies').fetchall():
         ensure_tenant_template(conn, comp['id'], dict(comp).get('industry_template') or 'Cleaning', force_reset=False)
@@ -1343,9 +1401,20 @@ def init_db():
     conn.execute('UPDATE users SET company_id = ? WHERE company_id IS NULL', (default_company_id,))
 
     if conn.execute('SELECT COUNT(*) FROM users WHERE is_superadmin=1').fetchone()[0] == 0:
-        default_hash = generate_password_hash('Fawaaz!23')
-        conn.execute('''INSERT INTO users (username, password_hash, company_id, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, is_superadmin, is_company_admin) 
-                        VALUES (?, ?, ?, 1, 1, 1, 1, 1, 1, 1, 1)''', ('Marvellous', default_hash, default_company_id))
+        bootstrap_username = _bootstrap_setting('EASYADMIN_BOOTSTRAP_ADMIN_USERNAME')
+        bootstrap_password = _bootstrap_setting('EASYADMIN_BOOTSTRAP_ADMIN_PASSWORD')
+        bootstrap_email = _bootstrap_setting('EASYADMIN_BOOTSTRAP_ADMIN_EMAIL')
+        if not bootstrap_username or not bootstrap_password:
+            if _is_production_runtime():
+                raise RuntimeError('No Super Admin exists. Set EASYADMIN_BOOTSTRAP_ADMIN_USERNAME and EASYADMIN_BOOTSTRAP_ADMIN_PASSWORD for first-run production bootstrap.')
+            bootstrap_username = bootstrap_username or 'local_admin'
+            bootstrap_password = bootstrap_password or generate_bootstrap_password()
+            app.logger.warning('Development bootstrap Super Admin created with username %s. Set EASYADMIN_BOOTSTRAP_ADMIN_PASSWORD to control the password.', bootstrap_username)
+        password_error = password_strength_message(bootstrap_password, bootstrap_username)
+        if password_error:
+            raise RuntimeError('EASYADMIN_BOOTSTRAP_ADMIN_PASSWORD is not strong enough: ' + password_error)
+        conn.execute('''INSERT INTO users (username, email, password_hash, company_id, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, is_superadmin, is_company_admin) 
+                        VALUES (?, ?, ?, ?, 1, 1, 1, 1, 1, 1, 1, 1)''', (bootstrap_username, bootstrap_email, generate_password_hash(bootstrap_password), default_company_id))
 
     conn.execute('''CREATE TABLE IF NOT EXISTS invoices (
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_id INTEGER, client_name TEXT, 
@@ -1360,30 +1429,9 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE invoice_items ADD COLUMN unit_price REAL')
     except sqlite3.OperationalError: pass
-    try: conn.execute('ALTER TABLE invoice_items ADD COLUMN project_id INTEGER')
-    except sqlite3.OperationalError: pass
     try: conn.execute('UPDATE invoice_items SET quantity=1 WHERE quantity IS NULL OR quantity<=0')
     except sqlite3.OperationalError: pass
     try: conn.execute('UPDATE invoice_items SET unit_price=amount WHERE unit_price IS NULL')
-    except sqlite3.OperationalError: pass
-    conn.execute('''CREATE TABLE IF NOT EXISTS invoice_projects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        company_id INTEGER,
-        invoice_id INTEGER,
-        project_id INTEGER,
-        amount REAL DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(company_id, invoice_id, project_id)
-    )''')
-    for c_name, c_type in [
-        ('company_id', 'INTEGER'), ('invoice_id', 'INTEGER'), ('project_id', 'INTEGER'),
-        ('amount', 'REAL DEFAULT 0'), ('created_at', 'DATETIME DEFAULT CURRENT_TIMESTAMP')
-    ]:
-        try: conn.execute(f'ALTER TABLE invoice_projects ADD COLUMN {c_name} {c_type}')
-        except sqlite3.OperationalError: pass
-    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_projects_invoice ON invoice_projects(company_id, invoice_id)')
-    except sqlite3.OperationalError: pass
-    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_projects_project ON invoice_projects(company_id, project_id)')
     except sqlite3.OperationalError: pass
     conn.execute('''CREATE TABLE IF NOT EXISTS invoice_payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2362,14 +2410,8 @@ def normalise_billing_item(item):
     else:
         unit_price = sanitize_money(item.get('unit_price'), 0)
         amount = round(quantity * unit_price, 2)
-    project_id = None
-    try:
-        project_id = int(item.get('project_id') or 0) or None
-    except Exception:
-        project_id = None
     return {
         'booking_id': item.get('booking_id'),
-        'project_id': project_id,
         'service_date': item.get('service_date'),
         'description': item.get('description') or '',
         'quantity': quantity,
@@ -3904,8 +3946,8 @@ def change_password():
             error_msg = 'Please complete all password fields.'
         elif new_password != confirm_password:
             error_msg = 'New password and confirm password do not match.'
-        elif len(new_password) < 8:
-            error_msg = 'New password must be at least 8 characters long.'
+        elif password_strength_message(new_password, session.get('username')):
+            error_msg = password_strength_message(new_password, session.get('username'))
         else:
             conn = get_db_connection()
             try:
@@ -7271,6 +7313,8 @@ def api_staff_admin_account_save():
     enabled = bool(data.get('enabled', True))
     if enabled and not username:
         return _staff_json_error('Please enter a username for this staff account.', 400)
+    if enabled and password and password_strength_message(password, username):
+        return _staff_json_error(password_strength_message(password, username), 400)
     conn = get_db_connection()
     try:
         employee = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (employee_id, cid)).fetchone()
@@ -7289,10 +7333,12 @@ def api_staff_admin_account_save():
                                     WHERE id=? AND company_id=?''',
                                  (username or existing['username'], employee_email, employee_id, 1 if enabled else 0, existing['id'], cid))
             elif enabled:
+                if not password:
+                    return _staff_json_error('Please enter a temporary password for the new staff account.', 400)
                 employee_email = (dict(employee).get('email') or '').strip()
                 conn.execute('''INSERT INTO users (username, email, company_id, password_hash, employee_id, is_staff, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, can_booking_readonly, can_finance_readonly, can_payroll_readonly, can_hiring_readonly, can_invoicing_readonly, can_accounting_readonly, is_superadmin, is_company_admin)
                                 VALUES (?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)''',
-                             (username, employee_email, cid, generate_password_hash(password or 'Password123'), employee_id))
+                             (username, employee_email, cid, generate_password_hash(password), employee_id))
             conn.commit()
         except sqlite3.IntegrityError:
             return _staff_json_error('That username already exists. Please choose another username.', 400)
@@ -9150,19 +9196,29 @@ def save_user():
         selected_company = conn.execute('SELECT COALESCE(can_franchise_reports, 0) AS can_franchise_reports FROM companies WHERE id=?', (cid,)).fetchone() if cid else None
         can_fr = 1 if data.get('can_franchise_reports') and dict(selected_company or {}).get('can_franchise_reports') else 0
 
+    password_value = (data.get('password') or '').strip()
+    if not data.get('id') and not password_value:
+        conn.close()
+        return jsonify({"status": "error", "message": "Please enter a temporary password for the new user."}), 400
+    if password_value:
+        password_error = password_strength_message(password_value, data.get('username'))
+        if password_error:
+            conn.close()
+            return jsonify({"status": "error", "message": password_error}), 400
+
     action_msg = None
     try:
         if data.get('id'):
             if data.get('password'):
                 conn.execute('''UPDATE users SET username=?, email=?, company_id=?, password_hash=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, can_booking_readonly=?, can_finance_readonly=?, can_payroll_readonly=?, can_hiring_readonly=?, can_invoicing_readonly=?, can_accounting_readonly=?, can_franchise_reports=?, is_company_admin=? WHERE id=? AND is_superadmin=0''',
-                             (data['username'], user_email, cid, generate_password_hash(data['password']), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, can_fr, is_comp_admin, data['id']))
+                             (data['username'], user_email, cid, generate_password_hash(password_value), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, can_fr, is_comp_admin, data['id']))
             else:
                 conn.execute('''UPDATE users SET username=?, email=?, company_id=?, can_booking=?, can_finance=?, can_payroll=?, can_hiring=?, can_invoicing=?, can_accounting=?, can_booking_readonly=?, can_finance_readonly=?, can_payroll_readonly=?, can_hiring_readonly=?, can_invoicing_readonly=?, can_accounting_readonly=?, can_franchise_reports=?, is_company_admin=? WHERE id=? AND is_superadmin=0''',
                              (data['username'], user_email, cid, can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, can_fr, is_comp_admin, data['id']))
             action_msg = ('System Admin', 'Updated User', f"Updated settings for user: {data['username']}")
         else:
             conn.execute('''INSERT INTO users (username, email, company_id, password_hash, can_booking, can_finance, can_payroll, can_hiring, can_invoicing, can_accounting, can_booking_readonly, can_finance_readonly, can_payroll_readonly, can_hiring_readonly, can_invoicing_readonly, can_accounting_readonly, can_franchise_reports, is_superadmin, is_company_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)''',
-                         (data['username'], user_email, cid, generate_password_hash(data['password'] or 'Password123'), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, can_fr, is_comp_admin))
+                         (data['username'], user_email, cid, generate_password_hash(password_value), can_b, can_f, can_p, can_h, can_i, can_a, can_b_ro, can_f_ro, can_p_ro, can_h_ro, can_i_ro, can_a_ro, can_fr, is_comp_admin))
             action_msg = ('System Admin', 'Created User', f"Created new user account: {data['username']}")
         if data.get('id') and not can_fr:
             conn.execute('DELETE FROM franchise_group_users WHERE user_id=?', (data['id'],))
@@ -12863,10 +12919,11 @@ def invoicing_index():
             d['formatted_num'] = f"{inv_prefix}{int(inv_start) + d['id'] - 1:04d}"
         except:
             d['formatted_num'] = f"{inv_prefix}{d['id']:04d}"
-        project_summary = get_invoice_project_summary(conn, cid, d['id'], d.get('project_id'))
-        d['project_name'] = project_summary['project_name']
-        d['project_code'] = project_summary['project_code']
-        d['project_count'] = project_summary['project_count']
+        project = None
+        if d.get('project_id'):
+            project = conn.execute('SELECT project_name, project_code FROM projects WHERE id=? AND company_id=?', (d.get('project_id'), cid)).fetchone()
+        d['project_name'] = project['project_name'] if project else ''
+        d['project_code'] = project['project_code'] if project else ''
         payments = [dict(p) for p in conn.execute(
             "SELECT id, payment_date, amount, payment_method, reference FROM invoice_payments WHERE company_id=? AND invoice_id=? ORDER BY payment_date ASC, id ASC",
             (cid, d['id'])
@@ -12992,65 +13049,6 @@ def get_uninvoiced():
     conn.close()
     return jsonify(res)
 
-
-def get_invoice_project_summary(conn, company_id, invoice_id, fallback_project_id=None):
-    """Return linked project names/codes for an invoice, including legacy single-project invoices."""
-    rows = []
-    try:
-        rows = conn.execute('''SELECT p.id, p.project_name, p.project_code
-                               FROM invoice_projects ip
-                               JOIN projects p ON p.id=ip.project_id AND p.company_id=ip.company_id
-                               WHERE ip.company_id=? AND ip.invoice_id=?
-                               ORDER BY p.start_date ASC, p.project_name ASC''', (company_id, invoice_id)).fetchall()
-    except Exception:
-        rows = []
-    if not rows and fallback_project_id:
-        try:
-            row = conn.execute('SELECT id, project_name, project_code FROM projects WHERE id=? AND company_id=?', (fallback_project_id, company_id)).fetchone()
-            if row:
-                rows = [row]
-        except Exception:
-            rows = []
-    labels = []
-    codes = []
-    ids = []
-    for row in rows:
-        d = dict(row)
-        ids.append(d.get('id'))
-        name = d.get('project_name') or 'Project'
-        code = d.get('project_code') or ''
-        labels.append(f"{name} ({code})" if code else name)
-        if code:
-            codes.append(code)
-    return {
-        'project_ids': ids,
-        'project_name': ', '.join(labels),
-        'project_code': ', '.join(codes),
-        'project_count': len(labels)
-    }
-
-
-def parse_project_id_list_from_invoice_payload(data):
-    raw_ids = data.get('project_ids') if isinstance(data, dict) else None
-    if raw_ids is None:
-        raw_ids = []
-    if not isinstance(raw_ids, list):
-        raw_ids = [raw_ids]
-    if data.get('project_id') not in (None, ''):
-        raw_ids.insert(0, data.get('project_id'))
-    seen = set()
-    project_ids = []
-    for raw in raw_ids:
-        try:
-            pid = int(raw or 0)
-        except Exception:
-            pid = 0
-        if pid and pid not in seen:
-            seen.add(pid)
-            project_ids.append(pid)
-    return project_ids
-
-
 @app.route('/api/save_invoice', methods=['POST'])
 def save_invoice():
     data = request.json
@@ -13064,63 +13062,42 @@ def save_invoice():
     # The client profile discount is only a default that pre-populates the form;
     # users may override it for this individual invoice.
     if invoice_type == 'project':
-        project_ids = parse_project_id_list_from_invoice_payload(data)
-        if not project_ids:
-            conn.close()
-            return jsonify({"status": "error", "message": "Select at least one project to invoice."}), 400
-        project_id = project_ids[0]
-        placeholders = ','.join(['?'] * len(project_ids))
-        projects = conn.execute(f'''SELECT p.*, c.id AS linked_client_id, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
-                                   FROM projects p
-                                   LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
-                                   WHERE p.id IN ({placeholders}) AND p.company_id=?
-                                   ORDER BY p.start_date ASC, p.project_name ASC''', project_ids + [cid]).fetchall()
-        if len(projects) != len(project_ids):
-            conn.close()
-            return jsonify({"status": "error", "message": "One or more selected projects could not be found for this company."}), 400
-        for project in projects:
-            if (project['status'] or '').lower() == 'cancelled':
-                conn.close()
-                return jsonify({"status": "error", "message": f"Cancelled projects cannot be invoiced: {project['project_name'] or 'Project'}."}), 400
-            if not project['linked_client_id']:
-                conn.close()
-                return jsonify({"status": "error", "message": f"Project is not linked to a valid client: {project['project_name'] or 'Project'}."}), 400
-        project_client_ids = {int(p['linked_client_id']) for p in projects if p['linked_client_id']}
-        if len(project_client_ids) != 1:
-            conn.close()
-            return jsonify({"status": "error", "message": "One invoice can only include projects for the same client."}), 400
-        project_client_id = next(iter(project_client_ids))
-        submitted_client_id = None
         try:
-            submitted_client_id = int(data.get('client_id') or 0) or None
+            project_id = int(data.get('project_id') or 0)
         except Exception:
-            submitted_client_id = None
-        if submitted_client_id and submitted_client_id != project_client_id:
+            project_id = 0
+        project = conn.execute('''SELECT p.*, c.id AS linked_client_id, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
+                                  FROM projects p
+                                  LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
+                                  WHERE p.id=? AND p.company_id=?''', (project_id, cid)).fetchone()
+        if not project:
             conn.close()
-            return jsonify({"status": "error", "message": "Selected projects do not belong to the selected client."}), 400
-        project_client = get_client_by_id(conn, cid, project_client_id)
+            return jsonify({"status": "error", "message": "Project not found for this company."}), 400
+        if (project['status'] or '').lower() == 'cancelled':
+            conn.close()
+            return jsonify({"status": "error", "message": "Cancelled projects cannot be invoiced."}), 400
+        if not project['linked_client_id']:
+            conn.close()
+            return jsonify({"status": "error", "message": "This project is not linked to a valid client."}), 400
+        project_client = get_client_by_id(conn, cid, project['linked_client_id'])
         client_id = project_client['id']
         client_name = client_display_name(project_client)
-        project_lookup = {int(p['id']): p for p in projects}
+        project_label = project['project_name'] or 'Project'
+        if project['project_code']:
+            project_label = f"{project_label} ({project['project_code']})"
+        project_fixed_price = float(project['fixed_price'] or 0)
         submitted_items = data.get('items') or []
         if submitted_items:
             items = submitted_items
         else:
-            items = []
-            for project in projects:
-                project_label = project['project_name'] or 'Project'
-                if project['project_code']:
-                    project_label = f"{project_label} ({project['project_code']})"
-                project_fixed_price = float(project['fixed_price'] or 0)
-                items.append({
-                    'booking_id': None,
-                    'project_id': project['id'],
-                    'service_date': project['start_date'] or data.get('date'),
-                    'description': f"Project: {project_label}",
-                    'quantity': 1,
-                    'unit_price': project_fixed_price,
-                    'amount': project_fixed_price
-                })
+            items = [{
+                'booking_id': None,
+                'service_date': project['start_date'] or data.get('date'),
+                'description': f"Project: {project_label}",
+                'quantity': 1,
+                'unit_price': project_fixed_price,
+                'amount': project_fixed_price
+            }]
     else:
         try:
             client = resolve_client_from_payload(conn, cid, data, id_key='client_id', name_key='client_name')
@@ -13147,27 +13124,15 @@ def save_invoice():
                    (cid, client_id, client_name, data['date'], data['due_date'], original_subtotal, vat_amount, total, 'Unpaid', discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id))
     inv_id = cursor.lastrowid
     
-    project_line_amounts = {}
     for item in items:
-        item_project_id = item.get('project_id')
-        cursor.execute("INSERT INTO invoice_items (invoice_id, booking_id, project_id, service_date, description, quantity, unit_price, amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                       (inv_id, item.get('booking_id'), item_project_id, item.get('service_date'), item['description'], item.get('quantity', 1), item.get('unit_price', item['amount']), item['amount']))
-        if item_project_id:
-            project_line_amounts[item_project_id] = project_line_amounts.get(item_project_id, 0.0) + float(item.get('amount') or 0)
+        cursor.execute("INSERT INTO invoice_items (invoice_id, booking_id, service_date, description, quantity, unit_price, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (inv_id, item.get('booking_id'), item.get('service_date'), item['description'], item.get('quantity', 1), item.get('unit_price', item['amount']), item['amount']))
+        
         if item.get('booking_id'):
             cursor.execute("UPDATE bookings SET is_invoiced=1 WHERE id=? AND company_id=?", (item['booking_id'], cid))
 
     if invoice_type == 'project' and project_id:
-        for linked_project_id in project_ids:
-            linked_amount = project_line_amounts.get(linked_project_id)
-            if linked_amount is None:
-                linked_project = project_lookup.get(linked_project_id) if 'project_lookup' in locals() else None
-                linked_amount = float(linked_project['fixed_price'] or 0) if linked_project else 0.0
-            cursor.execute("INSERT OR IGNORE INTO invoice_projects (company_id, invoice_id, project_id, amount) VALUES (?, ?, ?, ?)",
-                           (cid, inv_id, linked_project_id, linked_amount))
-            cursor.execute("UPDATE invoice_projects SET amount=? WHERE company_id=? AND invoice_id=? AND project_id=?",
-                           (linked_amount, cid, inv_id, linked_project_id))
-            cursor.execute("UPDATE projects SET status='Invoiced', updated_at=CURRENT_TIMESTAMP WHERE id=? AND company_id=?", (linked_project_id, cid))
+        cursor.execute("UPDATE projects SET status='Invoiced', updated_at=CURRENT_TIMESTAMP WHERE id=? AND company_id=?", (project_id, cid))
 
     accounting_result = _auto_post_invoice_to_accounting_if_enabled(conn, cid, inv_id)
 
@@ -13219,11 +13184,11 @@ def get_invoice(inv_id):
         if 'email' in client_dict and client_dict['email']:
             client_email = client_dict['email']
 
-    project_summary = get_invoice_project_summary(conn, cid, inv_id, d.get('project_id'))
-    d['project_name'] = project_summary['project_name']
-    d['project_code'] = project_summary['project_code']
-    d['project_count'] = project_summary['project_count']
-    d['project_ids'] = project_summary['project_ids']
+    project = None
+    if d.get('project_id'):
+        project = conn.execute('SELECT * FROM projects WHERE id=? AND company_id=?', (d.get('project_id'), cid)).fetchone()
+    d['project_name'] = project['project_name'] if project else ''
+    d['project_code'] = project['project_code'] if project else ''
     d['invoice_type'] = d.get('invoice_type') or 'standard'
 
     totals = get_invoice_financial_totals(conn, cid, inv_id)
