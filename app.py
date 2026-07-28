@@ -9268,7 +9268,12 @@ def booking_index():
     cid = session['company_id']
     ensure_tenant_template(conn, cid)
     clients = prepare_client_options(conn.execute('SELECT * FROM clients WHERE company_id=? ORDER BY name ASC, surname ASC, id ASC', (cid,)).fetchall())
-    employees = conn.execute("SELECT * FROM employees WHERE company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL)", (cid,)).fetchall()
+    employees = conn.execute("SELECT * FROM employees WHERE company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL) ORDER BY name ASC", (cid,)).fetchall()
+    active_booking_employees = conn.execute("""SELECT * FROM employees
+                                               WHERE company_id=?
+                                               AND (emp_type != 'Supplier' OR emp_type IS NULL)
+                                               AND LOWER(COALESCE(status, 'Active')) != 'inactive'
+                                               ORDER BY name ASC""", (cid,)).fetchall()
     services = [dict(row) for row in conn.execute('SELECT * FROM services WHERE company_id=? ORDER BY name ASC', (cid,)).fetchall()]
     projects = [dict(row) for row in conn.execute('''SELECT p.*, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
                                                      FROM projects p
@@ -9279,7 +9284,7 @@ def booking_index():
     booking_custom_fields = get_tenant_custom_fields(conn, cid, 'booking', visible_only=True)
     conn.commit()
     conn.close()
-    return render_template('booking_index.html', clients=clients, employees=employees, services=services, projects=projects, session=session, tenant_labels=tenant_labels, booking_custom_fields=booking_custom_fields)
+    return render_template('booking_index.html', clients=clients, employees=employees, active_booking_employees=active_booking_employees, services=services, projects=projects, session=session, tenant_labels=tenant_labels, booking_custom_fields=booking_custom_fields)
 
 @app.route('/bookings')
 def bookings():
@@ -9521,6 +9526,115 @@ def _delete_attachment_files_for_rows(rows):
             print(f'Bulk booking attachment delete warning: {exc}')
 
 
+def _split_booking_employee_names(raw_value):
+    names = []
+    seen = set()
+    for raw_name in str(raw_value or '').split(','):
+        name = raw_name.strip()
+        key = name.lower()
+        if name and key not in seen:
+            names.append(name)
+            seen.add(key)
+    return names
+
+
+def _apply_bulk_employee_assignment_mode(existing_names, selected_names, mode):
+    existing = _split_booking_employee_names(', '.join(existing_names or []))
+    selected = _split_booking_employee_names(', '.join(selected_names or []))
+    selected_keys = {name.lower() for name in selected}
+    if mode == 'replace':
+        return selected
+    if mode == 'add':
+        result = list(existing)
+        existing_keys = {name.lower() for name in existing}
+        for name in selected:
+            if name.lower() not in existing_keys:
+                result.append(name)
+                existing_keys.add(name.lower())
+        return result
+    if mode == 'remove':
+        return [name for name in existing if name.lower() not in selected_keys]
+    raise ValueError('Invalid employee update action.')
+
+
+def _employee_has_booking_outside_bulk_selection(conn, company_id, employee_name, target_date, excluded_booking_ids):
+    rows = conn.execute("""SELECT id, employee FROM bookings
+                           WHERE company_id=? AND SUBSTR(COALESCE(start, ''), 1, 10)=?""",
+                        (company_id, target_date)).fetchall()
+    excluded = {int(value) for value in (excluded_booking_ids or []) if str(value or '').isdigit()}
+    for row in rows:
+        if int(row['id']) in excluded:
+            continue
+        if employee_name_matches(row['employee'] or '', employee_name):
+            return True
+    return False
+
+
+def _bulk_employee_assignment_warnings(conn, company_id, plans, employee_by_name, selected_booking_ids):
+    warnings = []
+    warning_keys = set()
+    proposed_by_date_employee = {}
+    newly_assigned_by_date_employee = set()
+
+    for plan in plans:
+        booking_date = _booking_date_part(plan['row'].get('start'))
+        for employee_name in plan['new_employee_names']:
+            key = (booking_date, employee_name.lower())
+            proposed_by_date_employee.setdefault(key, []).append(plan['row'].get('id'))
+        for employee_name in plan.get('warning_employee_names') or []:
+            newly_assigned_by_date_employee.add((booking_date, employee_name.lower()))
+
+        if plan.get('employee_changed') and not plan['new_employee_names']:
+            text = f"Booking {plan['row'].get('id')} on {booking_date} will become unassigned."
+            if text not in warning_keys:
+                warnings.append(text)
+                warning_keys.add(text)
+
+    for (booking_date, employee_key), booking_ids in proposed_by_date_employee.items():
+        if len(booking_ids) > 1 and (booking_date, employee_key) in newly_assigned_by_date_employee:
+            employee = employee_by_name.get(employee_key)
+            employee_name = employee['name'] if employee else employee_key
+            text = f"{employee_name} will be assigned to {len(booking_ids)} selected bookings on {booking_date}."
+            if text not in warning_keys:
+                warnings.append(text)
+                warning_keys.add(text)
+
+    for plan in plans:
+        row = plan['row']
+        booking_id = row.get('id')
+        booking_date_text = _booking_date_part(row.get('start'))
+        try:
+            booking_date = datetime.strptime(booking_date_text, '%Y-%m-%d')
+        except Exception:
+            continue
+        for employee_name in plan.get('warning_employee_names') or []:
+            employee = employee_by_name.get(employee_name.lower())
+            if not employee:
+                continue
+            if _employee_has_booking_outside_bulk_selection(conn, company_id, employee_name, booking_date_text, selected_booking_ids):
+                text = f"{employee_name} already has another booking on {booking_date_text}."
+                if text not in warning_keys:
+                    warnings.append(text)
+                    warning_keys.add(text)
+            leave_dates = get_employee_leave_dates(conn, company_id, employee['id'], booking_date, booking_date)
+            if booking_date_text in leave_dates:
+                text = f"{employee_name} is recorded as being on leave on {booking_date_text}."
+                if text not in warning_keys:
+                    warnings.append(text)
+                    warning_keys.add(text)
+            try:
+                summary = get_booking_staff_hours_summary(conn, company_id, employee, booking_date, 0, booking_id, True)
+                for message in summary.get('week_messages') or []:
+                    text = f"{employee_name} on {booking_date_text}: {message}."
+                    if text not in warning_keys:
+                        warnings.append(text)
+                        warning_keys.add(text)
+            except Exception as exc:
+                print(f'Bulk employee hours warning check failed for booking {booking_id}: {exc}')
+
+    return warnings
+
+
 @app.route('/api/bulk_bookings/search', methods=['POST'])
 def api_bulk_bookings_search():
     data = request.get_json(silent=True) or {}
@@ -9620,11 +9734,19 @@ def api_bulk_bookings_update():
     update_service = bool(data.get('update_service'))
     update_time = bool(data.get('update_time'))
     update_notes = bool(data.get('update_notes'))
+    update_employees = bool(data.get('update_employees'))
+    employee_mode = str(data.get('employee_mode') or 'replace').strip().lower()
+    selected_employee_names = data.get('employee_names') if isinstance(data.get('employee_names'), list) else []
+    preview_only = bool(data.get('preview_only'))
     skip_invoiced = data.get('skip_invoiced', True) is not False
     custom_updates = data.get('custom_fields') if isinstance(data.get('custom_fields'), dict) else {}
 
-    if not any([update_project, update_service, update_time, update_notes, bool(custom_updates)]):
+    if not any([update_project, update_service, update_time, update_notes, update_employees, bool(custom_updates)]):
         return jsonify({'status': 'error', 'message': 'Please tick at least one field to update.'}), 400
+    if update_employees and employee_mode not in ('replace', 'add', 'remove'):
+        return jsonify({'status': 'error', 'message': 'Please select a valid employee update action.'}), 400
+    if update_employees and not selected_employee_names:
+        return jsonify({'status': 'error', 'message': 'Please select at least one employee.'}), 400
 
     conn = get_db_connection()
     try:
@@ -9654,6 +9776,40 @@ def api_bulk_bookings_update():
                 conn.close()
                 return jsonify({'status': 'error', 'message': 'Please enter a valid time.'}), 400
 
+        employee_rows = conn.execute("""SELECT * FROM employees
+                                        WHERE company_id=?
+                                        AND (emp_type != 'Supplier' OR emp_type IS NULL)
+                                        ORDER BY name ASC""", (cid,)).fetchall()
+        employee_by_name = {(row['name'] or '').strip().lower(): dict(row) for row in employee_rows if (row['name'] or '').strip()}
+        canonical_selected_employees = []
+        if update_employees:
+            seen_selected = set()
+            invalid_employees = []
+            inactive_employees = []
+            for raw_name in selected_employee_names:
+                clean_name = str(raw_name or '').strip()
+                key = clean_name.lower()
+                employee = employee_by_name.get(key)
+                if not employee:
+                    if clean_name:
+                        invalid_employees.append(clean_name)
+                    continue
+                if str(employee.get('status') or 'Active').strip().lower() == 'inactive':
+                    inactive_employees.append(employee.get('name') or clean_name)
+                    continue
+                if key not in seen_selected:
+                    canonical_selected_employees.append(employee.get('name') or clean_name)
+                    seen_selected.add(key)
+            if invalid_employees:
+                conn.close()
+                return jsonify({'status': 'error', 'message': 'Employee not found for this company: ' + ', '.join(invalid_employees)}), 400
+            if inactive_employees:
+                conn.close()
+                return jsonify({'status': 'error', 'message': 'Inactive employees cannot be assigned through bulk manage: ' + ', '.join(inactive_employees)}), 400
+            if not canonical_selected_employees:
+                conn.close()
+                return jsonify({'status': 'error', 'message': 'Please select at least one active employee.'}), 400
+
         custom_config = get_tenant_custom_fields(conn, cid, 'booking', visible_only=True)
         custom_by_key = {f['field_key']: f for f in custom_config}
         clean_custom_updates = {}
@@ -9671,24 +9827,83 @@ def api_bulk_bookings_update():
             clean_custom_updates[key] = clean_value
 
         placeholders = ','.join(['?'] * len(booking_ids))
-        rows = conn.execute(f'''SELECT b.*, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
+        rows = conn.execute(f"""SELECT b.*, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
                                FROM bookings b
                                LEFT JOIN clients c ON c.id=b.client_id AND c.company_id=b.company_id
                                WHERE b.company_id=? AND b.id IN ({placeholders})
-                               ORDER BY b.start ASC, b.id ASC''', [cid] + booking_ids).fetchall()
-        updated_ids = []
+                               ORDER BY b.start ASC, b.id ASC""", [cid] + booking_ids).fetchall()
+
+        plans = []
         skipped_invoiced = 0
-        google_sync_payload = []
+        skipped_status = 0
+        unchanged_employee_assignments = 0
+        found_ids = set()
+        restricted_statuses = {'in progress', 'completed', 'cancelled'}
 
         for row in rows:
             r = dict(row)
+            found_ids.add(int(r.get('id')))
             if skip_invoiced and _db_truthy(r.get('is_invoiced')):
                 skipped_invoiced += 1
                 continue
+            if update_employees and str(r.get('mobile_status') or 'Scheduled').strip().lower() in restricted_statuses:
+                skipped_status += 1
+                continue
+            old_employee_names = _split_booking_employee_names(r.get('employee'))
+            new_employee_names = list(old_employee_names)
+            if update_employees:
+                new_employee_names = _apply_bulk_employee_assignment_mode(old_employee_names, canonical_selected_employees, employee_mode)
+                if [name.lower() for name in new_employee_names] == [name.lower() for name in old_employee_names]:
+                    unchanged_employee_assignments += 1
+            old_employee_keys = {name.lower() for name in old_employee_names}
+            warning_employee_names = [name for name in new_employee_names if name.lower() not in old_employee_keys]
+            plans.append({
+                'row': r,
+                'old_employee_names': old_employee_names,
+                'new_employee_names': new_employee_names,
+                'warning_employee_names': warning_employee_names,
+                'employee_changed': [name.lower() for name in new_employee_names] != [name.lower() for name in old_employee_names]
+            })
+
+        missing_count = max(0, len(booking_ids) - len(found_ids))
+        employee_warnings = _bulk_employee_assignment_warnings(conn, cid, plans, employee_by_name, booking_ids) if update_employees and preview_only else []
+
+        if preview_only:
+            conn.close()
+            message_parts = [f"{len(plans)} booking(s) can be updated."]
+            if skipped_invoiced:
+                message_parts.append(f"{skipped_invoiced} invoiced booking(s) will be skipped.")
+            if skipped_status:
+                message_parts.append(f"{skipped_status} in-progress, completed, or cancelled booking(s) will be skipped.")
+            if missing_count:
+                message_parts.append(f"{missing_count} booking(s) were not found for this company.")
+            if employee_warnings:
+                message_parts.append(f"{len(employee_warnings)} employee scheduling/compliance warning(s) were identified.")
+            return jsonify({
+                'status': 'success',
+                'preview': True,
+                'eligible': len(plans),
+                'skipped_invoiced': skipped_invoiced,
+                'skipped_status': skipped_status,
+                'missing': missing_count,
+                'warnings': employee_warnings,
+                'warning_count': len(employee_warnings),
+                'unchanged_employee_assignments': unchanged_employee_assignments,
+                'message': ' '.join(message_parts)
+            })
+
+        updated_ids = []
+        employee_changed_count = 0
+        removed_employee_notifications = []
+        google_sync_payload = []
+
+        for plan in plans:
+            r = plan['row']
             set_parts = []
             params = []
             new_start = r.get('start') or ''
             new_booking_type = r.get('booking_type') or ''
+            new_employee_value = ', '.join(plan['new_employee_names'])
             if update_project:
                 set_parts.append('project_id=?')
                 params.append(project_id)
@@ -9703,6 +9918,15 @@ def api_bulk_bookings_update():
             if update_notes:
                 set_parts.append('booking_notes=?')
                 params.append(str(data.get('booking_notes') or ''))
+            if update_employees:
+                set_parts.append('employee=?')
+                params.append(new_employee_value)
+                if plan['employee_changed']:
+                    employee_changed_count += 1
+                    new_keys = {name.lower() for name in plan['new_employee_names']}
+                    removed_names = [name for name in plan['old_employee_names'] if name.lower() not in new_keys]
+                    if removed_names:
+                        removed_employee_notifications.append((removed_names, r.get('id'), _booking_date_part(r.get('start'))))
             if set_parts:
                 params.extend([r.get('id'), cid])
                 conn.execute(f"UPDATE bookings SET {', '.join(set_parts)} WHERE id=? AND company_id=?", params)
@@ -9711,14 +9935,14 @@ def api_bulk_bookings_update():
                 if value:
                     conn.execute("INSERT INTO custom_field_values (company_id, module_name, record_id, field_key, field_value) VALUES (?, 'booking', ?, ?, ?)", (cid, r.get('id'), key, value))
             updated_ids.append(r.get('id'))
-            if session.get('comp_google_calendar') and r.get('google_event_id') and (update_service or update_time):
+            if session.get('comp_google_calendar') and r.get('google_event_id') and (update_service or update_time or update_employees):
                 client_name = ' '.join([x for x in [r.get('client_first_name'), r.get('client_surname')] if x]).strip() or r.get('client_company_name') or r.get('title') or ''
                 google_sync_payload.append({
                     'google_event_id': r.get('google_event_id'),
                     'client_name': client_name,
                     'date': _booking_date_part(new_start),
                     'time': _booking_time_part(new_start),
-                    'employee': r.get('employee') or '',
+                    'employee': new_employee_value if update_employees else (r.get('employee') or ''),
                     'booking_type': new_booking_type,
                     'transport': r.get('transport') or ''
                 })
@@ -9740,10 +9964,39 @@ def api_bulk_bookings_update():
             print(f"Google Sync Error on bulk booking update: {_format_google_calendar_error(exc)}")
     for booking_id in updated_ids:
         notify_staff_booking_event_async(session.get('company_id'), booking_id, 'booking_updated', 'Booking updated', 'One of your bookings was modified{date}.')
+    for removed_names, booking_id, booking_date in removed_employee_notifications:
+        notify_staff_employee_names_async(
+            session.get('company_id'),
+            removed_names,
+            'booking_reassigned',
+            'Booking reassigned',
+            f'A booking previously assigned to you for {format_display_date(booking_date)} was reassigned.',
+            '/staff/mobile?tab=bookings'
+        )
 
-    log_action('Booking & Ops', 'Bulk Updated Bookings', f"Updated {len(updated_ids)} bookings; skipped invoiced: {skipped_invoiced}")
-    return jsonify({'status': 'success', 'updated': len(updated_ids), 'skipped_invoiced': skipped_invoiced, 'message': f"Updated {len(updated_ids)} booking(s)." + (f" Skipped {skipped_invoiced} invoiced booking(s)." if skipped_invoiced else '')})
-
+    log_action('Booking & Ops', 'Bulk Updated Bookings', f"Updated {len(updated_ids)} bookings; employee assignment changes: {employee_changed_count}; skipped invoiced: {skipped_invoiced}; skipped status: {skipped_status}; warnings: {len(employee_warnings)}")
+    message_parts = [f"Updated {len(updated_ids)} booking(s)."]
+    if employee_changed_count:
+        message_parts.append(f"Employee assignments changed on {employee_changed_count} booking(s).")
+    if skipped_invoiced:
+        message_parts.append(f"Skipped {skipped_invoiced} invoiced booking(s).")
+    if skipped_status:
+        message_parts.append(f"Skipped {skipped_status} in-progress, completed, or cancelled booking(s).")
+    if missing_count:
+        message_parts.append(f"{missing_count} booking(s) were not found.")
+    if employee_warnings:
+        message_parts.append(f"Review {len(employee_warnings)} employee scheduling/compliance warning(s).")
+    return jsonify({
+        'status': 'success',
+        'updated': len(updated_ids),
+        'employee_changed': employee_changed_count,
+        'skipped_invoiced': skipped_invoiced,
+        'skipped_status': skipped_status,
+        'missing': missing_count,
+        'warnings': employee_warnings,
+        'warning_count': len(employee_warnings),
+        'message': ' '.join(message_parts)
+    })
 
 @app.route('/api/bulk_bookings/delete', methods=['POST'])
 def api_bulk_bookings_delete():

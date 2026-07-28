@@ -624,6 +624,43 @@
                                     <div class="form-text small">Use Ctrl/Cmd on desktop, or tap/select multiple services on touch devices.</div>
                                 </div>
                             </div>
+                            <div class="col-12">
+                                <div class="border rounded p-3 h-100">
+                                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                                        <div class="form-check mb-0">
+                                            <input class="form-check-input" type="checkbox" id="bulkManageUpdateEmployees">
+                                            <label class="form-check-label fw-bold" for="bulkManageUpdateEmployees">Update Assigned {{ employee_label }}s</label>
+                                        </div>
+                                        <select id="bulkManageEmployeeMode" class="form-select form-select-sm" style="max-width: 240px;">
+                                            <option value="replace">Replace current employees</option>
+                                            <option value="add">Add to current employees</option>
+                                            <option value="remove">Remove selected employees</option>
+                                        </select>
+                                    </div>
+                                    <input type="search" id="bulkManageEmployeeSearch" class="form-control form-control-sm mb-2" placeholder="Search active employees..." oninput="filterBulkManageEmployeeChoices()">
+                                    <div class="d-flex gap-2 mb-2">
+                                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="setBulkManageEmployeeChoices(true)">Select all shown</button>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="setBulkManageEmployeeChoices(false)">Clear shown</button>
+                                        <span id="bulkManageEmployeeChoiceCount" class="small text-muted align-self-center">0 selected</span>
+                                    </div>
+                                    <div class="border rounded bg-light p-2" style="max-height: 220px; overflow-y: auto;">
+                                        <div class="row g-2" id="bulkManageEmployeeChoices">
+                                            {% for e in active_booking_employees %}
+                                            <div class="col-md-4 bulk-manage-employee-choice" data-search="{{ e.name|lower|e }}">
+                                                <div class="form-check bg-white border rounded px-2 py-1">
+                                                    <input class="form-check-input bulk-manage-employee-cb" type="checkbox" value="{{ e.name }}" id="bulkManageEmployee_{{ e.id }}" onchange="updateBulkManageEmployeeChoiceCount()">
+                                                    <label class="form-check-label small fw-bold ms-1" for="bulkManageEmployee_{{ e.id }}">{{ e.name }}</label>
+                                                </div>
+                                            </div>
+                                            {% endfor %}
+                                            {% if not active_booking_employees %}
+                                            <div class="col-12 text-muted small">No active employees or providers are available.</div>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                    <div class="form-text small">Scheduling conflicts, leave and BCEA thresholds are shown as warnings. In-progress, completed and cancelled bookings are skipped when employee assignments are changed.</div>
+                                </div>
+                            </div>
                             <div class="col-md-6">
                                 <div class="border rounded p-3 h-100">
                                     <div class="form-check mb-2">
@@ -2069,6 +2106,12 @@
             if (bulkManageServiceSelect) {
                 Array.from(bulkManageServiceSelect.options).forEach((opt, idx) => opt.selected = idx === 0);
             }
+            document.getElementById('bulkManageUpdateEmployees').checked = false;
+            document.getElementById('bulkManageEmployeeMode').value = 'replace';
+            document.getElementById('bulkManageEmployeeSearch').value = '';
+            document.querySelectorAll('.bulk-manage-employee-cb').forEach(cb => cb.checked = false);
+            document.querySelectorAll('.bulk-manage-employee-choice').forEach(item => item.style.display = '');
+            updateBulkManageEmployeeChoiceCount();
             document.getElementById('bulkManageUpdateTime').checked = false;
             document.getElementById('bulkManageUpdateNotes').checked = false;
             document.getElementById('bulkManageProject').value = '';
@@ -2190,6 +2233,60 @@
             updateBulkManageSelectedCount();
         }
 
+        function selectedBulkManageEmployeeNames() {
+            return Array.from(document.querySelectorAll('.bulk-manage-employee-cb:checked')).map(cb => cb.value);
+        }
+
+        function updateBulkManageEmployeeChoiceCount() {
+            const countEl = document.getElementById('bulkManageEmployeeChoiceCount');
+            if (countEl) countEl.innerText = `${selectedBulkManageEmployeeNames().length} selected`;
+        }
+
+        function filterBulkManageEmployeeChoices() {
+            const query = (document.getElementById('bulkManageEmployeeSearch').value || '').trim().toLowerCase();
+            document.querySelectorAll('.bulk-manage-employee-choice').forEach(item => {
+                item.style.display = !query || (item.dataset.search || '').includes(query) ? '' : 'none';
+            });
+        }
+
+        function setBulkManageEmployeeChoices(checked) {
+            document.querySelectorAll('.bulk-manage-employee-choice').forEach(item => {
+                if (item.style.display === 'none') return;
+                const cb = item.querySelector('.bulk-manage-employee-cb');
+                if (cb) cb.checked = checked;
+            });
+            updateBulkManageEmployeeChoiceCount();
+        }
+
+        function collectBulkManagePayload(ids, previewOnly = false) {
+            const customFields = collectBulkManageCustomFields();
+            return {
+                booking_ids: ids,
+                update_project: document.getElementById('bulkManageUpdateProject').checked,
+                project_id: document.getElementById('bulkManageProject').value,
+                update_service: document.getElementById('bulkManageUpdateService').checked,
+                booking_type: getMultiSelectValues('bulkManageService'),
+                update_employees: document.getElementById('bulkManageUpdateEmployees').checked,
+                employee_mode: document.getElementById('bulkManageEmployeeMode').value,
+                employee_names: selectedBulkManageEmployeeNames(),
+                update_time: document.getElementById('bulkManageUpdateTime').checked,
+                time: document.getElementById('bulkManageTime').value,
+                update_notes: document.getElementById('bulkManageUpdateNotes').checked,
+                booking_notes: document.getElementById('bulkManageNotes').value,
+                skip_invoiced: document.getElementById('bulkManageSkipInvoiced').checked,
+                custom_fields: customFields,
+                preview_only: previewOnly
+            };
+        }
+
+        function formatBulkManageWarnings(data) {
+            const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+            if (!warnings.length) return '';
+            const shown = warnings.slice(0, 12).map((warning, index) => `${index + 1}. ${warning}`).join('\n');
+            const remaining = warnings.length > 12 ? `\n...and ${warnings.length - 12} more warning(s).` : '';
+            return `\n\nWarnings (these will not block the update):\n${shown}${remaining}`;
+        }
+
         function collectBulkManageCustomFields() {
             const values = {};
             const controls = Array.from(document.querySelectorAll('.bulk-manage-custom-control'));
@@ -2205,35 +2302,41 @@
         async function updateBulkManageBookings() {
             const ids = selectedBulkManageIds();
             if (!ids.length) return alert('Please select at least one booking to update.');
-            const customFields = collectBulkManageCustomFields();
-            const payload = {
-                booking_ids: ids,
-                update_project: document.getElementById('bulkManageUpdateProject').checked,
-                project_id: document.getElementById('bulkManageProject').value,
-                update_service: document.getElementById('bulkManageUpdateService').checked,
-                booking_type: getMultiSelectValues('bulkManageService'),
-                update_time: document.getElementById('bulkManageUpdateTime').checked,
-                time: document.getElementById('bulkManageTime').value,
-                update_notes: document.getElementById('bulkManageUpdateNotes').checked,
-                booking_notes: document.getElementById('bulkManageNotes').value,
-                skip_invoiced: document.getElementById('bulkManageSkipInvoiced').checked,
-                custom_fields: customFields
-            };
-            if (!payload.update_project && !payload.update_service && !payload.update_time && !payload.update_notes && Object.keys(customFields).length === 0) {
+            const payload = collectBulkManagePayload(ids, true);
+            const customFields = payload.custom_fields || {};
+            if (!payload.update_project && !payload.update_service && !payload.update_employees && !payload.update_time && !payload.update_notes && Object.keys(customFields).length === 0) {
                 return alert('Please tick at least one field to update.');
             }
-            if (!confirm(`Apply bulk update to ${ids.length} selected booking(s)?`)) return;
+            if (payload.update_employees && !payload.employee_names.length) {
+                return alert('Please select at least one employee.');
+            }
+
             const btn = document.getElementById('bulkManageUpdateBtn');
             btn.disabled = true;
-            btn.innerText = 'Updating...';
+            btn.innerText = 'Checking...';
             try {
+                const previewRes = await fetch('/api/bulk_bookings/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const preview = await parseJsonOrError(previewRes);
+                if (!preview.eligible) {
+                    return alert(preview.message || 'None of the selected bookings can be updated.');
+                }
+                const warningText = formatBulkManageWarnings(preview);
+                const confirmText = `${preview.message || `Apply bulk update to ${preview.eligible} booking(s)?`}${warningText}\n\nContinue with the bulk update?`;
+                if (!confirm(confirmText)) return;
+
+                btn.innerText = 'Updating...';
+                payload.preview_only = false;
                 const res = await fetch('/api/bulk_bookings/update', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
                 const data = await parseJsonOrError(res);
-                alert(data.message || 'Bulk update complete.');
+                alert(`${data.message || 'Bulk update complete.'}${formatBulkManageWarnings(data)}`);
                 bulkManageRefreshAfterChange();
             } catch (err) {
                 alert(err.message || 'Bulk update failed.');
