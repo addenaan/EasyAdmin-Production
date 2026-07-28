@@ -27,6 +27,15 @@
         .wizard-client-btn { text-align: left; }
         .wizard-emp-row.staff-hidden-by-date { display: none !important; }
         .staff-month-over-limit { background-color: #dc3545 !important; color: #fff !important; }
+        .weekly-summary-card { height: 100%; }
+        .weekly-summary-metric { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 10px; padding: 12px; height: 100%; }
+        .weekly-summary-metric .metric-value { font-size: 1.55rem; font-weight: 700; line-height: 1.1; }
+        .weekly-summary-metric .metric-label { color: #6c757d; font-size: 0.78rem; margin-top: 4px; }
+        .weekly-summary-table { margin-bottom: 0; }
+        .weekly-summary-table th { white-space: nowrap; font-size: 0.78rem; color: #495057; background: #f8f9fa; }
+        .weekly-summary-table td { vertical-align: middle; font-size: 0.84rem; }
+        .weekly-summary-tags .badge { font-weight: 500; margin: 0 3px 3px 0; }
+        .weekly-summary-empty { padding: 24px; color: #6c757d; text-align: center; }
     </style>
 </head>
 <body>
@@ -70,10 +79,65 @@
                 </div>
             </div>
 
-            <div class="row">
-                <div class="col-md-4"><div class="main-card border-top border-primary border-4"><h4 class="text-primary mb-3">Today</h4><div class="list-group list-group-flush" id="listToday"></div></div></div>
-                <div class="col-md-4"><div class="main-card border-top border-warning border-4"><h4 class="text-warning mb-3">Tomorrow</h4><div class="list-group list-group-flush" id="listTomorrow"></div></div></div>
-                <div class="col-md-4"><div class="main-card border-top border-info border-4"><h4 class="text-info mb-3">Next 7 Days</h4><div class="list-group list-group-flush" id="listWeek"></div></div></div>
+            <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+                <h4 class="mb-0 fw-bold text-dark">Weekly {{ booking_label }} Overview</h4>
+                <span class="badge bg-dark-subtle text-dark border px-3 py-2" id="weeklyBookingRange">Loading current week...</span>
+            </div>
+
+            <div class="row g-3">
+                <div class="col-12 col-xxl-7">
+                    <div class="main-card weekly-summary-card border-top border-primary border-4">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <div>
+                                <h4 class="text-primary mb-1">Weekly {{ employee_label }} Summary</h4>
+                                <div class="small text-muted">Contract and ad hoc assignments for active {{ employee_label|lower }}s.</div>
+                            </div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-6 col-lg-3"><div class="weekly-summary-metric"><div class="metric-value text-dark" id="metricActiveEmployees">–</div><div class="metric-label">Active {{ employee_label }}s</div></div></div>
+                            <div class="col-6 col-lg-3"><div class="weekly-summary-metric"><div class="metric-value text-primary" id="metricBookedEmployees">–</div><div class="metric-label">Booked This Week</div></div></div>
+                            <div class="col-6 col-lg-3"><div class="weekly-summary-metric"><div class="metric-value text-warning" id="metricUnbookedEmployees">–</div><div class="metric-label">Without Bookings</div></div></div>
+                            <div class="col-6 col-lg-3"><div class="weekly-summary-metric"><div class="metric-value text-success" id="metricEmployeeAssignments">–</div><div class="metric-label">Total Assignments</div></div></div>
+                        </div>
+
+                        <div class="table-responsive border rounded">
+                            <table class="table table-hover weekly-summary-table">
+                                <thead><tr><th>{{ employee_label }}</th><th class="text-center">Contract</th><th class="text-center">Ad hoc</th><th class="text-center">Total</th><th class="text-center">Days</th><th>{{ client_label }}s</th></tr></thead>
+                                <tbody id="employeeWeeklySummaryBody"><tr><td colspan="6" class="weekly-summary-empty">Loading weekly {{ employee_label|lower }} summary...</td></tr></tbody>
+                            </table>
+                        </div>
+
+                        <div class="alert alert-light border mt-3 mb-0">
+                            <div class="fw-bold mb-2"><span id="employeesWithoutBookingsCount">–</span> active {{ employee_label|lower }}s have no bookings this week</div>
+                            <div class="weekly-summary-tags" id="employeesWithoutBookingsList"><span class="text-muted small">Loading...</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-12 col-xxl-5">
+                    <div class="main-card weekly-summary-card border-top border-info border-4">
+                        <div class="mb-3">
+                            <h4 class="text-info mb-1">Weekly {{ client_label }} Booking Summary</h4>
+                            <div class="small text-muted">Customers, booking type, assigned staff and services for the week.</div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-6 col-lg-3 col-xxl-6"><div class="weekly-summary-metric"><div class="metric-value text-dark" id="metricCustomersBooked">–</div><div class="metric-label">{{ client_label }}s Booked</div></div></div>
+                            <div class="col-6 col-lg-3 col-xxl-6"><div class="weekly-summary-metric"><div class="metric-value text-primary" id="metricContractCustomers">–</div><div class="metric-label">Contract {{ client_label }}s</div></div></div>
+                            <div class="col-6 col-lg-3 col-xxl-6"><div class="weekly-summary-metric"><div class="metric-value text-secondary" id="metricAdhocCustomers">–</div><div class="metric-label">Ad hoc {{ client_label }}s</div></div></div>
+                            <div class="col-6 col-lg-3 col-xxl-6"><div class="weekly-summary-metric"><div class="metric-value text-success" id="metricWeeklyBookings">–</div><div class="metric-label">Total {{ booking_label }}s</div></div></div>
+                        </div>
+
+                        <div class="small text-muted mb-2">Unassigned {{ booking_label|lower }}s: <strong class="text-danger" id="metricUnassignedBookings">–</strong></div>
+                        <div class="table-responsive border rounded">
+                            <table class="table table-hover weekly-summary-table">
+                                <thead><tr><th>{{ client_label }}</th><th>Type</th><th class="text-center">Bookings</th><th class="text-center">Days</th><th>Staff & Services</th></tr></thead>
+                                <tbody id="customerWeeklySummaryBody"><tr><td colspan="5" class="weekly-summary-empty">Loading weekly {{ client_label|lower }} summary...</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -1293,41 +1357,80 @@
             document.getElementById('routeDate').value = localISODate();
         });
 
-        function loadDashboardLists() {
-            const today = new Date();
-            const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
-            const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
-            const tomStr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth()+1).padStart(2,'0')}-${String(tomorrow.getDate()).padStart(2,'0')}`;
-            const nextWeek = new Date(today); nextWeek.setDate(nextWeek.getDate() + 7);
+        function weeklyBookingTypeBadge(type) {
+            const isContract = String(type || '').toLowerCase() === 'contract';
+            return `<span class="badge ${isContract ? 'badge-monthly' : 'badge-adhoc'}">${isContract ? 'Contract' : 'Ad hoc'}</span>`;
+        }
 
-            fetch('/bookings').then(r => r.json()).then(events => {
-                let htmlToday = '', htmlTom = '', htmlWeek = '';
-                events.forEach(ev => {
-                    if (ev.extendedProps && ev.extendedProps.event_type === 'leave') return;
-                    const evDateStr = ev.start.split('T')[0];
-                    const evTimeStr = ev.start.split('T')[1] || '00:00';
-                    const evDate = new Date(evDateStr);
-                    const bookingTypeDisplay = ev.extendedProps.booking_type ? ev.extendedProps.booking_type.split(',')[0] : 'Standard Home Clean';
-                    
-                    const itemHTML = `
-                        <div class="list-group-item booking-item py-3" onclick='openBookingDetailsFromEncoded("${ev.id}", "${encodeURIComponent(JSON.stringify(ev.extendedProps || {}))}", "${evDateStr}", "${evTimeStr}")'>
-                            <div class="d-flex justify-content-between align-items-center">
-                                <strong>🕒 ${evTimeStr}</strong>
-                                <span class="badge bg-primary rounded-pill">${bookingTypeDisplay}</span>
-                            </div>
-                            <div class="mt-1">${bookingJobStatusBadge(ev.extendedProps.mobile_status || 'Scheduled')}</div>
-                            <div class="mt-1 text-dark fw-bold">${ev.extendedProps.client}</div>
-                            ${ev.extendedProps.project_name ? `<div class="small text-secondary fw-bold">Project: ${ev.extendedProps.project_name}</div>` : ''}
-                            <small class="text-muted">Staff: ${ev.extendedProps.employee || 'Unassigned'}</small>
-                        </div>`;
-                    if (evDateStr === todayStr) { htmlToday += itemHTML; }
-                    if (evDateStr === tomStr) { htmlTom += itemHTML; }
-                    if (evDate >= today && evDate <= nextWeek) { htmlWeek += itemHTML; }
-                });
-                document.getElementById('listToday').innerHTML = htmlToday || '<div class="p-3 text-muted">No bookings today.</div>';
-                document.getElementById('listTomorrow').innerHTML = htmlTom || '<div class="p-3 text-muted">No bookings tomorrow.</div>';
-                document.getElementById('listWeek').innerHTML = htmlWeek || '<div class="p-3 text-muted">No bookings this week.</div>';
-            });
+        function weeklySummaryTags(values, emptyText) {
+            if (!Array.isArray(values) || !values.length) return `<span class="text-muted small">${escapeHtml(emptyText || 'None')}</span>`;
+            return values.map(value => `<span class="badge bg-light text-dark border">${escapeHtml(value)}</span>`).join('');
+        }
+
+        function setWeeklyDashboardError(message) {
+            const safeMessage = escapeHtml(message || 'Could not load the weekly booking overview.');
+            document.getElementById('weeklyBookingRange').textContent = 'Weekly overview unavailable';
+            document.getElementById('employeeWeeklySummaryBody').innerHTML = `<tr><td colspan="6" class="weekly-summary-empty text-danger">${safeMessage}</td></tr>`;
+            document.getElementById('customerWeeklySummaryBody').innerHTML = `<tr><td colspan="5" class="weekly-summary-empty text-danger">${safeMessage}</td></tr>`;
+            document.getElementById('employeesWithoutBookingsList').innerHTML = `<span class="text-danger small">${safeMessage}</span>`;
+        }
+
+        async function loadDashboardLists() {
+            try {
+                const referenceDate = localISODate();
+                const response = await fetch(`/api/booking-dashboard-summary?reference_date=${encodeURIComponent(referenceDate)}&_=${Date.now()}`, { cache: 'no-store' });
+                const data = await parseJsonOrError(response);
+                const employeeMetrics = data.employee_metrics || {};
+                const customerMetrics = data.customer_metrics || {};
+
+                document.getElementById('weeklyBookingRange').textContent = data.week?.label || 'Current week';
+                document.getElementById('metricActiveEmployees').textContent = employeeMetrics.active_employees ?? 0;
+                document.getElementById('metricBookedEmployees').textContent = employeeMetrics.employees_booked ?? 0;
+                document.getElementById('metricUnbookedEmployees').textContent = employeeMetrics.employees_without_bookings ?? 0;
+                document.getElementById('metricEmployeeAssignments').textContent = employeeMetrics.total_assignments ?? 0;
+                document.getElementById('employeesWithoutBookingsCount').textContent = employeeMetrics.employees_without_bookings ?? 0;
+
+                document.getElementById('metricCustomersBooked').textContent = customerMetrics.customers_booked ?? 0;
+                document.getElementById('metricContractCustomers').textContent = customerMetrics.contract_customers ?? 0;
+                document.getElementById('metricAdhocCustomers').textContent = customerMetrics.adhoc_customers ?? 0;
+                document.getElementById('metricWeeklyBookings').textContent = customerMetrics.total_bookings ?? 0;
+                document.getElementById('metricUnassignedBookings').textContent = customerMetrics.unassigned_bookings ?? 0;
+
+                const employeeRows = Array.isArray(data.employee_summary) ? data.employee_summary : [];
+                document.getElementById('employeeWeeklySummaryBody').innerHTML = employeeRows.length ? employeeRows.map(row => `
+                    <tr>
+                        <td class="fw-bold">${escapeHtml(row.employee)}</td>
+                        <td class="text-center"><span class="badge bg-primary">${row.contract_bookings || 0}</span></td>
+                        <td class="text-center"><span class="badge bg-secondary">${row.adhoc_bookings || 0}</span></td>
+                        <td class="text-center fw-bold">${row.total_bookings || 0}</td>
+                        <td class="text-center">${row.days_booked || 0}</td>
+                        <td><div class="weekly-summary-tags">${weeklySummaryTags(row.customers, 'No customer')}</div></td>
+                    </tr>`).join('') : '<tr><td colspan="6" class="weekly-summary-empty">No active employees are booked this week.</td></tr>';
+
+                const unbookedEmployees = Array.isArray(data.employees_without_bookings) ? data.employees_without_bookings : [];
+                document.getElementById('employeesWithoutBookingsList').innerHTML = unbookedEmployees.length
+                    ? weeklySummaryTags(unbookedEmployees, '')
+                    : '<span class="text-success small fw-bold">All active employees have at least one booking this week.</span>';
+
+                const customerRows = Array.isArray(data.customer_summary) ? data.customer_summary : [];
+                document.getElementById('customerWeeklySummaryBody').innerHTML = customerRows.length ? customerRows.map(row => {
+                    const staff = weeklySummaryTags(row.employees, 'Unassigned');
+                    const services = weeklySummaryTags(row.services, 'No service selected');
+                    return `
+                    <tr>
+                        <td class="fw-bold">${escapeHtml(row.customer)}</td>
+                        <td>${weeklyBookingTypeBadge(row.booking_category)}</td>
+                        <td class="text-center fw-bold">${row.total_bookings || 0}</td>
+                        <td class="text-center">${row.booking_days || 0}</td>
+                        <td>
+                            <div class="small text-muted mb-1">Staff</div><div class="weekly-summary-tags mb-2">${staff}</div>
+                            <div class="small text-muted mb-1">Services</div><div class="weekly-summary-tags">${services}</div>
+                        </td>
+                    </tr>`;
+                }).join('') : '<tr><td colspan="5" class="weekly-summary-empty">No customer bookings are scheduled this week.</td></tr>';
+            } catch (error) {
+                setWeeklyDashboardError(error.message || 'Could not load the weekly booking overview.');
+            }
         }
 
         // ==========================================
