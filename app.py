@@ -791,7 +791,14 @@ def _company_google_calendar_dir(company_id=None):
 
 
 def _company_google_credentials_path(company_id=None):
+    # Legacy tenant-level OAuth JSON path retained only so existing deployments
+    # can automatically promote the previously uploaded working JSON to the
+    # single central Easy Admin OAuth client configuration.
     return os.path.join(_company_google_calendar_dir(company_id), 'credentials.json')
+
+
+def _central_google_credentials_path():
+    return os.path.join(_google_calendar_storage_root(), 'oauth_client_credentials.json')
 
 
 def _company_google_token_path(company_id=None):
@@ -829,9 +836,9 @@ def _legacy_google_credentials_file_candidates():
 
 
 def _existing_google_token_path(company_id=None):
-    # Each company gets its own Calendar token. Legacy paths are only fallback
-    # when no company context exists, to avoid one company accidentally using
-    # another company's connected Google account.
+    # Each company always gets its own Calendar token. Legacy paths are only
+    # fallback when no company context exists, preventing one tenant from ever
+    # using another tenant's connected Google account.
     if company_id is not None or session.get('company_id'):
         path = _company_google_token_path(company_id)
         return path if os.path.exists(path) else None
@@ -853,19 +860,6 @@ def _preferred_google_token_path(company_id=None):
     return 'token.json'
 
 
-def _existing_google_credentials_file(company_id=None):
-    # Prefer the company's uploaded OAuth client JSON.
-    if company_id is not None or session.get('company_id'):
-        path = _company_google_credentials_path(company_id)
-        if os.path.exists(path):
-            return path
-    # Fallback for older deployments or environment-based OAuth client config.
-    for path in _legacy_google_credentials_file_candidates():
-        if path and os.path.exists(path):
-            return path
-    return None
-
-
 def _google_client_config_from_env():
     client_id = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
     client_secret = os.environ.get('GOOGLE_CLIENT_SECRET', '').strip()
@@ -882,6 +876,118 @@ def _google_client_config_from_env():
     }
 
 
+def _validate_google_credentials_json(raw_json):
+    try:
+        data = json.loads(raw_json)
+    except Exception as exc:
+        raise RuntimeError(f'Google OAuth Client JSON is not valid JSON: {exc}')
+    if not isinstance(data, dict) or not (data.get('web') or data.get('installed')):
+        raise RuntimeError('Google OAuth Client JSON must contain a web or installed client section.')
+    client_section = data.get('web') or data.get('installed') or {}
+    if not client_section.get('client_id') or not client_section.get('client_secret'):
+        raise RuntimeError('Google OAuth Client JSON must include client_id and client_secret.')
+    return data
+
+
+def _save_central_google_credentials(raw_json):
+    data = _validate_google_credentials_json(raw_json)
+    credentials_path = _central_google_credentials_path()
+    credentials_dir = os.path.dirname(credentials_path)
+    if credentials_dir:
+        os.makedirs(credentials_dir, exist_ok=True)
+    temp_path = credentials_path + f'.{os.getpid()}.{secrets.token_hex(4)}.tmp'
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as file_handle:
+            json.dump(data, file_handle, indent=2)
+        os.replace(temp_path, credentials_path)
+        try:
+            os.chmod(credentials_path, 0o600)
+        except OSError:
+            pass
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    return credentials_path
+
+
+def _promote_google_credentials_file(source_path):
+    if not source_path or not os.path.exists(source_path):
+        return None
+    central_path = _central_google_credentials_path()
+    if os.path.abspath(source_path) == os.path.abspath(central_path):
+        with open(source_path, 'r', encoding='utf-8-sig') as file_handle:
+            _validate_google_credentials_json(file_handle.read())
+        return central_path
+    with open(source_path, 'r', encoding='utf-8-sig') as file_handle:
+        raw_json = file_handle.read()
+    return _save_central_google_credentials(raw_json)
+
+
+def _migrate_existing_company_google_credentials():
+    root = _google_calendar_storage_root()
+    if not os.path.isdir(root):
+        return None
+
+    candidates = []
+    for name in sorted(os.listdir(root)):
+        if not name.startswith('company_'):
+            continue
+        path = os.path.join(root, name, 'credentials.json')
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8-sig') as file_handle:
+                data = _validate_google_credentials_json(file_handle.read())
+            client_section = data.get('web') or data.get('installed') or {}
+            candidates.append((path, client_section.get('client_id')))
+        except Exception:
+            continue
+
+    if not candidates:
+        return None
+
+    distinct_client_ids = {client_id for _, client_id in candidates if client_id}
+    if len(distinct_client_ids) > 1:
+        raise RuntimeError(
+            'Multiple different tenant Google OAuth client JSON files were found. '
+            'Configure one central Easy Admin OAuth client using GOOGLE_CLIENT_ID and '
+            'GOOGLE_CLIENT_SECRET in Render, or set GOOGLE_CREDENTIALS_FILE to the approved JSON file.'
+        )
+    return _promote_google_credentials_file(candidates[0][0])
+
+
+def _configured_google_credentials_file():
+    central_path = _central_google_credentials_path()
+    if os.path.isfile(central_path):
+        return _promote_google_credentials_file(central_path)
+
+    env_path = os.environ.get('GOOGLE_CREDENTIALS_FILE', '').strip()
+    if env_path:
+        if not os.path.isfile(env_path):
+            raise RuntimeError('GOOGLE_CREDENTIALS_FILE is set, but the configured Google OAuth JSON file does not exist.')
+        with open(env_path, 'r', encoding='utf-8-sig') as file_handle:
+            _validate_google_credentials_json(file_handle.read())
+        return env_path
+
+    for path in _legacy_google_credentials_file_candidates():
+        if path and os.path.isfile(path):
+            return _promote_google_credentials_file(path)
+
+    return _migrate_existing_company_google_credentials()
+
+
+def _google_oauth_client_status():
+    if _google_client_config_from_env():
+        return {'configured': True, 'source': 'Render environment variables'}
+    try:
+        credentials_file = _configured_google_credentials_file()
+        if credentials_file:
+            return {'configured': True, 'source': 'Easy Admin central OAuth JSON'}
+    except Exception as exc:
+        return {'configured': False, 'source': '', 'error': str(exc)}
+    return {'configured': False, 'source': '', 'error': ''}
+
+
 def _google_redirect_uri():
     uri = url_for('google_calendar_oauth_callback', _external=True)
     if os.environ.get('RENDER') and uri.startswith('http://'):
@@ -890,58 +996,23 @@ def _google_redirect_uri():
 
 
 def _build_google_oauth_flow(company_id=None, redirect_uri=None):
+    # company_id is intentionally accepted for backwards compatibility, but the
+    # OAuth client belongs to Easy Admin centrally. Only the resulting token is
+    # tenant-specific.
     redirect_uri = redirect_uri or _google_redirect_uri()
-    credentials_file = _existing_google_credentials_file(company_id)
-    if credentials_file:
-        return Flow.from_client_secrets_file(credentials_file, scopes=SCOPES, redirect_uri=redirect_uri)
     client_config = _google_client_config_from_env()
     if client_config:
         client_config['web']['redirect_uris'] = [redirect_uri]
         return Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri)
-    raise RuntimeError('Google Calendar OAuth client JSON is not configured for this company. Upload the Google OAuth Client JSON in Company Email & Calendar Settings, save, then click Connect Google Calendar.')
 
+    credentials_file = _configured_google_credentials_file()
+    if credentials_file:
+        return Flow.from_client_secrets_file(credentials_file, scopes=SCOPES, redirect_uri=redirect_uri)
 
-def _validate_google_credentials_json(raw_json):
-    try:
-        data = json.loads(raw_json)
-    except Exception as exc:
-        raise RuntimeError(f'Google OAuth Client JSON is not valid JSON: {exc}')
-    if not isinstance(data, dict) or not (data.get('web') or data.get('installed')):
-        raise RuntimeError('Google OAuth Client JSON must be the OAuth client JSON from Google Cloud and contain a web or installed client section.')
-    client_section = data.get('web') or data.get('installed') or {}
-    if not client_section.get('client_id') or not client_section.get('client_secret'):
-        raise RuntimeError('Google OAuth Client JSON must include client_id and client_secret.')
-    return data
-
-
-def _save_company_google_credentials(company_id, raw_json):
-    data = _validate_google_credentials_json(raw_json)
-    company_dir = _company_google_calendar_dir(company_id)
-    os.makedirs(company_dir, exist_ok=True)
-    credentials_path = _company_google_credentials_path(company_id)
-    with open(credentials_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2)
-    token_path = _company_google_token_path(company_id)
-    if os.path.exists(token_path):
-        os.remove(token_path)
-    return credentials_path
-
-
-def _read_uploaded_google_credentials_json(upload):
-    if not upload or not getattr(upload, 'filename', ''):
-        return ''
-    filename = upload.filename or ''
-    if not filename.lower().endswith('.json'):
-        raise RuntimeError('Please upload the Google OAuth Client JSON file downloaded from Google Cloud. The file must end with .json.')
-    raw_bytes = upload.read()
-    if not raw_bytes:
-        raise RuntimeError('The uploaded Google OAuth Client JSON file is empty.')
-    if len(raw_bytes) > 1024 * 1024:
-        raise RuntimeError('The uploaded Google OAuth Client JSON file is too large. Please upload the original JSON credentials file from Google Cloud.')
-    try:
-        return raw_bytes.decode('utf-8-sig')
-    except UnicodeDecodeError:
-        raise RuntimeError('The uploaded Google OAuth Client JSON file could not be read as text.')
+    raise RuntimeError(
+        'The central Easy Admin Google Calendar OAuth client is not configured. '
+        'Contact the Easy Admin administrator before connecting Google Calendar.'
+    )
 
 
 def _clear_company_google_token(company_id, conn=None):
@@ -974,8 +1045,15 @@ def get_google_service(company_id=None):
                 token.write(creds.to_json())
         else:
             if os.environ.get('RENDER'):
-                raise RuntimeError('Google Calendar is not connected for this company. Open Company Email & Calendar Settings, upload/save the Google OAuth Client JSON, then click Connect Google Calendar.')
-            flow = InstalledAppFlow.from_client_secrets_file(_existing_google_credentials_file(cid) or 'credentials.json', SCOPES)
+                raise RuntimeError('Google Calendar is not connected for this company. Open Company Email & Calendar Settings and click Connect Google Calendar.')
+            client_config = _google_client_config_from_env()
+            if client_config:
+                flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+            else:
+                credentials_file = _configured_google_credentials_file()
+                if not credentials_file:
+                    raise RuntimeError('The central Easy Admin Google Calendar OAuth client is not configured.')
+                flow = InstalledAppFlow.from_client_secrets_file(credentials_file, SCOPES)
             creds = flow.run_local_server(port=0)
             token_dir = os.path.dirname(save_path)
             if token_dir:
@@ -11603,54 +11681,39 @@ def settings():
     cid = session['company_id']
     success_msg = session.pop('settings_success_msg', None)
     if request.method == 'POST':
-        for key in ['smtp_server', 'smtp_port', 'smtp_user', 'smtp_pass', 'sender_email', 'gcal_calendar_id']:
-            val = request.form.get(key, '')
-            _set_company_setting(conn, cid, key, val)
-
-        # Service account JSON is not used in this workflow. Each company stores
-        # its own OAuth Client JSON and its own OAuth token file. The JSON is
-        # uploaded as a file, saved server-side, and never echoed back to screen.
-        conn.execute("DELETE FROM settings WHERE company_id=? AND key='gcal_service_account_json'", (cid,))
-        uploaded_json = request.files.get('gcal_credentials_file')
-        legacy_pasted_json = (request.form.get('gcal_credentials_json') or '').strip()
         try:
-            calendar_json = _read_uploaded_google_credentials_json(uploaded_json) if uploaded_json and uploaded_json.filename else legacy_pasted_json
-            if calendar_json:
-                _save_company_google_credentials(cid, calendar_json)
-                _set_company_setting(conn, cid, 'gcal_credentials_saved', '1')
-                _set_company_setting(conn, cid, 'gcal_credentials_saved_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                if uploaded_json and uploaded_json.filename:
-                    _set_company_setting(conn, cid, 'gcal_credentials_original_filename', os.path.basename(uploaded_json.filename))
-                _clear_company_google_token(cid, conn)
-                success_msg = "Settings saved successfully. Google Calendar JSON was uploaded for this company. Please reconnect Google Calendar to create a new token."
-            else:
-                success_msg = "Settings saved successfully!"
+            for key in ['smtp_server', 'smtp_port', 'smtp_user', 'smtp_pass', 'sender_email', 'gcal_calendar_id']:
+                val = request.form.get(key, '')
+                _set_company_setting(conn, cid, key, val)
+
+            # Google Calendar OAuth client credentials are configured once for
+            # Easy Admin centrally. Each tenant stores only its own target
+            # calendar setting and its own OAuth token.
+            conn.execute("DELETE FROM settings WHERE company_id=? AND key IN ('gcal_service_account_json','gcal_credentials_saved','gcal_credentials_saved_at','gcal_credentials_original_filename')", (cid,))
             conn.commit()
+            success_msg = "Settings saved successfully!"
         except Exception as exc:
             conn.rollback()
-            rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (cid,)).fetchall()
-            s_dict = {row['key']: row['value'] for row in rows}
-            try:
-                s_dict['gcal_credentials_file_exists'] = '1' if os.path.exists(_company_google_credentials_path(cid)) else ''
-                s_dict['gcal_token_file_exists'] = '1' if os.path.exists(_company_google_token_path(cid)) else ''
-            except Exception:
-                pass
-            conn.close()
-            success_msg = "Settings were not saved: " + _format_google_calendar_error(exc)
-            return render_template('settings.html', settings=s_dict, session=session, success_msg=success_msg)
+            success_msg = "Settings were not saved: " + str(exc)
 
     rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (cid,)).fetchall()
     s_dict = {row['key']: row['value'] for row in rows}
     try:
-        s_dict['gcal_credentials_file_exists'] = '1' if os.path.exists(_company_google_credentials_path(cid)) else ''
+        oauth_status = _google_oauth_client_status()
+        s_dict['gcal_oauth_client_configured'] = '1' if oauth_status.get('configured') else ''
+        s_dict['gcal_oauth_client_source'] = oauth_status.get('source') or ''
+        s_dict['gcal_oauth_client_error'] = oauth_status.get('error') or ''
         s_dict['gcal_token_file_exists'] = '1' if os.path.exists(_company_google_token_path(cid)) else ''
-    except Exception:
-        pass
+    except Exception as exc:
+        s_dict['gcal_oauth_client_configured'] = ''
+        s_dict['gcal_oauth_client_source'] = ''
+        s_dict['gcal_oauth_client_error'] = str(exc)
+        s_dict['gcal_token_file_exists'] = ''
     conn.close()
-    
+
     if request.method == 'POST':
         log_action('System', 'Updated Settings', "Modified company integrations & email configurations.")
-        
+
     return render_template('settings.html', settings=s_dict, session=session, success_msg=success_msg)
 
 
