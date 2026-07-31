@@ -147,16 +147,16 @@ def _client_display_name(row: Any) -> str:
 
 def _quote_reference(conn: Any, company_id: int, quote_id: int) -> str:
     try:
-        rows = conn.execute(
-            "SELECT key, value FROM settings WHERE company_id=? AND key IN ('quote_prefix','quote_start')",
-            (company_id,),
-        ).fetchall()
-        settings = {_row_dict(row).get("key"): _row_dict(row).get("value") for row in rows}
-        prefix = settings.get("quote_prefix") or "QT-"
-        number = int(settings.get("quote_start") or 1) + int(quote_id) - 1
-        return f"{prefix}{number:04d}"
+        row = conn.execute(
+            "SELECT quote_number FROM quotes WHERE id=? AND company_id=?",
+            (quote_id, company_id),
+        ).fetchone()
+        reference = str(_row_dict(row).get("quote_number") or "").strip()
+        if reference:
+            return reference
     except Exception:
-        return f"QT-{int(quote_id):04d}"
+        pass
+    return f"QT-{int(quote_id):04d}"
 
 
 class IntegrationConfigurationError(RuntimeError):
@@ -729,13 +729,14 @@ def create_integration_app(easyadmin: Any) -> Flask:
                 part for part in [customer["address"], customer["suburb"], customer["postal_code"]] if part
             )
 
+            quote_number = easyadmin.allocate_billing_document_number(conn, company_id, "quote")
             cursor = conn.cursor()
             cursor.execute(
                 """INSERT INTO quotes
                    (company_id, client_id, client_name, date, valid_until, subtotal, vat_amount, total, status,
                     source, external_request_id, website_notes, website_customer_email, website_customer_phone,
-                    website_delivery_address, website_delivery_area)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    website_delivery_address, website_delivery_area, quote_number)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     company_id,
                     client_id,
@@ -753,6 +754,7 @@ def create_integration_app(easyadmin: Any) -> Flask:
                     customer["phone"],
                     delivery_address,
                     customer["delivery_area"] or customer["suburb"],
+                    quote_number,
                 ),
             )
             quote_id = cursor.lastrowid

@@ -332,16 +332,19 @@
                             <input type="text" id="invPrefixInput" class="form-control" placeholder="INV-">
                         </div>
                         <div class="col-6 mb-2">
-                            <label class="form-label fw-bold small">Invoice Start Number</label>
-                            <input type="number" id="invStartInput" class="form-control" placeholder="1">
+                            <label class="form-label fw-bold small">Next Invoice Number</label>
+                            <input type="text" inputmode="numeric" pattern="[0-9]+" maxlength="12" id="invStartInput" class="form-control" placeholder="0001">
                         </div>
                         <div class="col-6 mb-2">
                             <label class="form-label fw-bold small">Quote Prefix</label>
                             <input type="text" id="quotePrefixInput" class="form-control" placeholder="QT-">
                         </div>
                         <div class="col-6 mb-2">
-                            <label class="form-label fw-bold small">Quote Start Number</label>
-                            <input type="number" id="quoteStartInput" class="form-control" placeholder="1">
+                            <label class="form-label fw-bold small">Next Quote Number</label>
+                            <input type="text" inputmode="numeric" pattern="[0-9]+" maxlength="12" id="quoteStartInput" class="form-control" placeholder="0001">
+                        </div>
+                        <div class="col-12">
+                            <div class="form-text">The next number is assigned only to newly created documents. Existing invoice and quote numbers remain unchanged.</div>
                         </div>
                     </div>
                     <div class="row">
@@ -1293,6 +1296,10 @@
             const qp = document.getElementById('quotePrefixInput').value || 'QT-';
             const qs = document.getElementById('quoteStartInput').value || '1';
 
+            if(!/^\d+$/.test(is) || !/^\d+$/.test(qs)) {
+                return alert('The next invoice and quote numbers must contain digits only.');
+            }
+
             fetch('/api/save_invoice_settings', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -1302,7 +1309,13 @@
                     quote_prefix: qp,
                     quote_start: qs
                 })
-            }).then(() => location.reload());
+            }).then(async response => {
+                const result = await response.json().catch(() => ({}));
+                if(!response.ok || result.status === 'error') {
+                    throw new Error(result.message || 'Could not save invoice and quote settings.');
+                }
+                location.reload();
+            }).catch(error => alert(error.message));
         }
 
         // --- INVOICE LOGIC ---

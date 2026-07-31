@@ -1908,6 +1908,10 @@ def init_db():
             try: conn.execute(f'ALTER TABLE {t_name} ADD COLUMN {c_name} {c_type}')
             except: pass
 
+    # Permanent, tenant-specific invoice and quote numbering. Existing documents
+    # retain their current references; future settings apply to new documents.
+    _initialise_billing_number_storage(conn)
+
     for c_name, c_type in [
         ('company_id', 'INTEGER'), ('employee_id', 'INTEGER'), ('leave_type', 'TEXT DEFAULT "Annual Leave"'),
         ('start_date', 'TEXT'), ('end_date', 'TEXT'), ('days', 'REAL DEFAULT 1'), ('reason', 'TEXT'),
@@ -4380,7 +4384,14 @@ def _reports_invoice_rows(conn, filters, include_all_statuses=False):
             overdue_days = max((today - datetime.strptime(due_date[:10], '%Y-%m-%d').date()).days, 0)
         except Exception:
             overdue_days = 0
-        d.update({'computed_total': total, 'computed_balance': balance, 'computed_paid': paid, 'computed_status': status, 'overdue_days': overdue_days})
+        d.update({
+            'computed_total': total,
+            'computed_balance': balance,
+            'computed_paid': paid,
+            'computed_status': status,
+            'overdue_days': overdue_days,
+            'formatted_num': _billing_document_formatted_number(conn, cid, 'invoice', d),
+        })
         status_filter = filters.get('invoice_status') or ''
         if not include_all_statuses and status_filter in {'paid', 'unpaid', 'partial', 'overdue'}:
             if status_filter == 'paid' and balance > 0:
@@ -4468,6 +4479,7 @@ def _reports_quote_rows(conn, filters):
     result = []
     for r in rows:
         d = dict(r)
+        d['formatted_num'] = _billing_document_formatted_number(conn, session['company_id'], 'quote', d)
         if status_filter in {'pending', 'accepted', 'approved', 'rejected', 'declined', 'converted'}:
             if not _report_status_match(d.get('status'), status_filter):
                 continue
@@ -4683,12 +4695,13 @@ def _build_reports_payload(report_type, filters):
         elif report_type == 'invoice_register':
             columns = ['Invoice #', 'Date', 'Due Date', 'Client', 'Project', 'Status', 'Subtotal', 'Discount', 'VAT', 'Total', 'Paid', 'Balance']
             for i in _reports_invoice_rows(conn, filters):
-                rows.append([i.get('id'), i.get('date') or '', i.get('due_date') or '', _report_client_name_from_fields(i), i.get('project_name') or '', i.get('computed_status') or '', _report_money(i.get('subtotal')), _report_money(i.get('discount_amount')), _report_money(i.get('vat_amount')), i.get('computed_total'), i.get('computed_paid'), i.get('computed_balance')])
+                rows.append([i.get('formatted_num') or i.get('id'), i.get('date') or '', i.get('due_date') or '', _report_client_name_from_fields(i), i.get('project_name') or '', i.get('computed_status') or '', _report_money(i.get('subtotal')), _report_money(i.get('discount_amount')), _report_money(i.get('vat_amount')), i.get('computed_total'), i.get('computed_paid'), i.get('computed_balance')])
 
         elif report_type == 'quote_register':
             columns = ['Quote #', 'Date', 'Valid Until', 'Client', 'Status', 'Subtotal', 'VAT', 'Total', 'Converted Invoice']
             for q in _reports_quote_rows(conn, filters):
-                rows.append([q.get('id'), q.get('date') or '', q.get('valid_until') or '', _report_client_name_from_fields(q), q.get('status') or '', _report_money(q.get('subtotal')), _report_money(q.get('vat_amount')), _report_money(q.get('total')), q.get('converted_invoice_id') or ''])
+                converted_ref = _invoice_formatted_number(conn, session['company_id'], q.get('converted_invoice_id')) if q.get('converted_invoice_id') else ''
+                rows.append([q.get('formatted_num') or q.get('id'), q.get('date') or '', q.get('valid_until') or '', _report_client_name_from_fields(q), q.get('status') or '', _report_money(q.get('subtotal')), _report_money(q.get('vat_amount')), _report_money(q.get('total')), converted_ref])
 
         elif report_type == 'credit_note_register':
             where = ["cn.company_id=?", "cn.credit_date BETWEEN ? AND ?"]
@@ -4708,14 +4721,15 @@ def _build_reports_payload(report_type, filters):
             columns = ['Credit Note #', 'Credit Date', 'Invoice #', 'Invoice Date', 'Client', 'Reason', 'Amount', 'Accounting Status']
             for cn in credit_rows:
                 d = dict(cn)
-                rows.append([d.get('id'), d.get('credit_date') or '', d.get('invoice_id') or '', d.get('invoice_date') or '', _report_client_name_from_fields(d), d.get('reason') or '', _report_money(d.get('amount')), d.get('accounting_status') or ''])
+                invoice_ref = _invoice_formatted_number(conn, session['company_id'], d.get('invoice_id')) if d.get('invoice_id') else ''
+                rows.append([_credit_note_formatted_number(d.get('id')), d.get('credit_date') or '', invoice_ref, d.get('invoice_date') or '', _report_client_name_from_fields(d), d.get('reason') or '', _report_money(d.get('amount')), d.get('accounting_status') or ''])
 
         elif report_type == 'outstanding_invoices':
             columns = ['Invoice #', 'Date', 'Due Date', 'Client', 'Project', 'Status', 'Total', 'Paid', 'Balance', 'Days Overdue']
             for i in _reports_invoice_rows(conn, filters, include_all_statuses=True):
                 if _report_money(i.get('computed_balance')) <= 0:
                     continue
-                rows.append([i.get('id'), i.get('date') or '', i.get('due_date') or '', _report_client_name_from_fields(i), i.get('project_name') or '', i.get('computed_status') or '', i.get('computed_total'), i.get('computed_paid'), i.get('computed_balance'), i.get('overdue_days') or 0])
+                rows.append([i.get('formatted_num') or i.get('id'), i.get('date') or '', i.get('due_date') or '', _report_client_name_from_fields(i), i.get('project_name') or '', i.get('computed_status') or '', i.get('computed_total'), i.get('computed_paid'), i.get('computed_balance'), i.get('overdue_days') or 0])
 
         elif report_type == 'invoice_aging':
             grouped = {}
@@ -13356,6 +13370,257 @@ def generate_report():
     return jsonify({"total_hours": round(len(dates_worked) * workday_hours, 2), "dates_worked": dates_worked, "total_leave": sum(l['days'] for l in leave_records), "leave_records": leave_records})
 
 # ==========================================================
+# PERMANENT TENANT BILLING NUMBERING
+# ==========================================================
+_BILLING_NUMBER_TYPES = {
+    'invoice': {
+        'table': 'invoices',
+        'id_column': 'id',
+        'number_column': 'invoice_number',
+        'prefix_setting': 'invoice_prefix',
+        'start_setting': 'invoice_start',
+        'default_prefix': 'INV-',
+    },
+    'quote': {
+        'table': 'quotes',
+        'id_column': 'id',
+        'number_column': 'quote_number',
+        'prefix_setting': 'quote_prefix',
+        'start_setting': 'quote_start',
+        'default_prefix': 'QT-',
+    },
+}
+
+
+def _billing_number_config(document_type):
+    config = _BILLING_NUMBER_TYPES.get(str(document_type or '').strip().lower())
+    if not config:
+        raise ValueError('Unsupported billing document type.')
+    return config
+
+
+def _normalise_billing_prefix(value, default_prefix):
+    prefix = str(value or '').strip() or default_prefix
+    if len(prefix) > 30:
+        raise ValueError('The invoice or quote prefix may not exceed 30 characters.')
+    return prefix
+
+
+def _normalise_billing_start(value):
+    raw = str(value if value is not None else '').strip()
+    if not raw:
+        raw = '1'
+    if not re.fullmatch(r'\d+', raw):
+        raise ValueError('The next invoice or quote number must contain digits only.')
+    number = int(raw)
+    if number < 1:
+        raise ValueError('The next invoice or quote number must be at least 1.')
+    if number > 999999999999:
+        raise ValueError('The next invoice or quote number is too large.')
+    width = max(4, min(12, len(raw)))
+    return number, width, str(number).zfill(width)
+
+
+def _billing_setting_map(conn, company_id, keys):
+    placeholders = ','.join('?' for _ in keys)
+    rows = conn.execute(
+        f'SELECT key, value FROM settings WHERE company_id=? AND key IN ({placeholders})',
+        [company_id] + list(keys),
+    ).fetchall()
+    return {row['key']: row['value'] for row in rows}
+
+
+def _legacy_billing_reference(prefix, start_value, document_id):
+    try:
+        number = int(start_value or 1) + int(document_id) - 1
+        return f'{prefix}{number:04d}'
+    except Exception:
+        try:
+            return f'{prefix}{int(document_id):04d}'
+        except Exception:
+            return f'{prefix}{document_id}'
+
+
+def _initialise_billing_number_storage(conn):
+    """Create permanent number storage and preserve existing references."""
+    for statement in [
+        'ALTER TABLE invoices ADD COLUMN invoice_number TEXT',
+        'ALTER TABLE quotes ADD COLUMN quote_number TEXT',
+    ]:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS billing_document_sequences (
+        company_id INTEGER NOT NULL,
+        document_type TEXT NOT NULL,
+        prefix TEXT NOT NULL,
+        next_number INTEGER NOT NULL DEFAULT 1,
+        number_width INTEGER NOT NULL DEFAULT 4,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (company_id, document_type)
+    )""")
+
+    # Existing numbers are frozen exactly as they appeared under the previous
+    # ID-based calculation so historical PDFs and accounting references do not
+    # change when a tenant later edits its prefix or next number.
+    companies = conn.execute('SELECT id FROM companies ORDER BY id').fetchall()
+    for company in companies:
+        company_id = int(company['id'])
+        settings = _billing_setting_map(
+            conn,
+            company_id,
+            ('invoice_prefix', 'invoice_start', 'quote_prefix', 'quote_start'),
+        )
+        for document_type in ('invoice', 'quote'):
+            config = _billing_number_config(document_type)
+            prefix = str(settings.get(config['prefix_setting']) or config['default_prefix'])
+            start_value = settings.get(config['start_setting']) or '1'
+            rows = conn.execute(
+                f"SELECT {config['id_column']} AS document_id FROM {config['table']} "
+                f"WHERE company_id=? AND ({config['number_column']} IS NULL OR TRIM({config['number_column']})='') "
+                f"ORDER BY {config['id_column']} ASC",
+                (company_id,),
+            ).fetchall()
+            for row in rows:
+                document_id = row['document_id']
+                reference = _legacy_billing_reference(prefix, start_value, document_id)
+                conn.execute(
+                    f"UPDATE {config['table']} SET {config['number_column']}=? "
+                    f"WHERE company_id=? AND {config['id_column']}=?",
+                    (reference, company_id, document_id),
+                )
+
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_company_invoice_number ON invoices(company_id, invoice_number)')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_quotes_company_quote_number ON quotes(company_id, quote_number)')
+
+
+def _ensure_billing_sequence(conn, company_id, document_type):
+    config = _billing_number_config(document_type)
+    row = conn.execute(
+        'SELECT prefix, next_number, number_width FROM billing_document_sequences WHERE company_id=? AND document_type=?',
+        (company_id, document_type),
+    ).fetchone()
+    if row:
+        return row
+
+    settings = _billing_setting_map(conn, company_id, (config['prefix_setting'], config['start_setting']))
+    prefix = _normalise_billing_prefix(settings.get(config['prefix_setting']), config['default_prefix'])
+    start_number, width, _ = _normalise_billing_start(settings.get(config['start_setting']) or '1')
+    conn.execute(
+        """INSERT OR IGNORE INTO billing_document_sequences
+           (company_id, document_type, prefix, next_number, number_width, updated_at)
+           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+        (company_id, document_type, prefix, start_number, width),
+    )
+    return conn.execute(
+        'SELECT prefix, next_number, number_width FROM billing_document_sequences WHERE company_id=? AND document_type=?',
+        (company_id, document_type),
+    ).fetchone()
+
+
+def _configure_billing_sequence(conn, company_id, document_type, prefix_value, start_value):
+    config = _billing_number_config(document_type)
+    prefix = _normalise_billing_prefix(prefix_value, config['default_prefix'])
+    start_number, width, normalised_start = _normalise_billing_start(start_value)
+    exists = conn.execute(
+        'SELECT 1 FROM billing_document_sequences WHERE company_id=? AND document_type=?',
+        (company_id, document_type),
+    ).fetchone()
+    if exists:
+        conn.execute(
+            """UPDATE billing_document_sequences
+               SET prefix=?, next_number=?, number_width=?, updated_at=CURRENT_TIMESTAMP
+               WHERE company_id=? AND document_type=?""",
+            (prefix, start_number, width, company_id, document_type),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO billing_document_sequences
+               (company_id, document_type, prefix, next_number, number_width, updated_at)
+               VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            (company_id, document_type, prefix, start_number, width),
+        )
+    return prefix, normalised_start
+
+
+def _billing_sequence_display_values(conn, company_id, document_type):
+    config = _billing_number_config(document_type)
+    row = _ensure_billing_sequence(conn, company_id, document_type)
+    data = dict(row) if row else {}
+    prefix = str(data.get('prefix') or config['default_prefix'])
+    try:
+        next_number = max(1, int(data.get('next_number') or 1))
+    except Exception:
+        next_number = 1
+    try:
+        width = max(4, min(12, int(data.get('number_width') or 4)))
+    except Exception:
+        width = 4
+    return prefix, str(next_number).zfill(width)
+
+
+def allocate_billing_document_number(conn, company_id, document_type):
+    """Atomically allocate one permanent number for a tenant document."""
+    config = _billing_number_config(document_type)
+    _ensure_billing_sequence(conn, company_id, document_type)
+
+    # UPDATE ... RETURNING allocates different values safely across Gunicorn
+    # workers. If an administrator resets a sequence to a used value, existing
+    # references are skipped rather than overwritten or duplicated.
+    for _ in range(10000):
+        row = conn.execute(
+            """UPDATE billing_document_sequences
+               SET next_number=next_number+1, updated_at=CURRENT_TIMESTAMP
+               WHERE company_id=? AND document_type=?
+               RETURNING prefix, next_number-1 AS allocated_number, number_width""",
+            (company_id, document_type),
+        ).fetchone()
+        if not row:
+            _ensure_billing_sequence(conn, company_id, document_type)
+            continue
+        data = dict(row)
+        prefix = str(data.get('prefix') or config['default_prefix'])
+        number = int(data.get('allocated_number') or 1)
+        width = max(4, min(12, int(data.get('number_width') or 4)))
+        reference = f'{prefix}{number:0{width}d}'
+        duplicate = conn.execute(
+            f"SELECT 1 FROM {config['table']} WHERE company_id=? AND {config['number_column']}=?",
+            (company_id, reference),
+        ).fetchone()
+        if not duplicate:
+            return reference
+    raise RuntimeError('Could not allocate a unique invoice or quote number. Please review the sequence settings.')
+
+
+def _billing_document_formatted_number(conn, company_id, document_type, document):
+    config = _billing_number_config(document_type)
+    if isinstance(document, dict):
+        data = document
+    elif hasattr(document, 'keys'):
+        data = dict(document)
+    else:
+        row = conn.execute(
+            f"SELECT {config['id_column']} AS id, {config['number_column']} AS stored_number "
+            f"FROM {config['table']} WHERE company_id=? AND {config['id_column']}=?",
+            (company_id, document),
+        ).fetchone()
+        data = dict(row) if row else {'id': document}
+        if data.get('stored_number'):
+            data[config['number_column']] = data['stored_number']
+
+    stored = str(data.get(config['number_column']) or '').strip()
+    if stored:
+        return stored
+
+    document_id = data.get(config['id_column']) or data.get('id')
+    settings = _billing_setting_map(conn, company_id, (config['prefix_setting'], config['start_setting']))
+    prefix = str(settings.get(config['prefix_setting']) or config['default_prefix'])
+    return _legacy_billing_reference(prefix, settings.get(config['start_setting']) or '1', document_id)
+
+
+# ==========================================================
 # 4. INVOICING & QUOTES ROUTES
 # ==========================================================
 @app.route('/invoicing')
@@ -13378,8 +13643,8 @@ def invoicing_index():
     inv_params = [cid]
     if invoice_q:
         like = f'%{invoice_q}%'
-        inv_where += " AND (COALESCE(client_name,'') LIKE ? OR COALESCE(status,'') LIKE ? OR COALESCE(date,'') LIKE ? OR COALESCE(due_date,'') LIKE ?)"
-        inv_params.extend([like, like, like, like])
+        inv_where += " AND (COALESCE(invoice_number,'') LIKE ? OR COALESCE(client_name,'') LIKE ? OR COALESCE(status,'') LIKE ? OR COALESCE(date,'') LIKE ? OR COALESCE(due_date,'') LIKE ?)"
+        inv_params.extend([like, like, like, like, like])
     invoice_total = conn.execute(f'SELECT COUNT(*) FROM invoices WHERE {inv_where}', inv_params).fetchone()[0]
     invoices = conn.execute(f'SELECT * FROM invoices WHERE {inv_where} ORDER BY id DESC LIMIT ? OFFSET ?', inv_params + [invoice_per_page, invoice_offset]).fetchall()
     invoice_pagination = pagination_meta(invoice_total, invoice_page, invoice_per_page)
@@ -13389,8 +13654,8 @@ def invoicing_index():
     quote_params = [cid]
     if quote_q:
         like = f'%{quote_q}%'
-        quote_where += " AND (COALESCE(client_name,'') LIKE ? OR COALESCE(status,'') LIKE ? OR COALESCE(date,'') LIKE ? OR COALESCE(valid_until,'') LIKE ?)"
-        quote_params.extend([like, like, like, like])
+        quote_where += " AND (COALESCE(quote_number,'') LIKE ? OR COALESCE(client_name,'') LIKE ? OR COALESCE(status,'') LIKE ? OR COALESCE(date,'') LIKE ? OR COALESCE(valid_until,'') LIKE ?)"
+        quote_params.extend([like, like, like, like, like])
     quote_total = conn.execute(f'SELECT COUNT(*) FROM quotes WHERE {quote_where}', quote_params).fetchone()[0]
     quotes = conn.execute(f'SELECT * FROM quotes WHERE {quote_where} ORDER BY id DESC LIMIT ? OFFSET ?', quote_params + [quote_per_page, quote_offset]).fetchall()
     quote_pagination = pagination_meta(quote_total, quote_page, quote_per_page)
@@ -13399,20 +13664,15 @@ def invoicing_index():
     s_dict = {s['key']: s['value'] for s in settings_rows}
     
     inv_info = s_dict.get('invoice_additional_info', '')
-    inv_prefix = s_dict.get('invoice_prefix', 'INV-')
-    inv_start = s_dict.get('invoice_start', '1')
-    quote_prefix = s_dict.get('quote_prefix', 'QT-')
-    quote_start = s_dict.get('quote_start', '1')
+    inv_prefix, inv_start = _billing_sequence_display_values(conn, cid, 'invoice')
+    quote_prefix, quote_start = _billing_sequence_display_values(conn, cid, 'quote')
 
     # Assign calculated invoice numbers directly for the dashboard table
     # and calculate outstanding amount from actual recorded payments.
     formatted_invoices = []
     for inv in invoices:
         d = dict(inv)
-        try:
-            d['formatted_num'] = f"{inv_prefix}{int(inv_start) + d['id'] - 1:04d}"
-        except:
-            d['formatted_num'] = f"{inv_prefix}{d['id']:04d}"
+        d['formatted_num'] = _billing_document_formatted_number(conn, cid, 'invoice', d)
         project = None
         if d.get('project_id'):
             project = conn.execute('SELECT project_name, project_code FROM projects WHERE id=? AND company_id=?', (d.get('project_id'), cid)).fetchone()
@@ -13439,10 +13699,7 @@ def invoicing_index():
     formatted_quotes = []
     for q in quotes:
         d = dict(q)
-        try:
-            d['formatted_num'] = f"{quote_prefix}{int(quote_start) + d['id'] - 1:04d}"
-        except:
-            d['formatted_num'] = f"{quote_prefix}{d['id']:04d}"
+        d['formatted_num'] = _billing_document_formatted_number(conn, cid, 'quote', d)
         formatted_quotes.append(d)
     
     conn.close()
@@ -13451,16 +13708,35 @@ def invoicing_index():
 @app.route('/api/save_invoice_settings', methods=['POST'])
 def save_invoice_settings():
     if not _session_has_app_read('invoicing'): return "Forbidden", 403
-    data = request.json
+    data = request.json or {}
     cid = session['company_id']
     conn = get_db_connection()
-    
+
+    try:
+        invoice_prefix, invoice_start = _configure_billing_sequence(
+            conn,
+            cid,
+            'invoice',
+            data.get('invoice_prefix', 'INV-'),
+            data.get('invoice_start', '1'),
+        )
+        quote_prefix, quote_start = _configure_billing_sequence(
+            conn,
+            cid,
+            'quote',
+            data.get('quote_prefix', 'QT-'),
+            data.get('quote_start', '1'),
+        )
+    except ValueError as exc:
+        conn.close()
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+
     settings_to_save = {
         'invoice_additional_info': data.get('invoice_additional_info', ''),
-        'invoice_prefix': data.get('invoice_prefix', 'INV-'),
-        'invoice_start': data.get('invoice_start', '1'),
-        'quote_prefix': data.get('quote_prefix', 'QT-'),
-        'quote_start': data.get('quote_start', '1')
+        'invoice_prefix': invoice_prefix,
+        'invoice_start': invoice_start,
+        'quote_prefix': quote_prefix,
+        'quote_start': quote_start,
     }
     
     for key, value in settings_to_save.items():
@@ -13472,7 +13748,7 @@ def save_invoice_settings():
             
     conn.commit()
     conn.close()
-    log_action('Invoicing', 'Updated Settings', 'Updated invoice layout and sequence settings.')
+    log_action('Invoicing', 'Updated Settings', 'Updated invoice layout and next invoice/quote numbers.')
     return jsonify({"status": "success"})
 
 def get_employee_first_names_for_invoice(employee_names):
@@ -13613,9 +13889,10 @@ def save_invoice():
     total = round(discounted_subtotal + vat_amount, 2)
     amount_due_now, balance_remaining = calculate_invoice_due_now(total, data.get('amount_due_now'))
     
+    invoice_number = allocate_billing_document_number(conn, cid, 'invoice')
     cursor = conn.cursor()
-    cursor.execute("""INSERT INTO invoices (company_id, client_id, client_name, date, due_date, subtotal, vat_amount, total, status, discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                   (cid, client_id, client_name, data['date'], data['due_date'], original_subtotal, vat_amount, total, 'Unpaid', discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id))
+    cursor.execute("""INSERT INTO invoices (company_id, client_id, client_name, date, due_date, subtotal, vat_amount, total, status, discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id, invoice_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (cid, client_id, client_name, data['date'], data['due_date'], original_subtotal, vat_amount, total, 'Unpaid', discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id, invoice_number))
     inv_id = cursor.lastrowid
     
     for item in items:
@@ -13633,14 +13910,15 @@ def save_invoice():
     conn.commit()
     conn.close()
     if accounting_result.get('posted'):
-        log_action('Accounting', 'Auto Posted Invoice', f"Invoice #{inv_id} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
+        log_action('Accounting', 'Auto Posted Invoice', f"Invoice {invoice_number} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
     else:
-        log_action('Accounting', 'Invoice Auto Post Skipped/Failed', f"Invoice #{inv_id}: {accounting_result.get('message')}")
-    log_action('Invoicing', 'Created Invoice', f"Generated Invoice #{inv_id} for {client_name}")
+        log_action('Accounting', 'Invoice Auto Post Skipped/Failed', f"Invoice {invoice_number}: {accounting_result.get('message')}")
+    log_action('Invoicing', 'Created Invoice', f"Generated Invoice {invoice_number} for {client_name}")
     response_message = 'Invoice created and automatically posted to Accounting.' if accounting_result.get('posted') else 'Invoice created. ' + (accounting_result.get('message') or '')
     return jsonify({
         "status": "success",
         "invoice_id": inv_id,
+        "invoice_number": invoice_number,
         "message": response_message,
         "accounting_posted": bool(accounting_result.get('posted')),
         "accounting_journal_id": accounting_result.get('journal_id'),
@@ -13658,16 +13936,8 @@ def get_invoice(inv_id):
     items = conn.execute("SELECT * FROM invoice_items WHERE invoice_id=?", (inv_id,)).fetchall()
     client = get_document_client(conn, cid, inv)
     
-    settings_rows = conn.execute("SELECT key, value FROM settings WHERE company_id=?", (cid,)).fetchall()
-    s_dict = {s['key']: s['value'] for s in settings_rows}
-    inv_prefix = s_dict.get('invoice_prefix', 'INV-')
-    inv_start = s_dict.get('invoice_start', '1')
-    
     d = dict(inv)
-    try:
-        d['formatted_num'] = f"{inv_prefix}{int(inv_start) + d['id'] - 1:04d}"
-    except:
-        d['formatted_num'] = f"{inv_prefix}{d['id']:04d}"
+    d['formatted_num'] = _billing_document_formatted_number(conn, cid, 'invoice', d)
 
     client_full = inv['client_name']
     client_email = ''
@@ -13712,10 +13982,12 @@ def get_invoice(inv_id):
 def update_inv_status(inv_id):
     status = request.json['status']
     conn = get_db_connection()
-    conn.execute("UPDATE invoices SET status=? WHERE id=? AND company_id=?", (status, inv_id, session['company_id']))
+    cid = session['company_id']
+    conn.execute("UPDATE invoices SET status=? WHERE id=? AND company_id=?", (status, inv_id, cid))
+    invoice_ref = _invoice_formatted_number(conn, cid, inv_id)
     conn.commit()
     conn.close()
-    log_action('Invoicing', 'Updated Invoice', f"Marked Invoice #{inv_id} as {status}")
+    log_action('Invoicing', 'Updated Invoice', f"Marked Invoice {invoice_ref} as {status}")
     return jsonify({"status": "success"})
 
 @app.route('/api/invoice/<int:inv_id>/payment', methods=['POST'])
@@ -13747,9 +14019,10 @@ def record_invoice_payment(inv_id):
                 (cid, inv_id, payment_date, amount, data.get('payment_method', ''), data.get('reference', ''), data.get('notes', '')))
     payment_id = cur.lastrowid
     update_invoice_payment_status(conn, cid, inv_id)
+    invoice_ref = _billing_document_formatted_number(conn, cid, 'invoice', inv)
     conn.commit()
     conn.close()
-    log_action('Invoicing', 'Recorded Invoice Payment', f"Recorded payment R{amount:.2f} for Invoice #{inv_id}")
+    log_action('Invoicing', 'Recorded Invoice Payment', f"Recorded payment R{amount:.2f} for Invoice {invoice_ref}")
     return jsonify({'status': 'success', 'payment_id': payment_id})
 
 @app.route('/api/receipt/<int:payment_id>')
@@ -13765,15 +14038,8 @@ def get_receipt(payment_id):
         conn.close()
         return jsonify({'status': 'error', 'message': 'Invoice not found'}), 404
     client = get_document_client(conn, cid, inv)
-    settings_rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (cid,)).fetchall()
-    s_dict = {s['key']: s['value'] for s in settings_rows}
-    inv_prefix = s_dict.get('invoice_prefix', 'INV-')
-    inv_start = s_dict.get('invoice_start', '1')
     inv_d = dict(inv)
-    try:
-        inv_d['formatted_num'] = f"{inv_prefix}{int(inv_start) + inv_d['id'] - 1:04d}"
-    except Exception:
-        inv_d['formatted_num'] = f"{inv_prefix}{inv_d['id']:04d}"
+    inv_d['formatted_num'] = _billing_document_formatted_number(conn, cid, 'invoice', inv_d)
 
     client_full = inv['client_name']
     client_email = ''
@@ -13843,6 +14109,7 @@ def credit_invoice(inv_id):
             conn.execute('UPDATE bookings SET is_invoiced=0 WHERE id=? AND company_id=?', (item['booking_id'], cid))
 
     accounting_result = _auto_post_credit_note_to_accounting_if_enabled(conn, cid, credit_id)
+    invoice_ref = _billing_document_formatted_number(conn, cid, 'invoice', inv)
 
     conn.commit()
     conn.close()
@@ -13850,7 +14117,7 @@ def credit_invoice(inv_id):
         log_action('Accounting', 'Auto Posted Credit Note', f"Credit Note #{credit_id} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
     else:
         log_action('Accounting', 'Credit Note Auto Post Skipped/Failed', f"Credit Note #{credit_id}: {accounting_result.get('message')}")
-    log_action('Invoicing', 'Issued Credit Note', f"Credited R{amount:.2f} on Invoice #{inv_id}.")
+    log_action('Invoicing', 'Issued Credit Note', f"Credited R{amount:.2f} on Invoice {invoice_ref}.")
     response_message = 'Credit note created and automatically posted to Accounting.' if accounting_result.get('posted') else 'Credit note created. ' + (accounting_result.get('message') or '')
     return jsonify({
         'status': 'success',
@@ -13871,6 +14138,7 @@ def post_invoice_accounting_api(inv_id):
     conn = get_db_connection()
     try:
         journal_id = post_invoice_to_accounting_record(conn, cid, inv_id)
+        invoice_ref = _invoice_formatted_number(conn, cid, inv_id)
         conn.commit()
     except ValueError as exc:
         conn.close()
@@ -13879,7 +14147,7 @@ def post_invoice_accounting_api(inv_id):
         conn.close()
         return jsonify({'status': 'error', 'message': f'Could not post invoice to Accounting: {exc}'}), 500
     conn.close()
-    log_action('Accounting', 'Posted Invoice', f'Posted Invoice #{inv_id} to Accounting Journal #{journal_id}.')
+    log_action('Accounting', 'Posted Invoice', f'Posted Invoice {invoice_ref} to Accounting Journal #{journal_id}.')
     return jsonify({'status': 'success', 'journal_id': journal_id, 'message': f'Invoice posted to Accounting Journal #{journal_id}.'})
 
 
@@ -13916,15 +14184,8 @@ def get_credit_note(credit_id):
         conn.close()
         return jsonify({'status': 'error', 'message': 'Invoice not found'}), 404
     client = get_document_client(conn, cid, inv)
-    settings_rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (cid,)).fetchall()
-    s_dict = {s['key']: s['value'] for s in settings_rows}
-    inv_prefix = s_dict.get('invoice_prefix', 'INV-')
-    inv_start = s_dict.get('invoice_start', '1')
     inv_d = dict(inv)
-    try:
-        inv_d['formatted_num'] = f"{inv_prefix}{int(inv_start) + inv_d['id'] - 1:04d}"
-    except Exception:
-        inv_d['formatted_num'] = f"{inv_prefix}{inv_d['id']:04d}"
+    inv_d['formatted_num'] = _billing_document_formatted_number(conn, cid, 'invoice', inv_d)
 
     client_full = inv['client_name']
     client_email = ''
@@ -14020,9 +14281,10 @@ def save_quote():
     vat_amount = round(subtotal * 0.15, 2) if bool(data.get('apply_vat', False)) else 0.0
     total = round(subtotal + vat_amount, 2)
     
+    quote_number = allocate_billing_document_number(conn, cid, 'quote')
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO quotes (company_id, client_id, client_name, date, valid_until, subtotal, vat_amount, total, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                   (cid, client_id, client_name, data['date'], data['valid_until'], subtotal, vat_amount, total, 'Pending'))
+    cursor.execute("INSERT INTO quotes (company_id, client_id, client_name, date, valid_until, subtotal, vat_amount, total, status, quote_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (cid, client_id, client_name, data['date'], data['valid_until'], subtotal, vat_amount, total, 'Pending', quote_number))
     q_id = cursor.lastrowid
     
     for item in items:
@@ -14031,8 +14293,8 @@ def save_quote():
             
     conn.commit()
     conn.close()
-    log_action('Invoicing', 'Created Quote', f"Generated Quote #{q_id} for {client_name}")
-    return jsonify({"status": "success", "quote_id": q_id})
+    log_action('Invoicing', 'Created Quote', f"Generated Quote {quote_number} for {client_name}")
+    return jsonify({"status": "success", "quote_id": q_id, "quote_number": quote_number})
 
 @app.route('/api/quote/<int:q_id>')
 def get_quote(q_id):
@@ -14047,16 +14309,8 @@ def get_quote(q_id):
     items = conn.execute("SELECT * FROM quote_items WHERE quote_id=?", (q_id,)).fetchall()
     client = get_document_client(conn, cid, q)
     
-    settings_rows = conn.execute("SELECT key, value FROM settings WHERE company_id=?", (cid,)).fetchall()
-    s_dict = {s['key']: s['value'] for s in settings_rows}
-    quote_prefix = s_dict.get('quote_prefix', 'QT-')
-    quote_start = s_dict.get('quote_start', '1')
-    
     d = dict(q)
-    try:
-        d['formatted_num'] = f"{quote_prefix}{int(quote_start) + d['id'] - 1:04d}"
-    except:
-        d['formatted_num'] = f"{quote_prefix}{d['id']:04d}"
+    d['formatted_num'] = _billing_document_formatted_number(conn, cid, 'quote', d)
 
     client_full = q['client_name']
     client_email = ''
@@ -14109,9 +14363,10 @@ def update_quote_status(q_id):
         return jsonify({"status": "error", "message": "This quote has expired and cannot be accepted."}), 400
 
     conn.execute("UPDATE quotes SET status=? WHERE id=? AND company_id=?", (requested_status, q_id, cid))
+    quote_ref = _billing_document_formatted_number(conn, cid, 'quote', q)
     conn.commit()
     conn.close()
-    log_action('Invoicing', 'Updated Quote', f"Marked Quote #{q_id} as {requested_status}")
+    log_action('Invoicing', 'Updated Quote', f"Marked Quote {quote_ref} as {requested_status}")
     return jsonify({"status": "success"})
 
 
@@ -14138,8 +14393,9 @@ def convert_quote_to_invoice(q_id):
     q_dict = dict(q)
     existing_invoice_id = q_dict.get('converted_invoice_id')
     if existing_invoice_id:
+        existing_invoice_ref = _invoice_formatted_number(conn, cid, existing_invoice_id)
         conn.close()
-        return jsonify({"status": "error", "message": f"This quote has already been converted to invoice #{existing_invoice_id}."}), 400
+        return jsonify({"status": "error", "message": f"This quote has already been converted to invoice {existing_invoice_ref}."}), 400
 
     items = conn.execute("SELECT * FROM quote_items WHERE quote_id=?", (q_id,)).fetchall()
     if not items:
@@ -14153,12 +14409,13 @@ def convert_quote_to_invoice(q_id):
     total = float(q['total'] or 0)
     amount_due_now, balance_remaining = calculate_invoice_due_now(total, total)
 
+    invoice_number = allocate_billing_document_number(conn, cid, 'invoice')
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO invoices
-        (company_id, client_id, client_name, date, due_date, subtotal, vat_amount, total, status, discount_percent, discount_amount, amount_due_now, balance_remaining)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (cid, dict(q).get('client_id'), q['client_name'], invoice_date, due_date, subtotal, vat_amount, total, 'Unpaid', 0, 0, amount_due_now, balance_remaining))
+        (company_id, client_id, client_name, date, due_date, subtotal, vat_amount, total, status, discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_number)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (cid, dict(q).get('client_id'), q['client_name'], invoice_date, due_date, subtotal, vat_amount, total, 'Unpaid', 0, 0, amount_due_now, balance_remaining, invoice_number))
     inv_id = cur.lastrowid
 
     for item in items:
@@ -14169,20 +14426,22 @@ def convert_quote_to_invoice(q_id):
 
     conn.execute("UPDATE quotes SET status='Converted', converted_invoice_id=?, converted_date=? WHERE id=? AND company_id=?",
                  (inv_id, invoice_date, q_id, cid))
+    quote_number = _billing_document_formatted_number(conn, cid, 'quote', q)
 
     accounting_result = _auto_post_invoice_to_accounting_if_enabled(conn, cid, inv_id)
 
     conn.commit()
     conn.close()
     if accounting_result.get('posted'):
-        log_action('Accounting', 'Auto Posted Converted Invoice', f"Converted Invoice #{inv_id} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
+        log_action('Accounting', 'Auto Posted Converted Invoice', f"Converted Invoice {invoice_number} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
     else:
-        log_action('Accounting', 'Converted Invoice Auto Post Skipped/Failed', f"Converted Invoice #{inv_id}: {accounting_result.get('message')}")
-    log_action('Invoicing', 'Converted Quote to Invoice', f"Converted Quote #{q_id} to Invoice #{inv_id}")
+        log_action('Accounting', 'Converted Invoice Auto Post Skipped/Failed', f"Converted Invoice {invoice_number}: {accounting_result.get('message')}")
+    log_action('Invoicing', 'Converted Quote to Invoice', f"Converted Quote {quote_number} to Invoice {invoice_number}")
     response_message = 'Quote converted to invoice and automatically posted to Accounting.' if accounting_result.get('posted') else 'Quote converted to invoice. ' + (accounting_result.get('message') or '')
     return jsonify({
         "status": "success",
         "invoice_id": inv_id,
+        "invoice_number": invoice_number,
         "message": response_message,
         "accounting_posted": bool(accounting_result.get('posted')),
         "accounting_journal_id": accounting_result.get('journal_id'),
@@ -14286,12 +14545,7 @@ def _build_billing_pdf_payload(kind, doc_id):
             conn.close()
             return None
         items = conn.execute('SELECT * FROM invoice_items WHERE invoice_id=?', (doc_id,)).fetchall()
-        prefix = s_dict.get('invoice_prefix', 'INV-')
-        start = s_dict.get('invoice_start', '1')
-        try:
-            formatted_num = f"{prefix}{int(start) + doc['id'] - 1:04d}"
-        except Exception:
-            formatted_num = f"{prefix}{doc['id']:04d}"
+        formatted_num = _billing_document_formatted_number(conn, cid, 'invoice', doc)
         totals = get_invoice_financial_totals(conn, cid, doc_id)
         credit_notes = [dict(cn) for cn in conn.execute(
             'SELECT id, credit_date, amount, reason FROM invoice_credit_notes WHERE invoice_id=? AND company_id=? ORDER BY credit_date ASC, id ASC',
@@ -14331,12 +14585,7 @@ def _build_billing_pdf_payload(kind, doc_id):
             conn.close()
             return None
         items = conn.execute('SELECT * FROM quote_items WHERE quote_id=?', (doc_id,)).fetchall()
-        prefix = s_dict.get('quote_prefix', 'QT-')
-        start = s_dict.get('quote_start', '1')
-        try:
-            formatted_num = f"{prefix}{int(start) + doc['id'] - 1:04d}"
-        except Exception:
-            formatted_num = f"{prefix}{doc['id']:04d}"
+        formatted_num = _billing_document_formatted_number(conn, cid, 'quote', doc)
         title = 'OFFICIAL QUOTE'
         meta_label = 'Valid Until'
         meta_value = doc['valid_until'] or 'N/A'
@@ -15015,22 +15264,8 @@ def client_statement():
                 ORDER BY p.payment_date ASC, p.id ASC
             ''', (cid, client_name, start_date, end_date)).fetchall()
 
-        settings_rows = conn.execute("SELECT key, value FROM settings WHERE company_id=?", (cid,)).fetchall()
-        s_dict = {s['key']: s['value'] for s in settings_rows}
-        inv_prefix = s_dict.get('invoice_prefix', 'INV-')
-        try:
-            inv_start = int(s_dict.get('invoice_start', '1'))
-        except Exception:
-            inv_start = 1
-
         def _invoice_number(invoice_id):
-            try:
-                return f"{inv_prefix}{int(inv_start) + int(invoice_id) - 1:04d}"
-            except Exception:
-                try:
-                    return f"{inv_prefix}{int(invoice_id):04d}"
-                except Exception:
-                    return f"{inv_prefix}{invoice_id}"
+            return _billing_document_formatted_number(conn, cid, 'invoice', invoice_id)
 
         statement_items = []
         total_invoiced = 0.0
@@ -15043,7 +15278,7 @@ def client_statement():
             total_invoiced += amount
             statement_items.append({
                 "date": d.get('date'),
-                "description": f"Tax Invoice #{_invoice_number(d.get('id'))}",
+                "description": f"Tax Invoice {_invoice_number(d.get('id'))}",
                 "amount": round(amount, 2),
                 "status": d.get('status') or '',
                 "type": "invoice",
@@ -15056,7 +15291,7 @@ def client_statement():
             total_credited += abs(amount)
             inv_no = _invoice_number(c.get('invoice_id') or c.get('source_invoice_id'))
             reason = (c.get('reason') or '').strip()
-            description = f"Credit Note against #{inv_no}"
+            description = f"Credit Note against {inv_no}"
             if reason:
                 description += f" - {reason}"
             statement_items.append({
@@ -15074,7 +15309,7 @@ def client_statement():
             total_paid += abs(amount)
             inv_no = _invoice_number(p.get('invoice_id') or p.get('source_invoice_id'))
             ref = (p.get('reference') or '').strip()
-            description = f"Payment received for #{inv_no}"
+            description = f"Payment received for {inv_no}"
             if ref:
                 description += f" - {ref}"
             statement_items.append({
@@ -15239,14 +15474,11 @@ def _accounting_account_exists(conn, company_id, account_id):
 
 
 def _invoice_formatted_number(conn, company_id, inv_id):
-    rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (company_id,)).fetchall()
-    s_dict = {r['key']: r['value'] for r in rows}
-    prefix = s_dict.get('invoice_prefix', 'INV-')
-    start = s_dict.get('invoice_start', '1')
-    try:
-        return f"{prefix}{int(start) + int(inv_id) - 1:04d}"
-    except Exception:
-        return f"{prefix}{int(inv_id):04d}"
+    return _billing_document_formatted_number(conn, company_id, 'invoice', inv_id)
+
+
+def _quote_formatted_number(conn, company_id, quote_id):
+    return _billing_document_formatted_number(conn, company_id, 'quote', quote_id)
 
 
 def _credit_note_formatted_number(credit_id):
