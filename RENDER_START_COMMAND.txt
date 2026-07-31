@@ -1,1 +1,1 @@
-gunicorn integration_entrypoint:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+gunicorn easyadmin_integrations_wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
