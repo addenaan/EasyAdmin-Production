@@ -906,7 +906,7 @@
                 </div>
                 <div class="modal-body bg-light">
                     <div class="alert alert-warning small">
-                        Imports are company-scoped. Company admins can only import into their own company. Super admins can import into the currently selected/active company.
+                        Imports are company-scoped and all-or-nothing. Use <strong>Validate Only</strong> first. Easy Admin will reject the complete file when any row is invalid and will list the CSV line, field and reason. Dates may use YYYY-MM-DD or DD/MM/YYYY and are stored as YYYY-MM-DD.
                     </div>
                     <div class="row g-3">
                         <div class="col-md-6">
@@ -2154,7 +2154,10 @@
                 .then(res => {
                     const errors = (res.errors || []).map(e => `<li>${escapeHtml(e)}</li>`).join('');
                     const cls = res.status === 'success' ? 'alert-success' : 'alert-danger';
-                    result.innerHTML = `<div class="alert ${cls}"><strong>${escapeHtml(res.message || '')}</strong>${errors ? `<ul class="mb-0 mt-2">${errors}</ul>` : ''}</div>`;
+                    const counts = Number.isFinite(Number(res.total_rows))
+                        ? `<div class="small mt-2"><strong>Total rows:</strong> ${Number(res.total_rows)} &nbsp; <strong>Valid:</strong> ${Number(res.valid_rows || 0)} &nbsp; <strong>Invalid:</strong> ${Number(res.invalid_rows || 0)}</div>`
+                        : '';
+                    result.innerHTML = `<div class="alert ${cls}"><strong>${escapeHtml(res.message || '')}</strong>${counts}${errors ? `<ul class="mb-0 mt-2">${errors}</ul>` : ''}</div>`;
                 })
                 .catch(err => { result.innerHTML = `<div class="alert alert-danger">${escapeHtml(err.message)}</div>`; });
         }

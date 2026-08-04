@@ -619,6 +619,32 @@ def normalise_import_value(value):
     return str(value).strip()
 
 
+def normalise_import_header(value):
+    """Normalise CSV headers while still rejecting unsupported/typo columns."""
+    text = normalise_import_value(value).lower()
+    text = re.sub(r'[^a-z0-9]+', '_', text).strip('_')
+    return text
+
+
+IMPORT_REQUIRED_FIELDS = {
+    'clients': {'name'},
+    'employees': {'name', 'start_date'},
+    'services': {'name'},
+    'bookings': {'title', 'start'},
+    'expenses': {'date', 'amount'},
+    'leave_records': {'employee_id', 'date_taken', 'days'},
+}
+
+IMPORT_DATE_FIELDS = {
+    'employees': {'date_of_birth', 'start_date', 'inactive_date'},
+    'expenses': {'date'},
+    'leave_records': {'date_taken'},
+}
+
+IMPORT_DATETIME_FIELDS = {
+    'bookings': {'start'},
+}
+
 IMPORT_NUMERIC_FIELDS = {
     'clients': {'discount_percent': 0},
     'employees': {'gross_salary': None, 'workday_hours': None},
@@ -628,29 +654,306 @@ IMPORT_NUMERIC_FIELDS = {
     'leave_records': {'employee_id': None, 'days': None},
 }
 
+IMPORT_EMPLOYEE_STATUSES = {'Active', 'On Leave', 'Resigned', 'Terminated'}
+IMPORT_EMPLOYEE_TYPES = {
+    'Full-time', 'Full-time (5 Days)', 'Full-time (6 Days)', 'Shift Worker',
+    'Contract >25 Hrs', 'Contract <25 Hrs', 'Supplier', 'Provider'
+}
+IMPORT_OVERTIME_TREATMENTS = {'regular', 'irregular'}
+IMPORT_LEAVE_TYPES = {'Annual Leave', 'Sick Leave', 'Family Responsibility', 'Unpaid Leave', 'Other'}
+
+
+def parse_supported_date(value):
+    """Parse supported stored/import date formats and return a datetime.
+
+    ISO remains the canonical database format. DD/MM/YYYY and DD-MM-YYYY are
+    accepted for controlled imports and legacy records, then normalised to ISO.
+    """
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y'):
+        try:
+            return datetime.strptime(text, fmt)
+        except (TypeError, ValueError):
+            pass
+    # Accept an ISO datetime only when the date component itself is valid.
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?', text):
+        try:
+            return datetime.fromisoformat(text.replace(' ', 'T'))
+        except ValueError:
+            pass
+    return None
+
+
+def parse_supported_datetime(value):
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in (
+        '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M',
+        '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M',
+        '%d/%m/%Y %H:%M', '%d-%m-%Y %H:%M'
+    ):
+        try:
+            return datetime.strptime(text, fmt)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def is_iso_date_value(value):
+    text = normalise_import_value(value)
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', text):
+        return False
+    try:
+        datetime.strptime(text, '%Y-%m-%d')
+        return True
+    except ValueError:
+        return False
+
+
+def parse_import_number(value):
+    """Parse common South African/standard CSV number formats safely."""
+    raw = normalise_import_value(value)
+    if raw == '':
+        return None
+    cleaned = raw.replace('R', '').replace('r', '').replace('\u00a0', '').replace(' ', '')
+    if ',' in cleaned and '.' in cleaned:
+        # The last separator is treated as the decimal separator.
+        if cleaned.rfind(',') > cleaned.rfind('.'):
+            cleaned = cleaned.replace('.', '').replace(',', '.')
+        else:
+            cleaned = cleaned.replace(',', '')
+    elif ',' in cleaned:
+        if re.fullmatch(r'[+-]?\d{1,3}(?:,\d{3})+', cleaned):
+            cleaned = cleaned.replace(',', '')
+        else:
+            cleaned = cleaned.replace(',', '.')
+    try:
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalise_import_boolean(value):
+    raw = normalise_import_value(value).lower()
+    if raw in {'1', 'true', 'yes', 'y', 'on'}:
+        return 1
+    if raw in {'0', 'false', 'no', 'n', 'off', ''}:
+        return 0
+    return None
+
+
+def valid_email_address(value):
+    text = normalise_import_value(value)
+    if not text:
+        return True
+    return bool(re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', text))
+
+
+def validate_import_row(import_type, row, line_no, conn, company_id, seen_values):
+    """Validate and normalise one company CSV row without writing to the database."""
+    cleaned = {field: normalise_import_value(value) for field, value in row.items()}
+    errors = []
+
+    for field in sorted(IMPORT_REQUIRED_FIELDS.get(import_type, set())):
+        if not cleaned.get(field):
+            errors.append(f"Line {line_no}, field '{field}': value is required.")
+
+    for field in IMPORT_DATE_FIELDS.get(import_type, set()):
+        raw = cleaned.get(field, '')
+        if not raw:
+            continue
+        parsed = parse_supported_date(raw)
+        if not parsed:
+            errors.append(
+                f"Line {line_no}, field '{field}': '{raw}' is not a valid date. "
+                "Use YYYY-MM-DD or DD/MM/YYYY."
+            )
+        else:
+            cleaned[field] = parsed.strftime('%Y-%m-%d')
+
+    for field in IMPORT_DATETIME_FIELDS.get(import_type, set()):
+        raw = cleaned.get(field, '')
+        if not raw:
+            continue
+        parsed = parse_supported_datetime(raw)
+        if not parsed:
+            errors.append(
+                f"Line {line_no}, field '{field}': '{raw}' is not a valid date/time. "
+                "Use YYYY-MM-DDTHH:MM, YYYY-MM-DD HH:MM, or DD/MM/YYYY HH:MM."
+            )
+        else:
+            cleaned[field] = parsed.strftime('%Y-%m-%dT%H:%M:%S')
+
+    for field, default in IMPORT_NUMERIC_FIELDS.get(import_type, {}).items():
+        raw = cleaned.get(field, '')
+        if raw == '':
+            cleaned[field] = default
+            continue
+        if field == 'is_invoiced':
+            parsed_bool = normalise_import_boolean(raw)
+            if parsed_bool is None:
+                errors.append(
+                    f"Line {line_no}, field 'is_invoiced': '{raw}' is invalid. "
+                    "Use 1/0, yes/no, or true/false."
+                )
+            else:
+                cleaned[field] = parsed_bool
+            continue
+        number = parse_import_number(raw)
+        if number is None:
+            errors.append(f"Line {line_no}, field '{field}': '{raw}' is not a valid number.")
+            cleaned[field] = None
+            continue
+        if field == 'employee_id':
+            if not number.is_integer() or number <= 0:
+                errors.append(f"Line {line_no}, field 'employee_id': enter a positive whole-number employee ID.")
+            else:
+                cleaned[field] = int(number)
+        else:
+            cleaned[field] = number
+
+    for email_field in ('email',):
+        if email_field in cleaned and not valid_email_address(cleaned[email_field]):
+            errors.append(f"Line {line_no}, field '{email_field}': '{cleaned[email_field]}' is not a valid email address.")
+
+    if import_type == 'clients':
+        discount = cleaned.get('discount_percent')
+        if isinstance(discount, (int, float)) and not (0 <= float(discount) <= 100):
+            errors.append(f"Line {line_no}, field 'discount_percent': value must be between 0 and 100.")
+
+    elif import_type == 'employees':
+        status = cleaned.get('status') or 'Active'
+        cleaned['status'] = status
+        if status not in IMPORT_EMPLOYEE_STATUSES:
+            errors.append(
+                f"Line {line_no}, field 'status': '{status}' is invalid. "
+                f"Allowed values: {', '.join(sorted(IMPORT_EMPLOYEE_STATUSES))}."
+            )
+        emp_type = cleaned.get('emp_type') or 'Full-time (5 Days)'
+        cleaned['emp_type'] = emp_type
+        if emp_type not in IMPORT_EMPLOYEE_TYPES:
+            errors.append(
+                f"Line {line_no}, field 'emp_type': '{emp_type}' is invalid. "
+                f"Allowed values: {', '.join(sorted(IMPORT_EMPLOYEE_TYPES))}."
+            )
+        overtime_treatment = (cleaned.get('overtime_pay_treatment') or 'irregular').lower()
+        cleaned['overtime_pay_treatment'] = overtime_treatment
+        if overtime_treatment not in IMPORT_OVERTIME_TREATMENTS:
+            errors.append(
+                f"Line {line_no}, field 'overtime_pay_treatment': '{overtime_treatment}' is invalid. "
+                "Use regular or irregular."
+            )
+        gross_salary = cleaned.get('gross_salary')
+        if isinstance(gross_salary, (int, float)) and float(gross_salary) < 0:
+            errors.append(f"Line {line_no}, field 'gross_salary': value cannot be negative.")
+        workday_hours = cleaned.get('workday_hours')
+        if isinstance(workday_hours, (int, float)) and not (0 < float(workday_hours) <= 24):
+            errors.append(f"Line {line_no}, field 'workday_hours': value must be greater than 0 and not more than 24.")
+
+        dob = parse_supported_date(cleaned.get('date_of_birth'))
+        start_date = parse_supported_date(cleaned.get('start_date'))
+        inactive_date = parse_supported_date(cleaned.get('inactive_date'))
+        if dob and dob.date() > datetime.now().date():
+            errors.append(f"Line {line_no}, field 'date_of_birth': date cannot be in the future.")
+        if dob and start_date and start_date.date() < dob.date():
+            errors.append(f"Line {line_no}: start_date cannot be before date_of_birth.")
+        if start_date and inactive_date and inactive_date.date() < start_date.date():
+            errors.append(f"Line {line_no}: inactive_date cannot be before start_date.")
+
+        emp_number = cleaned.get('emp_number')
+        if emp_number:
+            emp_number_key = emp_number.casefold()
+            if emp_number_key in seen_values.setdefault('employee_numbers', set()):
+                errors.append(f"Line {line_no}, field 'emp_number': duplicate value '{emp_number}' appears more than once in this CSV.")
+            else:
+                seen_values['employee_numbers'].add(emp_number_key)
+            if conn.execute(
+                "SELECT 1 FROM employees WHERE company_id=? AND LOWER(COALESCE(emp_number,''))=LOWER(?) LIMIT 1",
+                (company_id, emp_number)
+            ).fetchone():
+                errors.append(f"Line {line_no}, field 'emp_number': '{emp_number}' already exists for this company.")
+
+    elif import_type == 'services':
+        for field in ('client_price', 'company_cost'):
+            value = cleaned.get(field)
+            if isinstance(value, (int, float)) and float(value) < 0:
+                errors.append(f"Line {line_no}, field '{field}': value cannot be negative.")
+        service_name = cleaned.get('name')
+        if service_name:
+            key = service_name.casefold()
+            if key in seen_values.setdefault('service_names', set()):
+                errors.append(f"Line {line_no}, field 'name': duplicate service '{service_name}' appears more than once in this CSV.")
+            else:
+                seen_values['service_names'].add(key)
+
+    elif import_type == 'bookings':
+        overtime = cleaned.get('overtime_hours')
+        if isinstance(overtime, (int, float)) and float(overtime) < 0:
+            errors.append(f"Line {line_no}, field 'overtime_hours': value cannot be negative.")
+
+    elif import_type == 'expenses':
+        amount = cleaned.get('amount')
+        if isinstance(amount, (int, float)) and float(amount) <= 0:
+            errors.append(f"Line {line_no}, field 'amount': value must be greater than 0.")
+
+    elif import_type == 'leave_records':
+        days = cleaned.get('days')
+        if isinstance(days, (int, float)) and float(days) <= 0:
+            errors.append(f"Line {line_no}, field 'days': value must be greater than 0.")
+        leave_type = cleaned.get('leave_type') or 'Annual Leave'
+        cleaned['leave_type'] = leave_type
+        if leave_type not in IMPORT_LEAVE_TYPES:
+            errors.append(
+                f"Line {line_no}, field 'leave_type': '{leave_type}' is invalid. "
+                f"Allowed values: {', '.join(sorted(IMPORT_LEAVE_TYPES))}."
+            )
+        employee_id = cleaned.get('employee_id')
+        if isinstance(employee_id, int) and not conn.execute(
+            'SELECT 1 FROM employees WHERE id=? AND company_id=?', (employee_id, company_id)
+        ).fetchone():
+            errors.append(
+                f"Line {line_no}, field 'employee_id': employee ID {employee_id} does not exist for the selected company."
+            )
+
+    return cleaned, errors
+
 
 def coerce_import_value_for_db(import_type, field, value):
-    """Convert blank CSV values into database-safe values before insert.
-
-    PostgreSQL rejects an empty string for numeric/real/integer columns. This keeps
-    imports tolerant of blank optional template columns such as client discount %.
-    """
-    raw = normalise_import_value(value)
-    numeric_defaults = IMPORT_NUMERIC_FIELDS.get(import_type, {})
-    if field not in numeric_defaults:
-        return raw
-
-    default = numeric_defaults.get(field)
-    if raw == '':
-        return default
-
-    cleaned = raw.replace('R', '').replace('r', '').replace(' ', '').replace(',', '.')
-    try:
+    """Convert validated CSV values into database-safe values before insert."""
+    if field in IMPORT_NUMERIC_FIELDS.get(import_type, {}):
+        if value in (None, ''):
+            return IMPORT_NUMERIC_FIELDS[import_type][field]
         if field in {'employee_id', 'is_invoiced'}:
-            return int(float(cleaned))
-        return float(cleaned)
-    except Exception:
-        return raw
+            return int(value)
+        return float(value)
+    return normalise_import_value(value)
+
+
+def safe_import_database_error(exc):
+    """Return an administrator-friendly reason without exposing SQL or credentials."""
+    message = str(exc or '').lower()
+    if 'duplicate key' in message or 'unique constraint' in message or 'unique violation' in message:
+        return 'A duplicate value conflicts with an existing record or a unique field.'
+    if 'foreign key' in message:
+        return 'A referenced record does not exist for the selected company.'
+    if 'not null' in message:
+        return 'A required database field is blank.'
+    if 'invalid input syntax' in message or 'datatype mismatch' in message:
+        return 'A value has the wrong data type for its destination field.'
+    if 'value too long' in message or 'string data right truncation' in message:
+        return 'A value is longer than the destination field permits.'
+    return 'The database rejected the row. Run Validate Only and review the row values.'
 
 
 def get_import_template_rows(import_type):
@@ -2558,14 +2861,15 @@ class TaxTableNotSetError(Exception):
 def get_sars_tax_year(check_date_str=None):
     tax_year = datetime.now().year
     if check_date_str:
-        d = datetime.strptime(check_date_str[:10], '%Y-%m-%d')
-        tax_year = d.year if d.month < 3 else d.year + 1
+        d = parse_date_safe(check_date_str)
+        if d:
+            tax_year = d.year if d.month < 3 else d.year + 1
     return tax_year
 
 def calculate_age_on_date(date_of_birth_str, on_date):
-    if not date_of_birth_str:
+    dob = parse_date_safe(date_of_birth_str)
+    if not dob:
         return None
-    dob = datetime.strptime(date_of_birth_str[:10], '%Y-%m-%d')
     return on_date.year - dob.year - ((on_date.month, on_date.day) < (dob.month, dob.day))
 
 def get_tax_rebate_and_threshold(rebate_row, age):
@@ -2675,12 +2979,8 @@ def get_employee_workday_hours(emp):
     return max(0.01, hours)
 
 def parse_date_safe(value):
-    if not value:
-        return None
-    try:
-        return datetime.strptime(str(value)[:10], '%Y-%m-%d')
-    except Exception:
-        return None
+    """Read canonical ISO dates and supported historical South African dates safely."""
+    return parse_supported_date(value)
 
 def get_month_start_end_from_date(date_str):
     base = parse_date_safe(date_str) or datetime.now()
@@ -2908,7 +3208,10 @@ def get_employee_leave_dates(conn, company_id, employee_id, start_date, end_date
     leave_dates = set()
     for r in rows:
         try:
-            leave_start = datetime.strptime(r['date_taken'], '%Y-%m-%d').date()
+            leave_start_dt = parse_date_safe(r['date_taken'])
+            if not leave_start_dt:
+                continue
+            leave_start = leave_start_dt.date()
             days = max(1, int(float(r['days'] or 1)))
             for offset in range(days):
                 leave_day = leave_start + timedelta(days=offset)
@@ -3052,9 +3355,12 @@ def validate_booking_employees_available(conn, company_id, assignments, booking_
     return True, ''
 
 def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str=None):
-    if not start_date_str: return 0.0
-    start = datetime.strptime(start_date_str, '%Y-%m-%d')
-    now = datetime.strptime(ref_date_str, '%Y-%m-%d') if ref_date_str else datetime.now()
+    start = parse_date_safe(start_date_str)
+    if not start:
+        return 0.0
+    now = parse_date_safe(ref_date_str) if ref_date_str else datetime.now()
+    if not now:
+        now = datetime.now()
     cid = session.get('company_id')
     conn = get_db_connection()
     emp_record = conn.execute('SELECT additional_leave, inactive_date FROM employees WHERE id=? AND company_id=?', (employee_id, cid)).fetchone()
@@ -3081,8 +3387,8 @@ def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref
         bookings = conn.execute('SELECT start FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall()
         for b in bookings:
             try:
-                b_date = datetime.strptime(b['start'][:10], '%Y-%m-%d')
-                if start.date() <= b_date.date() <= now.date():
+                b_date = parse_date_safe(b['start'])
+                if b_date and start.date() <= b_date.date() <= now.date():
                     valid_shift_dates.append(b_date)
             except Exception:
                 pass
@@ -3125,9 +3431,14 @@ def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref
     return round(valid_balance, 2)
 
 def calculate_sick_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str=None):
-    if not start_date_str or emp_type in ['Supplier', 'Provider', 'Contract <25 Hrs']: return "N/A"
-    start = datetime.strptime(start_date_str, '%Y-%m-%d')
-    now = datetime.strptime(ref_date_str, '%Y-%m-%d') if ref_date_str else datetime.now()
+    if emp_type in ['Supplier', 'Provider', 'Contract <25 Hrs']:
+        return "N/A"
+    start = parse_date_safe(start_date_str)
+    if not start:
+        return "N/A"
+    now = parse_date_safe(ref_date_str) if ref_date_str else datetime.now()
+    if not now:
+        now = datetime.now()
     cid = session.get('company_id')
     conn = get_db_connection()
     emp_record = conn.execute('SELECT inactive_date FROM employees WHERE id=? AND company_id=?', (employee_id, cid)).fetchone()
@@ -3150,7 +3461,11 @@ def calculate_sick_leave_balance(employee_id, start_date_str, emp_type, emp_name
         elif safe_type == 'Full-time (6 Days)':
             earned = ((max(0, days) / 7.0) * 6.0) / 26.0
         elif safe_type == 'Contract >25 Hrs':
-            valid = sum(1 for b in conn.execute('SELECT start FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall() if start.date() <= datetime.strptime(b['start'][:10], '%Y-%m-%d').date() <= now.date())
+            valid = 0
+            for booking in conn.execute('SELECT start FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall():
+                booking_date = parse_date_safe(booking['start'])
+                if booking_date and start.date() <= booking_date.date() <= now.date():
+                    valid += 1
             earned = valid / 26.0
     else:
         if safe_type in ['Full-time', 'Full-time (5 Days)']:
@@ -3162,8 +3477,8 @@ def calculate_sick_leave_balance(employee_id, start_date_str, emp_type, emp_name
             valid = 0
             for b in cycle_bookings:
                 try:
-                    b_date = datetime.strptime(b['start'][:10], '%Y-%m-%d')
-                    if cycle_start.date() <= b_date.date() < cycle_end.date() and b_date.date() <= now.date():
+                    b_date = parse_date_safe(b['start'])
+                    if b_date and cycle_start.date() <= b_date.date() < cycle_end.date() and b_date.date() <= now.date():
                         valid += 1
                 except Exception:
                     pass
@@ -3178,8 +3493,14 @@ def calculate_sick_leave_balance(employee_id, start_date_str, emp_type, emp_name
     return round(max(0.0, earned - float(taken['total'] or 0.0)), 2)
 
 def calculate_family_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str=None):
-    if not start_date_str or emp_type in ['Supplier', 'Provider', 'Contract <25 Hrs']: return "N/A"
-    start, now = datetime.strptime(start_date_str, '%Y-%m-%d'), datetime.strptime(ref_date_str, '%Y-%m-%d') if ref_date_str else datetime.now()
+    if emp_type in ['Supplier', 'Provider', 'Contract <25 Hrs']:
+        return "N/A"
+    start = parse_date_safe(start_date_str)
+    if not start:
+        return "N/A"
+    now = parse_date_safe(ref_date_str) if ref_date_str else datetime.now()
+    if not now:
+        now = datetime.now()
     conn = get_db_connection()
     emp_record = conn.execute('SELECT inactive_date FROM employees WHERE id=? AND company_id=?', (employee_id, session.get('company_id'))).fetchone()
     inactive_dt = parse_date_safe(emp_record['inactive_date']) if emp_record and 'inactive_date' in dict(emp_record) else None
@@ -3190,8 +3511,14 @@ def calculate_family_leave_balance(employee_id, start_date_str, emp_type, emp_na
         conn.close()
         return 0.0
     if emp_type == 'Contract >25 Hrs':
-        valid = sum(1 for b in conn.execute("SELECT start FROM bookings WHERE employee LIKE ? AND company_id=?", (f"%{emp_name}%", session['company_id'])).fetchall() if start.date() <= datetime.strptime(b['start'][:10], '%Y-%m-%d').date() <= now.date())
-        if (valid / max(1, (now.date() - start.date()).days / 7.0)) < 4.0: return 0.0
+        valid = 0
+        for booking in conn.execute("SELECT start FROM bookings WHERE employee LIKE ? AND company_id=?", (f"%{emp_name}%", session['company_id'])).fetchall():
+            booking_date = parse_date_safe(booking['start'])
+            if booking_date and start.date() <= booking_date.date() <= now.date():
+                valid += 1
+        if (valid / max(1, (now.date() - start.date()).days / 7.0)) < 4.0:
+            conn.close()
+            return 0.0
     cyc = start.replace(year=start.year + (months // 12))
     taken = conn.execute('SELECT SUM(days) as total FROM leave_records WHERE employee_id=? AND leave_type="Family Responsibility" AND date_taken >= ? AND date_taken <= ? AND company_id=?', (employee_id, cyc.strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d'), session['company_id'])).fetchone()
     conn.close()
@@ -9104,19 +9431,48 @@ def admin_import_company_data():
         return jsonify({"status": "error", "message": "No target company selected."}), 400
 
     uploaded = request.files['file']
+    if not uploaded.filename.lower().endswith('.csv'):
+        return jsonify({"status": "error", "message": "Unsupported file type. Upload a .csv file created from the Easy Admin template."}), 400
     try:
-        content = uploaded.read().decode('utf-8-sig')
+        raw_bytes = uploaded.read()
+        if not raw_bytes:
+            return jsonify({"status": "error", "message": "The uploaded CSV file is empty."}), 400
+        content = raw_bytes.decode('utf-8-sig')
     except UnicodeDecodeError:
-        return jsonify({"status": "error", "message": "Could not read CSV. Please save it as UTF-8 CSV and try again."}), 400
+        return jsonify({"status": "error", "message": "Could not read CSV. Save it as UTF-8 CSV and try again."}), 400
 
     reader = csv.DictReader(io.StringIO(content))
     if not reader.fieldnames:
         return jsonify({"status": "error", "message": "CSV has no header row."}), 400
 
+    raw_headers = [normalise_import_value(h) for h in reader.fieldnames]
+    normalised_headers = [normalise_import_header(h) for h in raw_headers]
+    if any(not h for h in normalised_headers):
+        return jsonify({"status": "error", "message": "CSV contains a blank column heading. Remove blank columns and try again."}), 400
+    duplicate_headers = sorted({h for h in normalised_headers if normalised_headers.count(h) > 1})
+    if duplicate_headers:
+        return jsonify({
+            "status": "error",
+            "message": "CSV contains duplicate column headings: " + ", ".join(duplicate_headers) + "."
+        }), 400
+
     allowed_fields = COMPANY_IMPORT_TABLES[import_type]
-    present_fields = [f for f in allowed_fields if f in reader.fieldnames]
-    if not present_fields:
-        return jsonify({"status": "error", "message": f"CSV does not contain any valid fields for {import_type}. Download the template and try again."}), 400
+    unknown_headers = [raw for raw, normalised in zip(raw_headers, normalised_headers) if normalised not in allowed_fields]
+    if unknown_headers:
+        return jsonify({
+            "status": "error",
+            "message": "Unsupported or misspelled CSV column(s): " + ", ".join(unknown_headers) + ". Download the current Easy Admin template and try again."
+        }), 400
+
+    missing_required_columns = sorted(IMPORT_REQUIRED_FIELDS.get(import_type, set()) - set(normalised_headers))
+    if missing_required_columns:
+        return jsonify({
+            "status": "error",
+            "message": "CSV is missing required column(s): " + ", ".join(missing_required_columns) + "."
+        }), 400
+
+    reader.fieldnames = normalised_headers
+    present_fields = [f for f in allowed_fields if f in normalised_headers]
 
     conn = get_db_connection()
     if not conn.execute('SELECT id FROM companies WHERE id=?', (cid,)).fetchone():
@@ -9125,36 +9481,64 @@ def admin_import_company_data():
 
     errors = []
     rows_to_insert = []
+    seen_values = {}
+    total_data_rows = 0
     for line_no, row in enumerate(reader, start=2):
-        cleaned = {field: normalise_import_value(row.get(field)) for field in present_fields}
-        if not any(cleaned.values()):
+        row_values = {field: row.get(field) for field in present_fields}
+        if not any(normalise_import_value(value) for value in row_values.values()):
             continue
-        if import_type in ('clients', 'employees', 'services') and not cleaned.get('name'):
-            errors.append(f"Line {line_no}: name is required.")
+        total_data_rows += 1
+        cleaned, row_errors = validate_import_row(import_type, row_values, line_no, conn, cid, seen_values)
+        if row_errors:
+            errors.extend(row_errors)
             continue
-        if import_type == 'bookings' and (not cleaned.get('title') or not cleaned.get('start')):
-            errors.append(f"Line {line_no}: title and start are required.")
-            continue
-        if import_type == 'expenses' and (not cleaned.get('date') or not cleaned.get('amount')):
-            errors.append(f"Line {line_no}: date and amount are required.")
-            continue
-        if import_type == 'leave_records' and (not cleaned.get('employee_id') or not cleaned.get('date_taken')):
-            errors.append(f"Line {line_no}: employee_id and date_taken are required.")
-            continue
-        rows_to_insert.append(cleaned)
+        rows_to_insert.append((line_no, cleaned))
+
+    if total_data_rows == 0:
+        conn.close()
+        return jsonify({"status": "error", "message": "CSV contains no data rows to import."}), 400
+
+    invalid_rows = total_data_rows - len(rows_to_insert)
+    if errors:
+        conn.close()
+        response = {
+            "status": "error",
+            "message": (
+                f"Validation failed: {invalid_rows} of {total_data_rows} data row(s) contain errors. "
+                "No data was imported."
+            ),
+            "valid_rows": len(rows_to_insert),
+            "invalid_rows": invalid_rows,
+            "total_rows": total_data_rows,
+            "error_count": len(errors),
+            "errors": errors[:100],
+        }
+        if len(errors) > 100:
+            response['message'] += f" Showing the first 100 of {len(errors)} errors."
+        log_action(
+            'Hub', 'Company Data Import Validation Failed',
+            f"Validation failed for {import_type}: {invalid_rows}/{total_data_rows} invalid rows for company_id={cid}",
+            result='failure', event_type='validation'
+        )
+        return jsonify(response), 400
 
     if validate_only:
         conn.close()
-        return jsonify({"status": "success", "message": "Validation complete.", "valid_rows": len(rows_to_insert), "errors": errors})
-    if errors:
-        conn.close()
-        return jsonify({"status": "error", "message": "Import has validation errors. Fix the CSV and try again.", "errors": errors[:50]}), 400
+        return jsonify({
+            "status": "success",
+            "message": f"Validation passed. {len(rows_to_insert)} row(s) are ready to import. No data was changed.",
+            "valid_rows": len(rows_to_insert),
+            "invalid_rows": 0,
+            "total_rows": total_data_rows,
+            "errors": [],
+        })
 
+    current_line_no = None
     try:
         table = safe_table_name(import_type)
         table_cols = set(table_columns(conn, table))
         inserted = 0
-        for row in rows_to_insert:
+        for current_line_no, row in rows_to_insert:
             cols = [c for c in row.keys() if c in table_cols]
             if 'company_id' in table_cols:
                 cols.append('company_id')
@@ -9167,12 +9551,29 @@ def admin_import_company_data():
         conn.commit()
     except Exception as exc:
         conn.rollback()
+        reason = safe_import_database_error(exc)
         conn.close()
-        return jsonify({"status": "error", "message": f"Import failed: {exc}"}), 500
+        line_message = f" on CSV line {current_line_no}" if current_line_no else ''
+        log_action(
+            'Hub', 'Company Data Import Failed',
+            f"Import failed for {import_type}{line_message}: {reason} company_id={cid}",
+            result='failure', event_type='application'
+        )
+        return jsonify({
+            "status": "error",
+            "message": f"Import failed{line_message}: {reason} No rows were imported."
+        }), 400
 
     conn.close()
     log_action('Hub', 'Imported Company Data', f"Imported {inserted} {import_type} rows for company_id={cid}")
-    return jsonify({"status": "success", "message": f"Imported {inserted} row(s).", "inserted": inserted})
+    return jsonify({
+        "status": "success",
+        "message": f"Imported {inserted} row(s) successfully.",
+        "inserted": inserted,
+        "valid_rows": inserted,
+        "invalid_rows": 0,
+        "total_rows": total_data_rows,
+    })
 
 
 @app.route('/admin/export_full_database', methods=['GET'])
@@ -11571,6 +11972,7 @@ def payroll_index():
         'more_missing_count': 0,
     }
     emp_data = []
+    payroll_data_warnings = []
 
     if can_hr_payroll:
         emp_where = "company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL)"
@@ -11582,10 +11984,32 @@ def payroll_index():
         employee_total = conn.execute(f"SELECT COUNT(*) FROM employees WHERE {emp_where}", emp_params).fetchone()[0]
         employees = conn.execute(f"SELECT * FROM employees WHERE {emp_where} ORDER BY name ASC LIMIT ? OFFSET ?", emp_params + [payroll_per_page, payroll_offset]).fetchall()
         employee_pagination = pagination_meta(employee_total, payroll_page, payroll_per_page)
-        all_payroll_employees = conn.execute("""SELECT id, name, start_date, emp_type, status, inactive_date
+        all_payroll_employees = conn.execute("""SELECT id, name, start_date, date_of_birth, emp_type, status, inactive_date
                                                 FROM employees
                                                 WHERE company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL)
                                                 ORDER BY name ASC""", (cid,)).fetchall()
+        for payroll_emp in all_payroll_employees:
+            field_issues = []
+            for field_name, field_label in (
+                ('start_date', 'Start Date'),
+                ('date_of_birth', 'Date of Birth'),
+                ('inactive_date', 'Inactive Date / Last Working Day'),
+            ):
+                raw_value = payroll_emp[field_name]
+                if not raw_value:
+                    if field_name == 'start_date':
+                        field_issues.append(f"{field_label} is missing")
+                    continue
+                if not parse_date_safe(raw_value):
+                    field_issues.append(f"{field_label} is invalid ({raw_value})")
+                elif not is_iso_date_value(raw_value):
+                    field_issues.append(f"{field_label} is stored as {raw_value}; edit and save it as YYYY-MM-DD")
+            if field_issues:
+                payroll_data_warnings.append({
+                    'employee_id': payroll_emp['id'],
+                    'employee_name': payroll_emp['name'] or f"Employee #{payroll_emp['id']}",
+                    'issues': field_issues,
+                })
         finalized_rows = conn.execute("""SELECT employee_id, MAX(date) AS finalised_date
                                        FROM payslips
                                        WHERE company_id=?
@@ -11644,6 +12068,7 @@ def payroll_index():
         employee_pagination=employee_pagination,
         payroll_q=payroll_q,
         payroll_current_month_status=payroll_current_month_status,
+        payroll_data_warnings=payroll_data_warnings,
         can_hr_payroll=can_hr_payroll,
         can_hiring=can_hiring,
         can_hr_payroll_write=can_hr_payroll_write,
@@ -12026,15 +12451,28 @@ def update_employee():
     overtime_pay_treatment = (data.get('overtime_pay_treatment') or '').strip().lower()
     if overtime_pay_treatment not in ['regular', 'irregular']:
         return jsonify({"status": "error", "message": "Overtime PAYE Treatment must be Regular recurring or Irregular/once-off."}), 400
-    inactive_date = (data.get('inactive_date') or '').strip()
-    if inactive_date:
-        try:
-            inactive_dt = datetime.strptime(inactive_date, '%Y-%m-%d')
-            start_dt = datetime.strptime(data.get('start_date'), '%Y-%m-%d')
-            if inactive_dt < start_dt:
-                return jsonify({"status": "error", "message": "Inactive Date / Last Working Day cannot be before Start Date."}), 400
-        except Exception:
-            return jsonify({"status": "error", "message": "Inactive Date / Last Working Day must be a valid date."}), 400
+    start_dt = parse_supported_date(data.get('start_date'))
+    if not start_dt:
+        return jsonify({"status": "error", "message": "Start Date must be a valid date in YYYY-MM-DD format."}), 400
+    date_of_birth_dt = parse_supported_date(data.get('date_of_birth'))
+    if not date_of_birth_dt:
+        return jsonify({"status": "error", "message": "Date of Birth must be a valid date in YYYY-MM-DD format."}), 400
+    if date_of_birth_dt.date() > datetime.now().date():
+        return jsonify({"status": "error", "message": "Date of Birth cannot be in the future."}), 400
+    if start_dt.date() < date_of_birth_dt.date():
+        return jsonify({"status": "error", "message": "Start Date cannot be before Date of Birth."}), 400
+    start_date = start_dt.strftime('%Y-%m-%d')
+    date_of_birth = date_of_birth_dt.strftime('%Y-%m-%d')
+
+    inactive_date_raw = (data.get('inactive_date') or '').strip()
+    inactive_date = ''
+    if inactive_date_raw:
+        inactive_dt = parse_supported_date(inactive_date_raw)
+        if not inactive_dt:
+            return jsonify({"status": "error", "message": "Inactive Date / Last Working Day must be a valid date in YYYY-MM-DD format."}), 400
+        if inactive_dt < start_dt:
+            return jsonify({"status": "error", "message": "Inactive Date / Last Working Day cannot be before Start Date."}), 400
+        inactive_date = inactive_dt.strftime('%Y-%m-%d')
     emp_add_leave = data.get('additional_leave', 0)
 
     conn = get_db_connection()
@@ -12051,7 +12489,7 @@ def update_employee():
             conn.close()
             return jsonify({"status": "error", "message": "Upload Signed Contract and Upload ID/Passport Copy are required."}), 400
         
-        conn.execute('''UPDATE employees SET name=?, job_title=?, emp_type=?, status=?, start_date=?, inactive_date=?, date_of_birth=?, gross_salary=?, id_passport=?, phone=?, email=?, emergency_contact=?, tax_number=?, paye_ref=?, bank_details=?, bank_name=?, account_holder=?, account_number=?, branch_code=?, account_type=?, payment_reference=?, address=?, cv_file=?, id_file=?, contract_file=?, additional_leave=?, notes=?, workday_hours=?, overtime_pay_treatment=?, uif_contributor=?, uif_non_contributor_reason=?, uif_termination_code=? WHERE id=? AND company_id=?''', (data.get('name'), data.get('job_title'), data.get('emp_type'), data.get('status'), data.get('start_date'), inactive_date, data.get('date_of_birth'), data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), final_cv, final_id, final_contract, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or '', emp_id, cid))
+        conn.execute('''UPDATE employees SET name=?, job_title=?, emp_type=?, status=?, start_date=?, inactive_date=?, date_of_birth=?, gross_salary=?, id_passport=?, phone=?, email=?, emergency_contact=?, tax_number=?, paye_ref=?, bank_details=?, bank_name=?, account_holder=?, account_number=?, branch_code=?, account_type=?, payment_reference=?, address=?, cv_file=?, id_file=?, contract_file=?, additional_leave=?, notes=?, workday_hours=?, overtime_pay_treatment=?, uif_contributor=?, uif_non_contributor_reason=?, uif_termination_code=? WHERE id=? AND company_id=?''', (data.get('name'), data.get('job_title'), data.get('emp_type'), data.get('status'), start_date, inactive_date, date_of_birth, data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), final_cv, final_id, final_contract, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or '', emp_id, cid))
         action_msg = ('HR & Payroll', 'Updated Employee', f"Updated profile information for {data.get('name')}")
     else:
         count = conn.execute("SELECT COUNT(*) FROM employees WHERE company_id=?", (cid,)).fetchone()[0]
@@ -12059,7 +12497,7 @@ def update_employee():
         if not id_filename or not contract_filename:
             conn.close()
             return jsonify({"status": "error", "message": "Upload Signed Contract and Upload ID/Passport Copy are required."}), 400
-        conn.execute('''INSERT INTO employees (company_id, name, emp_number, job_title, emp_type, status, start_date, inactive_date, date_of_birth, gross_salary, id_passport, phone, email, emergency_contact, tax_number, paye_ref, bank_details, bank_name, account_holder, account_number, branch_code, account_type, payment_reference, address, cv_file, id_file, contract_file, additional_leave, notes, workday_hours, overtime_pay_treatment, uif_contributor, uif_non_contributor_reason, uif_termination_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (cid, data.get('name'), emp_num, data.get('job_title'), data.get('emp_type'), data.get('status'), data.get('start_date'), inactive_date, data.get('date_of_birth'), data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), cv_filename, id_filename, contract_filename, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or ''))
+        conn.execute('''INSERT INTO employees (company_id, name, emp_number, job_title, emp_type, status, start_date, inactive_date, date_of_birth, gross_salary, id_passport, phone, email, emergency_contact, tax_number, paye_ref, bank_details, bank_name, account_holder, account_number, branch_code, account_type, payment_reference, address, cv_file, id_file, contract_file, additional_leave, notes, workday_hours, overtime_pay_treatment, uif_contributor, uif_non_contributor_reason, uif_termination_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (cid, data.get('name'), emp_num, data.get('job_title'), data.get('emp_type'), data.get('status'), start_date, inactive_date, date_of_birth, data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), cv_filename, id_filename, contract_filename, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or ''))
         action_msg = ('HR & Payroll', 'Created Employee', f"Onboarded new employee: {data.get('name')}")
     conn.commit()
     conn.close()

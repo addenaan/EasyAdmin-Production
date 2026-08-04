@@ -49,6 +49,24 @@
             </div>
         </div>
 
+        {% if payroll_data_warnings %}
+        <div class="alert alert-warning border-warning shadow-sm" role="alert">
+            <div class="fw-bold mb-1">Employee date data needs attention</div>
+            <div class="small mb-2">
+                Payroll remains available, but {{ payroll_data_warnings|length }} employee record(s) contain a missing, non-standard or invalid date.
+                Edit and save the affected profile to store dates as YYYY-MM-DD.
+            </div>
+            <details class="small">
+                <summary class="fw-bold" style="cursor:pointer;">Show affected employees</summary>
+                <ul class="mb-0 mt-2">
+                    {% for warning in payroll_data_warnings %}
+                    <li><strong>{{ warning.employee_name }}</strong>: {{ warning.issues|join('; ') }}</li>
+                    {% endfor %}
+                </ul>
+            </details>
+        </div>
+        {% endif %}
+
         <ul class="nav nav-tabs nav-fill" id="hrTabs" role="tablist">
             {% if can_hr_payroll %}
             <li class="nav-item" role="presentation">
