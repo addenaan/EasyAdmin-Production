@@ -448,13 +448,32 @@
                                 <label class="small fw-bold">Cost to Company (R)</label>
                                 <input type="number" id="svcCost" class="form-control" step="0.01" min="0" placeholder="250.00">
                             </div>
+                            {% if website_integration_enabled %}
+                            <div class="col-12 mt-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="svcWebsitePublished" onchange="toggleInvoicingWebsiteFields()">
+                                    <label class="form-check-label fw-bold text-primary" for="svcWebsitePublished">Show on Website</label>
+                                </div>
+                                <div id="svcWebsiteFields" class="border rounded bg-light p-3 mt-2 d-none">
+                                    <div class="row g-2">
+                                        <div class="col-md-6"><label class="small fw-bold">Website Display Name</label><input type="text" id="svcWebsiteDisplayName" class="form-control form-control-sm" maxlength="160"></div>
+                                        <div class="col-md-3"><label class="small fw-bold">Category</label><input type="text" id="svcWebsiteCategory" class="form-control form-control-sm" maxlength="80" placeholder="e.g. Blocks"></div>
+                                        <div class="col-md-3"><label class="small fw-bold">Unit</label><input type="text" id="svcWebsiteUnit" class="form-control form-control-sm" maxlength="40" value="each"></div>
+                                        <div class="col-md-8"><label class="small fw-bold">Website Description</label><textarea id="svcWebsiteDescription" class="form-control form-control-sm" rows="2" maxlength="1000"></textarea></div>
+                                        <div class="col-md-2"><label class="small fw-bold">Minimum Qty</label><input type="number" id="svcWebsiteMinimumQuantity" class="form-control form-control-sm" min="0.0001" step="0.0001" value="1"></div>
+                                        <div class="col-md-2"><label class="small fw-bold">Display Order</label><input type="number" id="svcWebsiteSortOrder" class="form-control form-control-sm" min="0" step="1" value="0"></div>
+                                    </div>
+                                    <div class="form-text">Only public product details and the Client Price are provided to the website. Company Cost and margin are never exposed.</div>
+                                </div>
+                            </div>
+                            {% endif %}
                         </div>
                         <button class="btn btn-sm btn-primary mt-3 w-100" onclick="saveServiceMargin()">Save Service Margin</button>
                     </div>
 
                     <table class="table table-hover bg-white border align-middle">
                         <thead class="table-light">
-                            <tr><th>Service</th><th>Client Price</th><th>Company Cost</th><th>Gross Margin</th><th>Action</th></tr>
+                            <tr><th>Service</th><th>Client Price</th><th>Company Cost</th><th>Gross Margin</th>{% if website_integration_enabled %}<th>Website</th>{% endif %}<th>Action</th></tr>
                         </thead>
                         <tbody id="serviceMarginsTableBody">
                             {% for s in services %}
@@ -463,6 +482,7 @@
                                 <td class="text-success">{{ (s.client_price or 0)|fmt_money }}</td>
                                 <td class="text-danger">{{ (s.company_cost or 0)|fmt_money }}</td>
                                 <td><strong>{{ ((s.client_price or 0) - (s.company_cost or 0))|fmt_money }}</strong></td>
+                                {% if website_integration_enabled %}<td>{% if s.website_published %}<span class="badge bg-success">Published</span>{% else %}<span class="badge bg-secondary">Not published</span>{% endif %}</td>{% endif %}
                                 <td>
                                     <button class="btn btn-sm btn-outline-secondary me-1" onclick='editServiceMargin({{ s | tojson | safe }})'>Edit</button>
                                     <button class="btn btn-sm btn-outline-danger" onclick='deleteServiceMargin({{ s.id }}, {{ s.name | tojson | safe }})'>Delete</button>
@@ -470,7 +490,7 @@
                             </tr>
                             {% endfor %}
                             {% if not services %}
-                            <tr><td colspan="5" class="text-center text-muted py-3">No services configured yet.</td></tr>
+                            <tr><td colspan="{{ 6 if website_integration_enabled else 5 }}" class="text-center text-muted py-3">No services configured yet.</td></tr>
                             {% endif %}
                         </tbody>
                     </table>
@@ -897,6 +917,7 @@
         const quotePrefix = "{{ quote_prefix }}";
         const quoteStart = "{{ quote_start }}";
         let quoteServices = {{ services | tojson | safe }};
+        const websiteIntegrationEnabled = {{ website_integration_enabled | tojson }};
         const invoiceProjects = {{ projects | tojson | safe }};
         const invoiceProjectMap = {};
         (invoiceProjects || []).forEach(p => { if(p && p.id !== undefined) invoiceProjectMap[String(p.id)] = p; });
@@ -1137,7 +1158,7 @@
             const tbody = document.getElementById('serviceMarginsTableBody');
             if(!tbody) return;
             if(!services || !services.length) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No services configured yet.</td></tr>';
+                tbody.innerHTML = `<tr><td colspan="${websiteIntegrationEnabled ? 6 : 5}" class="text-center text-muted py-3">No services configured yet.</td></tr>`;
                 return;
             }
             tbody.innerHTML = services.map(s => {
@@ -1152,6 +1173,7 @@
                         <td class="text-success">${money(clientPrice)}</td>
                         <td class="text-danger">${money(companyCost)}</td>
                         <td><strong>${money(clientPrice - companyCost)}</strong></td>
+                        ${websiteIntegrationEnabled ? `<td>${s.website_published ? '<span class="badge bg-success">Published</span>' : '<span class="badge bg-secondary">Not published</span>'}</td>` : ''}
                         <td>
                             <button class="btn btn-sm btn-outline-secondary me-1" onclick='editServiceMargin(${json})'>Edit</button>
                             <button class="btn btn-sm btn-outline-danger" onclick='deleteServiceMargin(${s.id}, ${nameJson})'>Delete</button>
@@ -1224,11 +1246,24 @@
             serviceMarginsModal.show();
         }
 
+        function toggleInvoicingWebsiteFields() {
+            const checkbox = document.getElementById('svcWebsitePublished');
+            const fields = document.getElementById('svcWebsiteFields');
+            if(fields) fields.classList.toggle('d-none', !(checkbox && checkbox.checked));
+        }
+
         function clearServiceMarginForm() {
             document.getElementById('svcId').value = '';
             document.getElementById('svcName').value = '';
             document.getElementById('svcPrice').value = '';
             document.getElementById('svcCost').value = '';
+            const publish = document.getElementById('svcWebsitePublished');
+            if(publish) publish.checked = false;
+            ['svcWebsiteDisplayName','svcWebsiteCategory','svcWebsiteDescription'].forEach(id => { const el = document.getElementById(id); if(el) el.value = ''; });
+            const unit = document.getElementById('svcWebsiteUnit'); if(unit) unit.value = 'each';
+            const minQty = document.getElementById('svcWebsiteMinimumQuantity'); if(minQty) minQty.value = '1';
+            const order = document.getElementById('svcWebsiteSortOrder'); if(order) order.value = '0';
+            toggleInvoicingWebsiteFields();
         }
 
         function editServiceMargin(service) {
@@ -1236,15 +1271,35 @@
             document.getElementById('svcName').value = service.name || '';
             document.getElementById('svcPrice').value = service.client_price || 0;
             document.getElementById('svcCost').value = service.company_cost || 0;
+            const publish = document.getElementById('svcWebsitePublished');
+            if(publish) publish.checked = !!service.website_published;
+            const values = {
+                svcWebsiteDisplayName: service.website_display_name || service.name || '',
+                svcWebsiteCategory: service.website_category || '',
+                svcWebsiteUnit: service.website_unit || 'each',
+                svcWebsiteDescription: service.website_description || '',
+                svcWebsiteMinimumQuantity: service.website_minimum_quantity || 1,
+                svcWebsiteSortOrder: service.website_sort_order || 0
+            };
+            Object.entries(values).forEach(([id, value]) => { const el = document.getElementById(id); if(el) el.value = value; });
+            toggleInvoicingWebsiteFields();
             serviceMarginsModal.show();
         }
 
         function saveServiceMargin() {
+            const publish = document.getElementById('svcWebsitePublished');
             const data = {
                 id: document.getElementById('svcId').value,
                 name: document.getElementById('svcName').value.trim(),
                 price: document.getElementById('svcPrice').value,
-                cost: document.getElementById('svcCost').value
+                cost: document.getElementById('svcCost').value,
+                show_on_website: !!(publish && publish.checked),
+                website_display_name: document.getElementById('svcWebsiteDisplayName')?.value || '',
+                website_category: document.getElementById('svcWebsiteCategory')?.value || '',
+                website_unit: document.getElementById('svcWebsiteUnit')?.value || 'each',
+                website_description: document.getElementById('svcWebsiteDescription')?.value || '',
+                website_minimum_quantity: document.getElementById('svcWebsiteMinimumQuantity')?.value || 1,
+                website_sort_order: document.getElementById('svcWebsiteSortOrder')?.value || 0
             };
             if(!data.name || data.price === '' || data.cost === '') return alert('Fill all service margin fields.');
             fetch('/update_service', {
@@ -1252,8 +1307,9 @@
                 headers: { 'Content-Type': 'application/json', 'X-App-Source': 'Invoicing' },
                 body: JSON.stringify(data)
             }).then(async r => {
-                if(!r.ok) throw new Error(await r.text() || 'Could not save service margin.');
-                return r.json();
+                const result = await r.json().catch(() => ({}));
+                if(!r.ok || result.status === 'error') throw new Error(result.message || 'Could not save service margin.');
+                return result;
             }).then(res => {
                 if(res.status === 'error') alert(res.message || 'Could not save service margin.');
                 else {

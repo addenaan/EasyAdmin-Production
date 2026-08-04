@@ -178,19 +178,39 @@
                         <input type="hidden" id="sId">
                         <div class="row">
                             <div class="col-md-4"><label class="small fw-bold">Service Name</label><input type="text" id="sName" class="form-control" placeholder="e.g. Standard Home Clean"></div>
-                            <div class="col-md-4"><label class="small fw-bold">Client Price (R)</label><input type="number" id="sPrice" class="form-control" placeholder="600.00"></div>
-                            <div class="col-md-4"><label class="small fw-bold">Cost to Company (R)</label><input type="number" id="sCost" class="form-control" placeholder="250.00"></div>
+                            <div class="col-md-4"><label class="small fw-bold">Client Price (R)</label><input type="number" id="sPrice" class="form-control" step="0.01" min="0" placeholder="600.00"></div>
+                            <div class="col-md-4"><label class="small fw-bold">Cost to Company (R)</label><input type="number" id="sCost" class="form-control" step="0.01" min="0" placeholder="250.00"></div>
+                            {% if website_integration_enabled %}
+                            <div class="col-12 mt-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="sWebsitePublished" onchange="toggleFinanceWebsiteFields()">
+                                    <label class="form-check-label fw-bold text-primary" for="sWebsitePublished">Show on Website</label>
+                                </div>
+                                <div id="sWebsiteFields" class="border rounded bg-light p-3 mt-2 d-none">
+                                    <div class="row g-2">
+                                        <div class="col-md-6"><label class="small fw-bold">Website Display Name</label><input type="text" id="sWebsiteDisplayName" class="form-control form-control-sm" maxlength="160"></div>
+                                        <div class="col-md-3"><label class="small fw-bold">Category</label><input type="text" id="sWebsiteCategory" class="form-control form-control-sm" maxlength="80" placeholder="e.g. Blocks"></div>
+                                        <div class="col-md-3"><label class="small fw-bold">Unit</label><input type="text" id="sWebsiteUnit" class="form-control form-control-sm" maxlength="40" value="each"></div>
+                                        <div class="col-md-8"><label class="small fw-bold">Website Description</label><textarea id="sWebsiteDescription" class="form-control form-control-sm" rows="2" maxlength="1000"></textarea></div>
+                                        <div class="col-md-2"><label class="small fw-bold">Minimum Qty</label><input type="number" id="sWebsiteMinimumQuantity" class="form-control form-control-sm" min="0.0001" step="0.0001" value="1"></div>
+                                        <div class="col-md-2"><label class="small fw-bold">Display Order</label><input type="number" id="sWebsiteSortOrder" class="form-control form-control-sm" min="0" step="1" value="0"></div>
+                                    </div>
+                                    <div class="form-text">Only public product details and the Client Price are provided to the website. Company Cost and margin are never exposed.</div>
+                                </div>
+                            </div>
+                            {% endif %}
                         </div>
                         <button class="btn btn-sm btn-primary mt-3 w-100" onclick="saveService()">Save Service Margin</button>
                     </div>
                     
                     <table class="table table-hover bg-white border">
-                        <thead class="table-light"><tr><th>Service</th><th>Client Price</th><th>Company Cost</th><th>Gross Margin</th><th>Action</th></tr></thead>
+                        <thead class="table-light"><tr><th>Service</th><th>Client Price</th><th>Company Cost</th><th>Gross Margin</th>{% if website_integration_enabled %}<th>Website</th>{% endif %}<th>Action</th></tr></thead>
                         <tbody>
                             {% for s in services %}
                             <tr>
                                 <td><strong>{{ s.name }}</strong></td><td class="text-success">{{ s.client_price|fmt_money }}</td><td class="text-danger">{{ s.company_cost|fmt_money }}</td>
                                 <td><strong>{{ (s.client_price - s.company_cost)|fmt_money }}</strong></td>
+                                {% if website_integration_enabled %}<td>{% if s.website_published %}<span class="badge bg-success">Published</span>{% else %}<span class="badge bg-secondary">Not published</span>{% endif %}</td>{% endif %}
                                 <td>
                                     <button class="btn btn-sm btn-outline-secondary me-1" onclick='editService({{ s | tojson | safe }})'>Edit</button>
                                     <button class="btn btn-sm btn-outline-danger" onclick='deleteService({{ s.id }}, {{ s.name | tojson | safe }})'>Delete</button>
@@ -369,12 +389,70 @@
             .then(() => location.reload());
         }
 
-        function openServicesModal() { document.getElementById('sId').value = ''; document.getElementById('sName').value = ''; document.getElementById('sPrice').value = ''; document.getElementById('sCost').value = ''; servicesModal.show(); }
-        function editService(s) { document.getElementById('sId').value = s.id; document.getElementById('sName').value = s.name; document.getElementById('sPrice').value = s.client_price; document.getElementById('sCost').value = s.company_cost; }
+        function toggleFinanceWebsiteFields() {
+            const checkbox = document.getElementById('sWebsitePublished');
+            const fields = document.getElementById('sWebsiteFields');
+            if(fields) fields.classList.toggle('d-none', !(checkbox && checkbox.checked));
+        }
+
+        function clearFinanceServiceForm() {
+            document.getElementById('sId').value = '';
+            document.getElementById('sName').value = '';
+            document.getElementById('sPrice').value = '';
+            document.getElementById('sCost').value = '';
+            const publish = document.getElementById('sWebsitePublished');
+            if(publish) publish.checked = false;
+            ['sWebsiteDisplayName','sWebsiteCategory','sWebsiteDescription'].forEach(id => { const el = document.getElementById(id); if(el) el.value = ''; });
+            const unit = document.getElementById('sWebsiteUnit'); if(unit) unit.value = 'each';
+            const minQty = document.getElementById('sWebsiteMinimumQuantity'); if(minQty) minQty.value = '1';
+            const order = document.getElementById('sWebsiteSortOrder'); if(order) order.value = '0';
+            toggleFinanceWebsiteFields();
+        }
+
+        function openServicesModal() { clearFinanceServiceForm(); servicesModal.show(); }
+        function editService(s) {
+            document.getElementById('sId').value = s.id;
+            document.getElementById('sName').value = s.name;
+            document.getElementById('sPrice').value = s.client_price;
+            document.getElementById('sCost').value = s.company_cost;
+            const publish = document.getElementById('sWebsitePublished');
+            if(publish) publish.checked = !!s.website_published;
+            const values = {
+                sWebsiteDisplayName: s.website_display_name || s.name || '',
+                sWebsiteCategory: s.website_category || '',
+                sWebsiteUnit: s.website_unit || 'each',
+                sWebsiteDescription: s.website_description || '',
+                sWebsiteMinimumQuantity: s.website_minimum_quantity || 1,
+                sWebsiteSortOrder: s.website_sort_order || 0
+            };
+            Object.entries(values).forEach(([id, value]) => { const el = document.getElementById(id); if(el) el.value = value; });
+            toggleFinanceWebsiteFields();
+            servicesModal.show();
+        }
         function saveService() {
-            const data = { id: document.getElementById('sId').value, name: document.getElementById('sName').value, price: document.getElementById('sPrice').value, cost: document.getElementById('sCost').value };
-            if(!data.name || !data.price || !data.cost) return alert("Fill all fields.");
-            fetch('/update_service', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)}).then(() => location.reload());
+            const publish = document.getElementById('sWebsitePublished');
+            const data = {
+                id: document.getElementById('sId').value,
+                name: document.getElementById('sName').value.trim(),
+                price: document.getElementById('sPrice').value,
+                cost: document.getElementById('sCost').value,
+                show_on_website: !!(publish && publish.checked),
+                website_display_name: document.getElementById('sWebsiteDisplayName')?.value || '',
+                website_category: document.getElementById('sWebsiteCategory')?.value || '',
+                website_unit: document.getElementById('sWebsiteUnit')?.value || 'each',
+                website_description: document.getElementById('sWebsiteDescription')?.value || '',
+                website_minimum_quantity: document.getElementById('sWebsiteMinimumQuantity')?.value || 1,
+                website_sort_order: document.getElementById('sWebsiteSortOrder')?.value || 0
+            };
+            if(!data.name || data.price === '' || data.cost === '') return alert("Fill all required service fields.");
+            fetch('/update_service', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)})
+                .then(async response => {
+                    const result = await response.json().catch(() => ({}));
+                    if(!response.ok || result.status === 'error') throw new Error(result.message || 'Could not save service margin.');
+                    return result;
+                })
+                .then(() => location.reload())
+                .catch(error => alert(error.message));
         }
 
 

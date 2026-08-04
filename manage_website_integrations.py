@@ -144,12 +144,16 @@ def command_create(args: argparse.Namespace) -> None:
             raise SystemExit(f"Company ID {args.company_id} was not found.")
         if conn.execute("SELECT key_id FROM website_integrations WHERE key_id=?", (key_id,)).fetchone():
             raise SystemExit(f"Integration key '{key_id}' already exists.")
+        has_default = conn.execute(
+            "SELECT key_id FROM website_integrations WHERE company_id=? AND COALESCE(is_default,0)=1 LIMIT 1",
+            (args.company_id,),
+        ).fetchone()
         conn.execute(
             """INSERT INTO website_integrations
                (key_id, company_id, integration_name, secret_ciphertext, enabled, scopes,
                 price_mode, vat_rate, quote_valid_days, quote_status, source_label,
-                created_at, updated_at, secret_rotated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                created_at, updated_at, secret_rotated_at, is_default)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 key_id,
                 args.company_id,
@@ -165,6 +169,7 @@ def command_create(args: argparse.Namespace) -> None:
                 now_iso(),
                 now_iso(),
                 now_iso(),
+                0 if has_default else 1,
             ),
         )
         mapped = 0

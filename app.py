@@ -2558,6 +2558,82 @@ def get_setting(key, company_id=None):
     conn.close()
     return res['value'] if res else ""
 
+def _website_integrations_module():
+    from app_modules import website_integrations as website_integrations_module
+    return website_integrations_module
+
+
+def _ensure_website_integrations_schema():
+    import sys
+    module = _website_integrations_module()
+    module.ensure_integration_schema(sys.modules[__name__])
+    return module
+
+
+def _company_website_integration(conn, company_id, enabled_only=False):
+    if not company_id or not compat_table_exists(conn, 'website_integrations'):
+        return None
+    try:
+        return _website_integrations_module().get_default_website_integration(
+            conn, int(company_id), enabled_only=bool(enabled_only)
+        )
+    except Exception:
+        return None
+
+
+def _website_integration_public_summary(integration):
+    if not integration:
+        return None
+    return {
+        'key_id': integration.get('key_id'),
+        'company_id': integration.get('company_id'),
+        'integration_name': integration.get('integration_name'),
+        'enabled': bool(integration.get('enabled')),
+        'price_mode': integration.get('price_mode') or 'exclusive_vat',
+        'vat_rate': float(integration.get('vat_rate') or 0),
+        'quote_valid_days': int(integration.get('quote_valid_days') or 14),
+        'quote_status': integration.get('quote_status') or 'Pending',
+        'source_label': integration.get('source_label') or 'Website Integration',
+        'created_at': integration.get('created_at'),
+        'updated_at': integration.get('updated_at'),
+        'last_used_at': integration.get('last_used_at'),
+        'secret_rotated_at': integration.get('secret_rotated_at'),
+    }
+
+
+def _services_with_website_details(conn, company_id):
+    services = [dict(row) for row in conn.execute(
+        'SELECT * FROM services WHERE company_id=? ORDER BY name ASC',
+        (company_id,),
+    ).fetchall()]
+    integration = _company_website_integration(conn, company_id, enabled_only=False)
+    mappings = {}
+    if integration and compat_table_exists(conn, 'website_integration_products'):
+        rows = conn.execute(
+            '''SELECT * FROM website_integration_products
+               WHERE integration_key_id=?''',
+            (integration.get('key_id'),),
+        ).fetchall()
+        mappings = {int(dict(row).get('service_id')): dict(row) for row in rows}
+    for service in services:
+        mapping = mappings.get(int(service.get('id') or 0), {})
+        service['website_published'] = bool(mapping.get('enabled'))
+        service['website_public_id'] = mapping.get('public_id') or ''
+        service['website_display_name'] = mapping.get('display_name') or service.get('name') or ''
+        service['website_description'] = mapping.get('website_description') or ''
+        service['website_category'] = mapping.get('website_category') or ''
+        service['website_unit'] = mapping.get('website_unit') or 'each'
+        service['website_minimum_quantity'] = float(mapping.get('minimum_quantity') or 1)
+        service['website_sort_order'] = int(mapping.get('sort_order') or 0)
+    return services, integration
+
+
+def _integration_render_variables(key_id, secret):
+    return '\n'.join([
+        f'EASYADMIN_INTEGRATION_KEY_ID={key_id}',
+        f'EASYADMIN_INTEGRATION_SECRET={secret}',
+    ])
+
 SYSTEM_EMAIL_SETTING_KEYS = ['smtp_server', 'smtp_port', 'smtp_user', 'smtp_pass', 'sender_email']
 
 def get_system_email_settings(conn=None):
@@ -8911,10 +8987,23 @@ def switch_company():
 @app.route('/admin/companies', methods=['GET'])
 def get_companies():
     if not session.get('is_superadmin'): return "Forbidden", 403
+    _ensure_website_integrations_schema()
     conn = get_db_connection()
-    comps = conn.execute('SELECT * FROM companies ORDER BY name ASC').fetchall()
-    conn.close()
-    return jsonify([dict(c) for c in comps])
+    try:
+        companies = []
+        for row in conn.execute('SELECT * FROM companies ORDER BY name ASC').fetchall():
+            company = dict(row)
+            integration = _company_website_integration(conn, company.get('id'), enabled_only=False)
+            summary = _website_integration_public_summary(integration)
+            company['website_integration_enabled'] = bool(summary and summary.get('enabled'))
+            company['website_integration_key_id'] = summary.get('key_id') if summary else ''
+            company['website_integration_name'] = summary.get('integration_name') if summary else ''
+            company['website_integration_last_used_at'] = summary.get('last_used_at') if summary else None
+            company['website_integration_secret_rotated_at'] = summary.get('secret_rotated_at') if summary else None
+            companies.append(company)
+        return jsonify(companies)
+    finally:
+        conn.close()
 
 @app.route('/admin/companies/save', methods=['POST'])
 def save_company():
@@ -8932,6 +9021,9 @@ def save_company():
     c_ca = 1 if request.form.get('can_accounting') == 'true' else 0
     c_cfr = 1 if request.form.get('can_franchise_reports') == 'true' else 0
     c_gcal = 1 if request.form.get('google_calendar_sync') == 'true' else 0
+    website_integration_field_present = 'website_integration_enabled' in request.form
+    c_website_integration = request.form.get('website_integration_enabled') == 'true'
+    website_module = _ensure_website_integrations_schema() if website_integration_field_present else None
     try:
         c_transport_per_lift = max(0.0, float(request.form.get('transport_amount_per_lift') or 25))
     except (TypeError, ValueError):
@@ -8957,6 +9049,7 @@ def save_company():
 
     conn = get_db_connection()
     target_company_id = c_id or None
+    website_result = None
     try:
         if c_id:
             if filename:
@@ -8971,6 +9064,13 @@ def save_company():
                 target_company_id = row['id'] if row else None
 
         ensure_tenant_template(conn, target_company_id, c_industry, force_reset=False)
+        if website_integration_field_present and target_company_id:
+            website_result = website_module.configure_company_website_integration(
+                conn,
+                int(target_company_id),
+                c_name,
+                c_website_integration,
+            )
         if target_company_id and not c_cfr:
             conn.execute('UPDATE users SET can_franchise_reports=0 WHERE company_id=?', (target_company_id,))
             conn.execute('DELETE FROM franchise_group_users WHERE user_id IN (SELECT id FROM users WHERE company_id=?)', (target_company_id,))
@@ -9005,13 +9105,89 @@ def save_company():
         session['comp_can_franchise_reports'] = bool(c_cfr)
         session['comp_google_calendar'] = bool(c_gcal)
 
+    if website_integration_field_present:
+        action = 'Disabled Website Integration'
+        if c_website_integration:
+            action = 'Created Website Integration' if website_result and website_result.get('created') else 'Enabled Website Integration'
+        try:
+            log_action(
+                'Enterprise Hub',
+                action,
+                f"Company: {c_name}; key: {((website_result or {}).get('integration') or {}).get('key_id') or 'not configured'}",
+                record_type='company',
+                record_id=target_company_id,
+                company_id=target_company_id,
+            )
+        except Exception:
+            pass
+
     logo_file = dict(saved_company).get('logo_file') if saved_company else filename
+    integration = ((website_result or {}).get('integration') if website_result else None)
+    integration_summary = _website_integration_public_summary(integration)
+    secret = (website_result or {}).get('secret') if website_result else None
+    credentials = None
+    if secret and integration_summary:
+        credentials = {
+            'key_id': integration_summary.get('key_id'),
+            'secret': secret,
+            'render_variables': _integration_render_variables(integration_summary.get('key_id'), secret),
+            'one_time_display': True,
+        }
     return jsonify({
         "status": "success",
         "company_id": target_company_id,
         "logo_file": logo_file or '',
-        "logo_url": _safe_logo_url(logo_file) if logo_file else ''
+        "logo_url": _safe_logo_url(logo_file) if logo_file else '',
+        "website_integration": integration_summary,
+        "website_integration_credentials": credentials,
     })
+
+@app.route('/admin/companies/<int:company_id>/website-integration/rotate-secret', methods=['POST'])
+def rotate_company_website_integration(company_id):
+    if not session.get('is_superadmin'):
+        return "Forbidden", 403
+    module = _ensure_website_integrations_schema()
+    conn = get_db_connection()
+    try:
+        company = conn.execute('SELECT id, name FROM companies WHERE id=?', (company_id,)).fetchone()
+        if not company:
+            return jsonify({'status': 'error', 'message': 'Company was not found.'}), 404
+        result = module.rotate_company_website_integration_secret(conn, company_id, grace_minutes=15)
+        conn.commit()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    finally:
+        conn.close()
+
+    integration = result.get('integration') or {}
+    secret = result.get('secret') or ''
+    try:
+        log_action(
+            'Enterprise Hub',
+            'Rotated Website Integration Secret',
+            f"Company ID {company_id}; key: {integration.get('key_id')}",
+            record_type='company',
+            record_id=company_id,
+            company_id=company_id,
+        )
+    except Exception:
+        pass
+    return jsonify({
+        'status': 'success',
+        'website_integration': _website_integration_public_summary(integration),
+        'website_integration_credentials': {
+            'key_id': integration.get('key_id'),
+            'secret': secret,
+            'render_variables': _integration_render_variables(integration.get('key_id'), secret),
+            'one_time_display': True,
+            'previous_secret_grace_minutes': result.get('grace_minutes', 15),
+        },
+    })
+
 
 @app.route('/admin/industry_templates', methods=['GET'])
 def admin_industry_templates():
@@ -11822,7 +11998,7 @@ def finance_index():
     m_s, m_e = today.replace(day=1).strftime('%Y-%m-%d'), ((today.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)).strftime('%Y-%m-%d')
 
     conn = get_db_connection()
-    services = [dict(row) for row in conn.execute('SELECT * FROM services WHERE company_id=? ORDER BY name ASC', (cid,)).fetchall()]
+    services, website_integration = _services_with_website_details(conn, cid)
     expense_page, expense_per_page, expense_offset = get_page_args(request.args, prefix='expense_', default_per_page=25, max_per_page=100)
     expense_q = (request.args.get('expense_q') or '').strip()
     exp_where = 'company_id=?'
@@ -11836,7 +12012,20 @@ def finance_index():
     expense_pagination = pagination_meta(expense_total, expense_page, expense_per_page)
     vendors = [dict(row) for row in conn.execute("SELECT * FROM employees WHERE company_id=? AND emp_type IN ('Provider', 'Supplier') ORDER BY name ASC", (cid,)).fetchall()]
     conn.close()
-    return render_template('finance_index.html', today=calculate_financials(t_str, t_str), week=calculate_financials(t_str, w_str), month=calculate_financials(m_s, m_e), services=services, expenses=expenses, vendors=vendors, expense_pagination=expense_pagination, expense_q=expense_q, session=session)
+    return render_template(
+        'finance_index.html',
+        today=calculate_financials(t_str, t_str),
+        week=calculate_financials(t_str, w_str),
+        month=calculate_financials(m_s, m_e),
+        services=services,
+        expenses=expenses,
+        vendors=vendors,
+        expense_pagination=expense_pagination,
+        expense_q=expense_q,
+        website_integration_enabled=bool(website_integration and website_integration.get('enabled')),
+        website_integration=_website_integration_public_summary(website_integration),
+        session=session,
+    )
 
 @app.route('/update_vendor', methods=['POST'])
 def update_vendor():
@@ -11857,29 +12046,168 @@ def update_vendor():
 
 @app.route('/update_service', methods=['POST'])
 def update_service():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     source_app = 'Invoicing' if request.headers.get('X-App-Source') == 'Invoicing' else 'Finance'
+    cid = int(session['company_id'])
+    name = ' '.join(str(data.get('name') or '').strip().split())
+    if not name:
+        return jsonify({'status': 'error', 'message': 'Service name is required.'}), 400
+    if len(name) > 160:
+        return jsonify({'status': 'error', 'message': 'Service name may not exceed 160 characters.'}), 400
+    try:
+        client_price = round(float(data.get('price')), 2)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Client Price must be a valid number.'}), 400
+    try:
+        company_cost = round(float(data.get('cost')), 2)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Cost to Company must be a valid number.'}), 400
+    if not (-1_000_000_000_000 <= client_price <= 1_000_000_000_000):
+        return jsonify({'status': 'error', 'message': 'Client Price must be a finite amount between R0.00 and R1 trillion.'}), 400
+    if not (-1_000_000_000_000 <= company_cost <= 1_000_000_000_000):
+        return jsonify({'status': 'error', 'message': 'Cost to Company must be a finite amount between R0.00 and R1 trillion.'}), 400
+    if client_price < 0:
+        return jsonify({'status': 'error', 'message': 'Client Price cannot be negative.'}), 400
+    if company_cost < 0:
+        return jsonify({'status': 'error', 'message': 'Cost to Company cannot be negative.'}), 400
+
+    raw_publish = data.get('show_on_website', False)
+    show_on_website = raw_publish is True or str(raw_publish).strip().lower() in {'1', 'true', 'yes', 'on'}
+    website_display_name = ' '.join(str(data.get('website_display_name') or '').strip().split())
+    website_description = str(data.get('website_description') or '').strip()
+    website_category = ' '.join(str(data.get('website_category') or '').strip().split())
+    website_unit = ' '.join(str(data.get('website_unit') or 'each').strip().split()) or 'each'
+    try:
+        website_minimum_quantity = float(data.get('website_minimum_quantity') or 1)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Website Minimum Quantity must be a valid number.'}), 400
+    try:
+        website_sort_order = int(data.get('website_sort_order') or 0)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Website Display Order must be a whole number.'}), 400
+
+    if website_display_name and len(website_display_name) > 160:
+        return jsonify({'status': 'error', 'message': 'Website Display Name may not exceed 160 characters.'}), 400
+    if len(website_description) > 1000:
+        return jsonify({'status': 'error', 'message': 'Website Description may not exceed 1,000 characters.'}), 400
+    if website_category and len(website_category) > 80:
+        return jsonify({'status': 'error', 'message': 'Website Category may not exceed 80 characters.'}), 400
+    if len(website_unit) > 40:
+        return jsonify({'status': 'error', 'message': 'Website Unit may not exceed 40 characters.'}), 400
+    if not (0 < website_minimum_quantity <= 1_000_000_000):
+        return jsonify({'status': 'error', 'message': 'Website Minimum Quantity must be a finite number greater than zero and no more than 1 billion.'}), 400
+    if website_sort_order < 0 or website_sort_order > 999999:
+        return jsonify({'status': 'error', 'message': 'Website Display Order must be between 0 and 999999.'}), 400
+    if show_on_website and client_price <= 0:
+        return jsonify({'status': 'error', 'message': 'Client Price must be greater than R0.00 before a service can be published to the website.'}), 400
+
     conn = get_db_connection()
     action_msg = None
-    if data.get('id'):
-        conn.execute('UPDATE services SET name=?, client_price=?, company_cost=? WHERE id=? AND company_id=?', (data['name'], data['price'], data['cost'], data['id'], session['company_id']))
-        action_msg = (source_app, 'Updated Service Margin', f"Updated service pricing: {data['name']}")
-    else:
-        conn.execute('INSERT INTO services (company_id, name, client_price, company_cost) VALUES (?, ?, ?, ?)', (session['company_id'], data['name'], data['price'], data['cost']))
-        action_msg = (source_app, 'Created Service Margin', f"Added new service to pricing map: {data['name']}")
-    conn.commit()
+    publication_action = None
+    service_id = None
+    try:
+        integration = _company_website_integration(conn, cid, enabled_only=True)
+        if show_on_website and not integration:
+            raise ValueError('Website Integration must be enabled for this company before a service can be published.')
+
+        if data.get('id'):
+            try:
+                service_id = int(data.get('id'))
+            except (TypeError, ValueError):
+                raise ValueError('Invalid service ID.')
+            existing = conn.execute(
+                'SELECT id, name FROM services WHERE id=? AND company_id=?',
+                (service_id, cid),
+            ).fetchone()
+            if not existing:
+                raise ValueError('Service was not found for this company.')
+            conn.execute(
+                'UPDATE services SET name=?, client_price=?, company_cost=? WHERE id=? AND company_id=?',
+                (name, client_price, company_cost, service_id, cid),
+            )
+            action_msg = (source_app, 'Updated Service Margin', f'Updated service pricing: {name}')
+        else:
+            cursor = conn.execute(
+                'INSERT INTO services (company_id, name, client_price, company_cost) VALUES (?, ?, ?, ?)',
+                (cid, name, client_price, company_cost),
+            )
+            service_id = getattr(cursor, 'lastrowid', None)
+            if not service_id:
+                created = conn.execute(
+                    'SELECT id FROM services WHERE company_id=? AND name=? ORDER BY id DESC LIMIT 1',
+                    (cid, name),
+                ).fetchone()
+                service_id = int(created['id']) if created else None
+            if not service_id:
+                raise RuntimeError('The service was created but its ID could not be determined.')
+            action_msg = (source_app, 'Created Service Margin', f'Added new service to pricing map: {name}')
+
+        if integration:
+            _website_integrations_module().set_service_website_publication(
+                conn,
+                integration,
+                int(service_id),
+                name,
+                show_on_website,
+                display_name=website_display_name,
+                description=website_description,
+                category=website_category,
+                unit=website_unit,
+                minimum_quantity=website_minimum_quantity,
+                sort_order=website_sort_order,
+            )
+            publication_action = 'Published Website Product' if show_on_website else 'Unpublished Website Product'
+
+        services, active_or_disabled_integration = _services_with_website_details(conn, cid)
+        saved_service = next((service for service in services if int(service.get('id') or 0) == int(service_id)), None)
+        conn.commit()
+    except ValueError as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'The service margin could not be saved. No changes were applied.'}), 500
     conn.close()
 
-    if action_msg: log_action(action_msg[0], action_msg[1], action_msg[2])
-    return jsonify({"status": "success"})
+    if action_msg:
+        log_action(action_msg[0], action_msg[1], action_msg[2], record_type='service', record_id=service_id)
+    if publication_action:
+        log_action(
+            source_app,
+            publication_action,
+            f'{name} (service ID {service_id})',
+            record_type='service',
+            record_id=service_id,
+        )
+    return jsonify({
+        'status': 'success',
+        'message': 'Service margin saved successfully.',
+        'service': saved_service,
+        'website_integration_enabled': bool(active_or_disabled_integration and active_or_disabled_integration.get('enabled')),
+    })
 
 
 @app.route('/api/services', methods=['GET'])
 def api_services():
     conn = get_db_connection()
-    services = [dict(s) for s in conn.execute("SELECT id, name, client_price, company_cost FROM services WHERE company_id=? ORDER BY name ASC", (session['company_id'],)).fetchall()]
-    conn.close()
-    return jsonify({"status": "success", "services": services})
+    try:
+        services, integration = _services_with_website_details(conn, session['company_id'])
+        return jsonify({
+            'status': 'success',
+            'services': services,
+            'website_integration_enabled': bool(integration and integration.get('enabled')),
+            'website_integration': _website_integration_public_summary(integration),
+        })
+    finally:
+        conn.close()
 
 
 @app.route('/delete_service', methods=['POST'])
@@ -11896,6 +12224,14 @@ def delete_service():
         conn.close()
         return jsonify({"status": "error", "message": "Service not found or already deleted."}), 404
 
+    if compat_table_exists(conn, 'website_integration_products') and compat_table_exists(conn, 'website_integrations'):
+        conn.execute(
+            '''DELETE FROM website_integration_products
+               WHERE service_id=? AND integration_key_id IN (
+                   SELECT key_id FROM website_integrations WHERE company_id=?
+               )''',
+            (service_id, session['company_id']),
+        )
     conn.execute('DELETE FROM services WHERE id=? AND company_id=?', (service_id, session['company_id']))
     conn.commit()
     deleted_name = service['name']
@@ -14067,7 +14403,7 @@ def invoicing_index():
     cid = session['company_id']
     comp = conn.execute("SELECT * FROM companies WHERE id=?", (cid,)).fetchone()
     clients = prepare_client_options(conn.execute("SELECT * FROM clients WHERE company_id=? ORDER BY name ASC, surname ASC, id ASC", (cid,)).fetchall())
-    services = conn.execute("SELECT * FROM services WHERE company_id=? ORDER BY name ASC", (cid,)).fetchall()
+    services, website_integration = _services_with_website_details(conn, cid)
     projects = conn.execute('''SELECT p.*, c.name AS client_name, c.surname AS client_surname, c.company_name AS client_company_name, c.id AS linked_client_id
                                FROM projects p
                                LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
@@ -14141,7 +14477,27 @@ def invoicing_index():
         formatted_quotes.append(d)
     
     conn.close()
-    return render_template('invoicing_index.html', company=dict(comp), clients=clients, services=[dict(s) for s in services], projects=[dict(p) for p in projects], invoices=formatted_invoices, quotes=formatted_quotes, invoice_pagination=invoice_pagination, quote_pagination=quote_pagination, invoice_q=invoice_q, quote_q=quote_q, inv_info=inv_info, inv_prefix=inv_prefix, inv_start=inv_start, quote_prefix=quote_prefix, quote_start=quote_start, session=session)
+    return render_template(
+        'invoicing_index.html',
+        company=dict(comp),
+        clients=clients,
+        services=services,
+        projects=[dict(p) for p in projects],
+        invoices=formatted_invoices,
+        quotes=formatted_quotes,
+        invoice_pagination=invoice_pagination,
+        quote_pagination=quote_pagination,
+        invoice_q=invoice_q,
+        quote_q=quote_q,
+        inv_info=inv_info,
+        inv_prefix=inv_prefix,
+        inv_start=inv_start,
+        quote_prefix=quote_prefix,
+        quote_start=quote_start,
+        website_integration_enabled=bool(website_integration and website_integration.get('enabled')),
+        website_integration=_website_integration_public_summary(website_integration),
+        session=session,
+    )
 
 @app.route('/api/save_invoice_settings', methods=['POST'])
 def save_invoice_settings():

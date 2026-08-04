@@ -613,7 +613,7 @@
                     <button class="btn btn-primary mb-3 fw-bold" onclick="openCompanyForm(null)">+ Add New Company</button>
                     <table class="table table-hover bg-white border shadow-sm">
                         <thead class="table-light">
-                            <tr><th>ID</th><th>Company Name</th><th>Industry</th><th>App Licensing</th><th>Actions</th></tr>
+                            <tr><th>ID</th><th>Company Name</th><th>Industry</th><th>App Licensing</th><th>Website Integration</th><th>Actions</th></tr>
                         </thead>
                         <tbody id="companiesTableBody"></tbody>
                     </table>
@@ -705,10 +705,21 @@
                     </div>
                     
                     <h6 class="fw-bold text-dark border-bottom pb-2 mt-4">Integrations</h6>
-                    <div class="form-check form-switch mb-2">
+                    <div class="form-check form-switch mb-3">
                         <input class="form-check-input border-dark" type="checkbox" id="compGoogleSync">
                         <label class="form-check-label fw-bold text-dark" for="compGoogleSync">Enable Google Calendar Sync</label>
                         <p class="small text-muted mb-0">Automatically push scheduled shifts to the configured Google Calendar.</p>
+                    </div>
+                    <div class="border rounded p-3 bg-light">
+                        <div class="d-flex justify-content-between align-items-start gap-3">
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input border-primary" type="checkbox" id="compWebsiteIntegration">
+                                <label class="form-check-label fw-bold text-primary" for="compWebsiteIntegration">Enable Website Integration</label>
+                                <p class="small text-muted mb-0">Creates a tenant-bound catalogue and quotation credential. Products are published from Service Margins.</p>
+                            </div>
+                            <button type="button" class="btn btn-sm btn-outline-warning fw-bold d-none" id="rotateWebsiteIntegrationSecretBtn" onclick="rotateWebsiteIntegrationSecret()">Rotate Secret</button>
+                        </div>
+                        <div id="companyWebsiteIntegrationStatus" class="small mt-2 text-muted">Not configured.</div>
                     </div>
 
                 </div>
@@ -717,6 +728,29 @@
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                     <button type="button" class="btn btn-primary fw-bold" onclick="saveCompany(false)">Save Company</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="websiteIntegrationCredentialsModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-warning">
+                    <h5 class="modal-title">Website Integration Credentials</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-warning small"><strong>Copy these credentials now.</strong> The secret is shown only when it is created or rotated.</div>
+                    <label class="form-label small fw-bold">Integration Key ID</label>
+                    <div class="input-group mb-3"><input id="websiteCredentialKeyId" class="form-control font-monospace" readonly><button class="btn btn-outline-secondary" type="button" onclick="copyWebsiteCredential('websiteCredentialKeyId')">Copy</button></div>
+                    <label class="form-label small fw-bold">Integration Secret</label>
+                    <div class="input-group mb-3"><input id="websiteCredentialSecret" class="form-control font-monospace" readonly><button class="btn btn-outline-secondary" type="button" onclick="copyWebsiteCredential('websiteCredentialSecret')">Copy</button></div>
+                    <label class="form-label small fw-bold">Render Environment Variables</label>
+                    <textarea id="websiteCredentialRenderVariables" class="form-control font-monospace" rows="3" readonly></textarea>
+                    <button class="btn btn-outline-primary mt-2" type="button" onclick="copyWebsiteCredential('websiteCredentialRenderVariables')">Copy Render Variables</button>
+                    <div id="websiteCredentialGraceNote" class="form-text mt-2"></div>
+                </div>
+                <div class="modal-footer"><button type="button" class="btn btn-primary" data-bs-dismiss="modal">I Have Saved the Credentials</button></div>
             </div>
         </div>
     </div>
@@ -1357,6 +1391,15 @@
         // --- COMPANY LOGIC ---
         const companiesModal = new bootstrap.Modal(document.getElementById('companiesModal'));
         const companyFormModal = new bootstrap.Modal(document.getElementById('companyFormModal'));
+        const websiteIntegrationCredentialsModal = new bootstrap.Modal(document.getElementById('websiteIntegrationCredentialsModal'));
+        let currentCompanyWebsiteIntegration = null;
+        let reloadAfterWebsiteCredentials = false;
+        document.getElementById('websiteIntegrationCredentialsModal').addEventListener('hidden.bs.modal', function() {
+            if(reloadAfterWebsiteCredentials) {
+                reloadAfterWebsiteCredentials = false;
+                window.location.reload();
+            }
+        });
 
         function fetchCompanies() {
             fetch('/admin/companies').then(r => r.json()).then(data => {
@@ -1402,6 +1445,7 @@
                                 <td><strong>${c.name}</strong></td>
                                 <td><span class="badge bg-dark">${c.industry_template || 'Cleaning'}</span></td>
                                 <td><span class="text-success fw-bold small">${apps.join(', ') || 'None'}</span></td>
+                                <td>${c.website_integration_enabled ? '<span class="badge bg-success">Enabled</span>' : (c.website_integration_key_id ? '<span class="badge bg-secondary">Disabled</span>' : '<span class="badge bg-light text-dark border">Not configured</span>')}</td>
                                 <td>
                                     <button class="btn btn-sm btn-outline-primary me-1" onclick='openCompanyForm(${JSON.stringify(c).replace(/'/g, "&#39;")})'>Edit</button>
                                     <button class="btn btn-sm btn-outline-dark" onclick='openTenantSetupWizard(${c.id})'>Setup Wizard</button>
@@ -1468,6 +1512,22 @@
             document.getElementById('compAppFranchiseReports').checked = company ? !!company.can_franchise_reports : false;
             
             document.getElementById('compGoogleSync').checked = company ? company.google_calendar_sync : false;
+            currentCompanyWebsiteIntegration = company && company.website_integration_key_id ? {
+                key_id: company.website_integration_key_id,
+                enabled: !!company.website_integration_enabled,
+                last_used_at: company.website_integration_last_used_at,
+                secret_rotated_at: company.website_integration_secret_rotated_at
+            } : null;
+            document.getElementById('compWebsiteIntegration').checked = company ? !!company.website_integration_enabled : false;
+            const websiteStatus = document.getElementById('companyWebsiteIntegrationStatus');
+            const rotateBtn = document.getElementById('rotateWebsiteIntegrationSecretBtn');
+            if(currentCompanyWebsiteIntegration) {
+                websiteStatus.innerHTML = `<strong>Key ID:</strong> <span class="font-monospace">${currentCompanyWebsiteIntegration.key_id}</span><br><span class="text-muted">Status: ${currentCompanyWebsiteIntegration.enabled ? 'Enabled' : 'Disabled'}${currentCompanyWebsiteIntegration.last_used_at ? ' | Last used: ' + currentCompanyWebsiteIntegration.last_used_at : ''}</span>`;
+                rotateBtn.classList.remove('d-none');
+            } else {
+                websiteStatus.textContent = 'Not configured. Credentials will be generated when the company is saved with this option enabled.';
+                rotateBtn.classList.add('d-none');
+            }
 
             companyFormModal.show();
         }
@@ -1502,6 +1562,7 @@
             fd.append('can_franchise_reports', document.getElementById('compAppFranchiseReports').checked);
             
             fd.append('google_calendar_sync', document.getElementById('compGoogleSync').checked);
+            fd.append('website_integration_enabled', document.getElementById('compWebsiteIntegration').checked);
 
             const logoInput = document.getElementById('companyLogo');
             if(logoInput && logoInput.files && logoInput.files.length > 0) {
@@ -1525,10 +1586,50 @@
                     }
                     companyFormModal.hide();
                     fetchCompanies();
+                    if(res.website_integration_credentials) {
+                        reloadAfterWebsiteCredentials = String(savedCompanyId) === String(currentCompanyId);
+                        showWebsiteIntegrationCredentials(res.website_integration_credentials);
+                    }
                     if(openSetupAfterSave && savedCompanyId) openTenantSetupWizard(savedCompanyId);
-                    else if(String(savedCompanyId) === String(currentCompanyId)) window.location.reload();
+                    else if(String(savedCompanyId) === String(currentCompanyId) && !res.website_integration_credentials) window.location.reload();
                 }
             });
+        }
+
+        function showWebsiteIntegrationCredentials(credentials) {
+            document.getElementById('websiteCredentialKeyId').value = credentials.key_id || '';
+            document.getElementById('websiteCredentialSecret').value = credentials.secret || '';
+            document.getElementById('websiteCredentialRenderVariables').value = credentials.render_variables || '';
+            const grace = credentials.previous_secret_grace_minutes;
+            document.getElementById('websiteCredentialGraceNote').textContent = grace !== undefined ? `The previous secret remains valid for ${grace} minutes to allow a safe website update.` : '';
+            websiteIntegrationCredentialsModal.show();
+        }
+
+        async function copyWebsiteCredential(elementId) {
+            const element = document.getElementById(elementId);
+            const value = element ? element.value : '';
+            if(!value) return;
+            try {
+                await navigator.clipboard.writeText(value);
+            } catch (_) {
+                element.focus();
+                element.select();
+                document.execCommand('copy');
+            }
+        }
+
+        function rotateWebsiteIntegrationSecret() {
+            const companyId = document.getElementById('companyId').value;
+            if(!companyId) return alert('Save the company before rotating credentials.');
+            if(!confirm('Rotate this website integration secret? The current secret will remain valid for 15 minutes.')) return;
+            fetch(`/admin/companies/${companyId}/website-integration/rotate-secret`, {method: 'POST'})
+                .then(async r => {
+                    const data = await r.json().catch(() => ({}));
+                    if(!r.ok || data.status === 'error') throw new Error(data.message || 'Could not rotate the website integration secret.');
+                    return data;
+                })
+                .then(data => showWebsiteIntegrationCredentials(data.website_integration_credentials))
+                .catch(err => alert(err.message));
         }
 
         let tenantSetupTemplates = {};

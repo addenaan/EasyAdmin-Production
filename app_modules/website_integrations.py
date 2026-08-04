@@ -293,13 +293,275 @@ def ensure_integration_schema(easyadmin: Any) -> None:
             "ALTER TABLE quotes ADD COLUMN website_customer_phone TEXT",
             "ALTER TABLE quotes ADD COLUMN website_delivery_address TEXT",
             "ALTER TABLE quotes ADD COLUMN website_delivery_area TEXT",
+            "ALTER TABLE website_integrations ADD COLUMN is_default INTEGER DEFAULT 0",
             "CREATE INDEX IF NOT EXISTS idx_website_integrations_company ON website_integrations(company_id)",
+            "CREATE INDEX IF NOT EXISTS idx_website_integrations_company_default ON website_integrations(company_id, is_default, enabled)",
             "CREATE INDEX IF NOT EXISTS idx_website_products_key_enabled ON website_integration_products(integration_key_id, enabled)",
             "CREATE INDEX IF NOT EXISTS idx_website_nonces_used_at ON website_api_nonces(used_at)",
             "CREATE INDEX IF NOT EXISTS idx_website_quote_requests_quote ON website_quote_requests(quote_id)",
         ]
         for statement in statements:
             _execute_schema_statement(easyadmin, statement)
+
+        # Backfill one default integration per tenant without replacing any
+        # existing credential. This keeps CLI-created integrations compatible
+        # with the company-screen workflow introduced later.
+        conn = easyadmin.get_db_connection()
+        try:
+            company_rows = conn.execute(
+                "SELECT DISTINCT company_id FROM website_integrations WHERE company_id IS NOT NULL"
+            ).fetchall()
+            for company_row in company_rows:
+                company_id = int(_row_dict(company_row).get("company_id") or 0)
+                if not company_id:
+                    continue
+                existing_default = conn.execute(
+                    "SELECT key_id FROM website_integrations WHERE company_id=? AND COALESCE(is_default,0)=1 LIMIT 1",
+                    (company_id,),
+                ).fetchone()
+                if existing_default:
+                    continue
+                selected = conn.execute(
+                    """SELECT key_id FROM website_integrations
+                       WHERE company_id=?
+                       ORDER BY COALESCE(enabled,0) DESC, key_id ASC
+                       LIMIT 1""",
+                    (company_id,),
+                ).fetchone()
+                if selected:
+                    conn.execute(
+                        "UPDATE website_integrations SET is_default=1 WHERE key_id=?",
+                        (_row_dict(selected).get("key_id"),),
+                    )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
+
+def _slug_key_component(value: Any, max_length: int = 40) -> str:
+    text = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return (text or "tenant")[:max_length].rstrip("-") or "tenant"
+
+
+def get_default_website_integration(
+    conn: Any, company_id: int, *, enabled_only: bool = False
+) -> dict[str, Any] | None:
+    """Return the tenant's default website integration, if configured."""
+    where = "company_id=?"
+    params: list[Any] = [int(company_id)]
+    if enabled_only:
+        where += " AND COALESCE(enabled,0)=1"
+    row = conn.execute(
+        f"""SELECT * FROM website_integrations
+            WHERE {where}
+            ORDER BY COALESCE(is_default,0) DESC, COALESCE(enabled,0) DESC, key_id ASC
+            LIMIT 1""",
+        tuple(params),
+    ).fetchone()
+    return _row_dict(row) or None
+
+
+def configure_company_website_integration(
+    conn: Any,
+    company_id: int,
+    company_name: str,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Create, enable or disable the tenant's default website integration.
+
+    The returned plaintext secret is present only when a new credential is
+    generated. Callers must display it once and never persist it unencrypted.
+    """
+    company_id = int(company_id)
+    existing = get_default_website_integration(conn, company_id, enabled_only=False)
+    now = _iso()
+    if existing:
+        conn.execute(
+            "UPDATE website_integrations SET is_default=0 WHERE company_id=? AND key_id<>?",
+            (company_id, existing["key_id"]),
+        )
+        conn.execute(
+            "UPDATE website_integrations SET enabled=?, is_default=1, updated_at=? WHERE key_id=? AND company_id=?",
+            (1 if enabled else 0, now, existing["key_id"], company_id),
+        )
+        existing.update({"enabled": 1 if enabled else 0, "is_default": 1, "updated_at": now})
+        return {"integration": existing, "secret": None, "created": False}
+
+    if not enabled:
+        return {"integration": None, "secret": None, "created": False}
+
+    master_key = os.getenv("EASYADMIN_INTEGRATION_MASTER_KEY", "").strip()
+    if not master_key:
+        raise IntegrationConfigurationError(
+            "EASYADMIN_INTEGRATION_MASTER_KEY is required before website integration can be enabled."
+        )
+    cipher = SecretCipher(master_key)
+    secret = secrets.token_urlsafe(48)
+    key_id = f"web-{company_id}-{_slug_key_component(company_name, 32)}-{secrets.token_hex(4)}"[:100]
+    if not KEY_ID_RE.fullmatch(key_id):
+        key_id = f"web-{company_id}-{secrets.token_hex(8)}"
+    integration_name = f"{_clean(company_name, 100)} Website"
+    source_label = f"{_clean(company_name, 90)} Website"
+    conn.execute(
+        "UPDATE website_integrations SET is_default=0 WHERE company_id=?",
+        (company_id,),
+    )
+    conn.execute(
+        """INSERT INTO website_integrations
+           (key_id, company_id, integration_name, secret_ciphertext, enabled, scopes,
+            price_mode, vat_rate, quote_valid_days, quote_status, source_label,
+            created_at, updated_at, secret_rotated_at, is_default)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            key_id,
+            company_id,
+            integration_name,
+            cipher.encrypt(secret),
+            1,
+            json.dumps(sorted(DEFAULT_SCOPES)),
+            "exclusive_vat",
+            0.15,
+            14,
+            "Pending",
+            source_label,
+            now,
+            now,
+            now,
+            1,
+        ),
+    )
+    integration = get_default_website_integration(conn, company_id, enabled_only=False)
+    return {"integration": integration, "secret": secret, "created": True}
+
+
+def rotate_company_website_integration_secret(
+    conn: Any, company_id: int, *, grace_minutes: int = 15
+) -> dict[str, Any]:
+    integration = get_default_website_integration(conn, int(company_id), enabled_only=False)
+    if not integration:
+        raise ValueError("Website integration has not been enabled for this company.")
+    master_key = os.getenv("EASYADMIN_INTEGRATION_MASTER_KEY", "").strip()
+    if not master_key:
+        raise IntegrationConfigurationError(
+            "EASYADMIN_INTEGRATION_MASTER_KEY is required before credentials can be rotated."
+        )
+    cipher = SecretCipher(master_key)
+    secret = secrets.token_urlsafe(48)
+    now = _utcnow()
+    previous_expires = now + timedelta(minutes=max(0, int(grace_minutes or 0)))
+    conn.execute(
+        """UPDATE website_integrations
+           SET previous_secret_ciphertext=?, previous_secret_expires_at=?,
+               secret_ciphertext=?, secret_rotated_at=?, updated_at=?
+           WHERE key_id=? AND company_id=?""",
+        (
+            integration.get("secret_ciphertext"),
+            _iso(previous_expires),
+            cipher.encrypt(secret),
+            _iso(now),
+            _iso(now),
+            integration["key_id"],
+            int(company_id),
+        ),
+    )
+    integration.update({"secret_rotated_at": _iso(now), "updated_at": _iso(now)})
+    return {"integration": integration, "secret": secret, "grace_minutes": max(0, int(grace_minutes or 0))}
+
+
+def set_service_website_publication(
+    conn: Any,
+    integration: dict[str, Any],
+    service_id: int,
+    service_name: str,
+    enabled: bool,
+    *,
+    display_name: str = "",
+    description: str = "",
+    category: str = "",
+    unit: str = "each",
+    minimum_quantity: float = 1,
+    sort_order: int = 0,
+) -> dict[str, Any] | None:
+    """Create or update one public product mapping for the default integration."""
+    key_id = str(integration.get("key_id") or "")
+    if not key_id:
+        raise ValueError("Website integration key is missing.")
+    company_id = int(integration.get("company_id") or 0)
+    tenant_service = conn.execute(
+        "SELECT id FROM services WHERE id=? AND company_id=?",
+        (int(service_id), company_id),
+    ).fetchone()
+    if not tenant_service:
+        raise ValueError("The service does not belong to the website integration tenant.")
+    existing = conn.execute(
+        "SELECT * FROM website_integration_products WHERE integration_key_id=? AND service_id=?",
+        (key_id, int(service_id)),
+    ).fetchone()
+    existing_data = _row_dict(existing)
+    if not enabled and not existing_data:
+        return None
+    now = _iso()
+    public_id = existing_data.get("public_id") or f"prd_{uuid.uuid4().hex}"
+    resolved_display = _clean(display_name or service_name, 160)
+    resolved_description = _clean(description, 1000)
+    resolved_category = _clean(category or _infer_category(service_name), 80)
+    resolved_unit = _clean(unit or "each", 40) or "each"
+    resolved_minimum = max(_quantity(minimum_quantity) or 1, 0.0001)
+    try:
+        resolved_sort = max(0, min(999999, int(sort_order or 0)))
+    except (TypeError, ValueError):
+        resolved_sort = 0
+    if existing_data:
+        conn.execute(
+            """UPDATE website_integration_products
+               SET enabled=?, display_name=?, website_description=?, website_category=?,
+                   website_unit=?, minimum_quantity=?, sort_order=?, updated_at=?
+               WHERE integration_key_id=? AND service_id=?""",
+            (
+                1 if enabled else 0,
+                resolved_display,
+                resolved_description,
+                resolved_category,
+                resolved_unit,
+                resolved_minimum,
+                resolved_sort,
+                now,
+                key_id,
+                int(service_id),
+            ),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO website_integration_products
+               (integration_key_id, service_id, public_id, enabled, display_name,
+                website_description, website_category, website_unit, minimum_quantity,
+                sort_order, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                key_id,
+                int(service_id),
+                public_id,
+                1 if enabled else 0,
+                resolved_display,
+                resolved_description,
+                resolved_category,
+                resolved_unit,
+                resolved_minimum,
+                resolved_sort,
+                now,
+                now,
+            ),
+        )
+    row = conn.execute(
+        "SELECT * FROM website_integration_products WHERE integration_key_id=? AND service_id=?",
+        (key_id, int(service_id)),
+    ).fetchone()
+    return _row_dict(row) or None
 
 
 def _audit(
