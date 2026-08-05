@@ -1553,12 +1553,19 @@ def test_google_calendar_sync(company_id=None):
     }
 
 
+def _google_calendar_booking_summary(client_name, employees):
+    """Build the concise Google Calendar subject used for booking events."""
+    client_label = str(client_name or '').strip() or 'Booking'
+    employee_label = str(employees or '').strip() or 'Unassigned'
+    return f"{client_label} - {employee_label}"
+
+
 def create_google_event(client_name, date_str, time_str, employees, booking_type, transport, company_name, company_id=None):
     service = get_google_service(company_id)
     start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     end_dt = start_dt + timedelta(hours=2)
     event = {
-        'summary': f"[{company_name}] {client_name} ({employees})",
+        'summary': _google_calendar_booking_summary(client_name, employees),
         'description': f"{company_name} Assignment\nService(s): {booking_type}\nStaff: {employees}\nTransport: {transport}",
         'start': {'dateTime': start_dt.isoformat() + "+02:00", 'timeZone': GOOGLE_CALENDAR_TIMEZONE},
         'end': {'dateTime': end_dt.isoformat() + "+02:00", 'timeZone': GOOGLE_CALENDAR_TIMEZONE}
@@ -1573,7 +1580,7 @@ def update_google_event(event_id, client_name, date_str, time_str, employees, bo
     end_dt = start_dt + timedelta(hours=2)
     target_cal = get_target_calendar(company_id)
     event = service.events().get(calendarId=target_cal, eventId=event_id).execute()
-    event['summary'] = f"[{company_name}] {client_name} ({employees})"
+    event['summary'] = _google_calendar_booking_summary(client_name, employees)
     event['description'] = f"{company_name} Assignment\nService(s): {booking_type}\nStaff: {employees}\nTransport: {transport}"
     event['start']['dateTime'] = start_dt.isoformat() + "+02:00"
     event['end']['dateTime'] = end_dt.isoformat() + "+02:00"
@@ -10354,6 +10361,25 @@ def bookings():
                                  WHERE {leave_where}
                                  ORDER BY lr.date_taken ASC
                                  LIMIT 1000''', leave_params).fetchall()
+
+    holiday_where = '1=1'
+    holiday_params = []
+    if start_range:
+        holiday_where += ' AND date_str >= ?'
+        holiday_params.append(start_range)
+    else:
+        holiday_where += ' AND date_str >= ?'
+        holiday_params.append(default_start)
+    if end_range:
+        holiday_where += ' AND date_str < ?'
+        holiday_params.append(end_range)
+    else:
+        holiday_where += ' AND date_str <= ?'
+        holiday_params.append(default_end)
+    holiday_rows = conn.execute(f'''SELECT id, date_str, name
+                                   FROM public_holidays
+                                   WHERE {holiday_where}
+                                   ORDER BY date_str ASC, id ASC''', holiday_params).fetchall()
     
     events = []
     for r in bookings:
@@ -10425,6 +10451,29 @@ def bookings():
                     "leave_type": lr['leave_type'] or 'Leave'
                 }
             })
+
+    for holiday in holiday_rows:
+        holiday_date = str(holiday['date_str'] or '').strip()
+        holiday_name = str(holiday['name'] or '').strip()
+        try:
+            datetime.strptime(holiday_date, '%Y-%m-%d')
+        except Exception:
+            continue
+        if not holiday_name:
+            holiday_name = 'Public Holiday'
+        events.append({
+            "id": f"holiday-{holiday['id']}",
+            "title": holiday_name,
+            "start": holiday_date,
+            "allDay": True,
+            "color": "#b02a37",
+            "textColor": "#ffffff",
+            "editable": False,
+            "extendedProps": {
+                "event_type": "public_holiday",
+                "holiday_name": holiday_name
+            }
+        })
     conn.close()
     response = jsonify(events)
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'

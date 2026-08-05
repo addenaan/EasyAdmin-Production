@@ -1346,7 +1346,7 @@
                 headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek' },
                 height: 700,
                 eventClick: function(info) {
-                    if (info.event.extendedProps.event_type === 'leave') return;
+                    if (info.event.extendedProps.event_type !== 'booking') return;
                     const d = info.event.start;
                     const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
                     const timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
