@@ -1003,7 +1003,38 @@
     <script>
         const isSuperAdmin = {{ 'true' if session.get('is_superadmin') else 'false' }};
         const isCompanyAdmin = {{ 'true' if session.get('is_company_admin') else 'false' }};
+        const isAdminUser = isSuperAdmin || isCompanyAdmin;
         const currentCompanyId = "{{ session.get('company_id') }}";
+
+        const superAdminOnlyAdminPaths = [
+            /^\/admin\/companies(?:\/|$)/,
+            /^\/admin\/switch_company$/,
+            /^\/admin\/tax_config(?:\/|$)/,
+            /^\/admin\/holidays(?:\/|$)/,
+            /^\/admin\/industry_templates\/upload$/,
+            /^\/admin\/tenant_setup(?:\/|$)/,
+            /^\/admin\/franchise_groups(?:\/|$)/,
+            /^\/admin\/(?:export|import)_full_database$/
+        ];
+
+        function adminFetch(url, options = {}) {
+            let path = '';
+            try {
+                path = new URL(url, window.location.origin).pathname;
+            } catch (error) {
+                return Promise.reject(new Error('The requested administration URL is invalid.'));
+            }
+            const requiresSuperAdmin = superAdminOnlyAdminPaths.some(pattern => pattern.test(path));
+            const allowed = requiresSuperAdmin ? isSuperAdmin : isAdminUser;
+            if (!allowed) {
+                const error = new Error(requiresSuperAdmin
+                    ? 'Super Admin access is required for this action.'
+                    : 'Company Admin access is required for this action.');
+                error.name = 'EasyAdminPermissionError';
+                return Promise.reject(error);
+            }
+            return fetch(url, options);
+        }
         
         const companyHasBooking = {{ 'true' if session.get('comp_can_booking') else 'false' }};
         const companyHasFinance = {{ 'true' if session.get('comp_can_finance') else 'false' }};
@@ -1016,7 +1047,7 @@
         let templateUploadModal = null;
 
         document.addEventListener('DOMContentLoaded', function() {
-            loadIndustryTemplateOptions();
+            if(isAdminUser) loadIndustryTemplateOptions();
             if(isSuperAdmin) fetchCompanies();
             
             if(isCompanyAdmin && !isSuperAdmin) {
@@ -1043,8 +1074,12 @@
 
         // --- INDUSTRY TEMPLATE OPTIONS / UPLOAD ---
         function loadIndustryTemplateOptions(selectedValue=null) {
-            return fetch('/admin/industry_templates')
-                .then(r => r.json())
+            if(!isAdminUser) return Promise.resolve({skipped: true});
+            return adminFetch('/admin/industry_templates')
+                .then(r => {
+                    if(!r.ok) throw new Error('Could not load industry templates.');
+                    return r.json();
+                })
                 .then(templates => {
                     tenantSetupTemplates = templates || tenantSetupTemplates || {};
                     const names = Object.keys(templates || {});
@@ -1079,7 +1114,7 @@
             const fd = new FormData();
             fd.append('template_file', fileInput.files[0]);
             fd.append('template_name', document.getElementById('uploadTemplateName').value.trim());
-            fetch('/admin/industry_templates/upload', { method: 'POST', body: fd })
+            adminFetch('/admin/industry_templates/upload', { method: 'POST', body: fd })
                 .then(r => r.json().then(data => ({ok: r.ok, data})))
                 .then(({ok, data}) => {
                     if(!ok || data.status === 'error') return alert(data.message || 'Could not upload template.');
@@ -1102,7 +1137,7 @@
 
         function loadCustomFieldSettingsData(companyId=null) {
             const url = companyId ? `/admin/custom_field_settings/data?company_id=${companyId}` : '/admin/custom_field_settings/data';
-            return fetch(url).then(r => { if(!r.ok) throw new Error('Could not load custom field settings.'); return r.json(); }).then(data => {
+            return adminFetch(url).then(r => { if(!r.ok) throw new Error('Could not load custom field settings.'); return r.json(); }).then(data => {
                 if(data.status === 'error') throw new Error(data.message || 'Could not load custom field settings.');
                 const companyWrap = document.getElementById('customFieldCompanyWrap');
                 const companySelect = document.getElementById('customFieldCompanySelect');
@@ -1156,7 +1191,7 @@
                 document.getElementById('customFieldOptionsHelp').innerText = 'Only dropdown booking custom fields have editable option values.';
                 return;
             }
-            fetch(`/admin/custom_field_options/${fieldId}`).then(r => { if(!r.ok) throw new Error('Could not load dropdown options.'); return r.json(); }).then(data => {
+            adminFetch(`/admin/custom_field_options/${fieldId}`).then(r => { if(!r.ok) throw new Error('Could not load dropdown options.'); return r.json(); }).then(data => {
                 currentCustomFieldOptions = data.options || [];
                 document.getElementById('customFieldOptionsHelp').innerText = `Options for: ${data.field.field_label}`;
                 renderCustomFieldOptionRows();
@@ -1211,7 +1246,7 @@
             if(!fieldId) return alert('Select a booking custom field first.');
             if(selectedOpt && selectedOpt.dataset.fieldType !== 'dropdown') return alert('Only dropdown custom fields can have options.');
             const options = collectCustomFieldOptionRows();
-            fetch('/admin/custom_field_options/save', {
+            adminFetch('/admin/custom_field_options/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ field_id: fieldId, options })
@@ -1236,7 +1271,7 @@
         
         function loadTaxConfig() {
             const year = document.getElementById('taxYearSelectInput').value;
-            fetch('/admin/tax_config/' + year).then(r => r.json()).then(data => {
+            adminFetch('/admin/tax_config/' + year).then(r => r.json()).then(data => {
                 document.getElementById('primaryRebateInput').value = data.primary_rebate;
                 document.getElementById('secondaryRebateInput').value = data.secondary_rebate;
                 document.getElementById('tertiaryRebateInput').value = data.tertiary_rebate;
@@ -1296,7 +1331,7 @@
                 threshold_65_to_74: document.getElementById('threshold65Input').value,
                 threshold_75_plus: document.getElementById('threshold75Input').value
             };
-            fetch('/admin/tax_config/rebate/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fd) }).then(() => { alert("Rebate Saved"); loadTaxConfig(); });
+            adminFetch('/admin/tax_config/rebate/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fd) }).then(() => { alert("Rebate Saved"); loadTaxConfig(); });
         }
         
         function saveTaxBracket() {
@@ -1309,7 +1344,7 @@
                 rate: document.getElementById('newTaxRate').value
             };
             if(!fd.min_income || !fd.max_income || !fd.rate) return alert("Please fill all required bracket fields.");
-            fetch('/admin/tax_config/bracket/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fd) }).then(() => {
+            adminFetch('/admin/tax_config/bracket/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fd) }).then(() => {
                 cancelEditTaxBracket();
                 loadTaxConfig(); 
             });
@@ -1317,7 +1352,7 @@
         
         function deleteTaxBracket(id) {
             if(confirm("Delete bracket?")) {
-                fetch('/admin/tax_config/bracket/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({id: id}) }).then(() => loadTaxConfig());
+                adminFetch('/admin/tax_config/bracket/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({id: id}) }).then(() => loadTaxConfig());
             }
         }
 
@@ -1325,7 +1360,7 @@
             const currentYear = parseInt(document.getElementById('taxYearSelectInput').value);
             const prevYear = currentYear - 1;
             if(confirm(`Are you sure you want to copy the tax brackets, rebates and thresholds from ${prevYear} to ${currentYear}? This will overwrite any existing data for ${currentYear}.`)) {
-                fetch('/admin/tax_config/copy', {
+                adminFetch('/admin/tax_config/copy', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({from_year: prevYear, to_year: currentYear})
@@ -1344,7 +1379,7 @@
         
         function loadHolidays() {
             const year = document.getElementById('holidayYearSelect').value;
-            fetch('/admin/holidays/' + year).then(r => r.json()).then(data => {
+            adminFetch('/admin/holidays/' + year).then(r => r.json()).then(data => {
                 const tbody = document.getElementById('holidaysBody');
                 tbody.innerHTML = '';
                 if(data.length === 0) {
@@ -1372,7 +1407,7 @@
                 date_str: dateStr,
                 name: document.getElementById('newHolName').value || 'Public Holiday'
             };
-            fetch('/admin/holidays/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fd) }).then(() => {
+            adminFetch('/admin/holidays/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fd) }).then(() => {
                 document.getElementById('holidayYearSelect').value = year;
                 document.getElementById('newHolDate').value = ''; document.getElementById('newHolName').value = '';
                 loadHolidays();
@@ -1380,12 +1415,12 @@
         }
         
         function deleteHoliday(id) {
-            if(confirm("Remove this holiday?")) fetch('/admin/holidays/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({id: id}) }).then(() => loadHolidays());
+            if(confirm("Remove this holiday?")) adminFetch('/admin/holidays/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({id: id}) }).then(() => loadHolidays());
         }
         
         function generateStandardHolidays() {
             const year = document.getElementById('holidayYearSelect').value;
-            fetch('/admin/holidays/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({year: year}) }).then(() => loadHolidays());
+            adminFetch('/admin/holidays/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({year: year}) }).then(() => loadHolidays());
         }
 
         // --- COMPANY LOGIC ---
@@ -1402,7 +1437,7 @@
         });
 
         function fetchCompanies() {
-            fetch('/admin/companies').then(r => r.json()).then(data => {
+            adminFetch('/admin/companies').then(r => r.json()).then(data => {
                 companiesList = data;
                 const switcher = document.getElementById('switchCompanySelect');
                 if(switcher) {
@@ -1459,7 +1494,7 @@
 
         function switchCompany() {
             const cid = document.getElementById('switchCompanySelect').value;
-            fetch('/admin/switch_company', {
+            adminFetch('/admin/switch_company', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ company_id: cid })
             }).then(() => window.location.reload());
@@ -1571,7 +1606,7 @@
 
             if(!document.getElementById('companyName').value) return alert("Company name is required.");
 
-            fetch('/admin/companies/save', { method: 'POST', body: fd })
+            adminFetch('/admin/companies/save', { method: 'POST', body: fd })
             .then(r => r.json()).then(res => {
                 if(res.status === 'error') alert(res.message);
                 else {
@@ -1622,7 +1657,7 @@
             const companyId = document.getElementById('companyId').value;
             if(!companyId) return alert('Save the company before rotating credentials.');
             if(!confirm('Rotate this website integration secret? The current secret will remain valid for 15 minutes.')) return;
-            fetch(`/admin/companies/${companyId}/website-integration/rotate-secret`, {method: 'POST'})
+            adminFetch(`/admin/companies/${companyId}/website-integration/rotate-secret`, {method: 'POST'})
                 .then(async r => {
                     const data = await r.json().catch(() => ({}));
                     if(!r.ok || data.status === 'error') throw new Error(data.message || 'Could not rotate the website integration secret.');
@@ -1825,8 +1860,8 @@
             if(!tenantSetupModal) return;
             document.getElementById('setupCompanyId').value = companyId;
             Promise.all([
-                fetch('/admin/industry_templates').then(r => r.json()),
-                fetch(`/admin/tenant_setup/${companyId}`).then(r => r.json())
+                adminFetch('/admin/industry_templates').then(r => r.json()),
+                adminFetch(`/admin/tenant_setup/${companyId}`).then(r => r.json())
             ]).then(([templates, setup]) => {
                 tenantSetupTemplates = templates;
                 const industry = (setup.company && setup.company.industry_template) || 'Cleaning';
@@ -1865,7 +1900,7 @@
 
         function saveTenantSetup() {
             const payload = collectTenantSetupPayload();
-            fetch('/admin/tenant_setup/save', {
+            adminFetch('/admin/tenant_setup/save', {
                 method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
             }).then(r => r.json()).then(res => {
                 if(res.status === 'error') return alert(res.message || 'Could not save setup.');
@@ -1892,7 +1927,7 @@
         }
 
         function loadFranchiseGroups() {
-            return fetch('/admin/franchise_groups')
+            return adminFetch('/admin/franchise_groups')
                 .then(r => r.json())
                 .then(data => {
                     if(data.status === 'error') throw new Error(data.message || 'Could not load franchise groups.');
@@ -1994,7 +2029,7 @@
             if(!payload.name) return alert('Please enter a franchise group name.');
             if(!payload.company_ids.length) return alert('Please link at least one franchisee tenant.');
             if(!payload.user_ids.length) return alert('Please assign at least one franchisor reporting user.');
-            fetch('/admin/franchise_groups/save', {
+            adminFetch('/admin/franchise_groups/save', {
                 method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
             }).then(r => r.json()).then(res => {
                 if(res.status === 'error') return alert(res.message || 'Could not save franchise group.');
@@ -2005,7 +2040,7 @@
 
         function deactivateFranchiseGroup(id) {
             if(!confirm('Deactivate this franchise group? Reporting users linked to it will no longer have franchise report access after their next login.')) return;
-            fetch('/admin/franchise_groups/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id}) })
+            adminFetch('/admin/franchise_groups/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id}) })
                 .then(r => r.json()).then(res => {
                     if(res.status === 'error') return alert(res.message || 'Could not deactivate group.');
                     loadFranchiseGroups();
@@ -2023,7 +2058,7 @@
             });
         }
         function openAuditModal() {
-            fetch('/admin/audit_logs').then(r => r.json()).then(data => {
+            adminFetch('/admin/audit_logs').then(r => r.json()).then(data => {
                 const tbody = document.getElementById('auditTableBody');
                 if(!tbody) return;
                 tbody.innerHTML = '';
@@ -2084,7 +2119,7 @@
         });
 
         function openUsersModal() {
-            fetch('/admin/users').then(r => r.json()).then(data => {
+            adminFetch('/admin/users').then(r => r.json()).then(data => {
                 const tbody = document.getElementById('usersTableBody');
                 if(!tbody) return;
                 tbody.innerHTML = '';
@@ -2189,7 +2224,7 @@
             if(!data.email) return alert("Email address required for Forgot Password functionality.");
             if(!data.id && !data.password) return alert("Password required for new users.");
 
-            fetch('/admin/users/save', {
+            adminFetch('/admin/users/save', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
             }).then(r => r.json()).then(res => {
@@ -2200,7 +2235,7 @@
 
         function deleteUser(id) {
             if(confirm("Are you sure you want to delete this user?")) {
-                fetch('/admin/users/delete', {
+                adminFetch('/admin/users/delete', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({id: id})
                 }).then(() => openUsersModal());
@@ -2250,7 +2285,7 @@
             }
             const result = document.getElementById('companyImportResult');
             result.innerHTML = '<div class="text-muted">Processing import...</div>';
-            fetch('/admin/import_company_data', { method: 'POST', body: fd })
+            adminFetch('/admin/import_company_data', { method: 'POST', body: fd })
                 .then(r => r.json().catch(() => ({status:'error', message:'Server returned a non-JSON response.'})))
                 .then(res => {
                     const errors = (res.errors || []).map(e => `<li>${escapeHtml(e)}</li>`).join('');
@@ -2287,7 +2322,7 @@
             fd.append('file', fileInput.files[0]);
             const result = document.getElementById('fullDatabaseRestoreResult');
             result.innerHTML = '<div class="text-muted">Restoring database...</div>';
-            fetch('/admin/import_full_database', { method: 'POST', body: fd })
+            adminFetch('/admin/import_full_database', { method: 'POST', body: fd })
                 .then(r => r.json().catch(() => ({status:'error', message:'Server returned a non-JSON response.'})))
                 .then(res => {
                     const cls = res.status === 'success' ? 'alert-success' : 'alert-danger';
