@@ -760,6 +760,123 @@ def valid_email_address(value):
     return bool(re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', text))
 
 
+EMPLOYEE_NUMBER_PREFIX = 'EMP'
+EMPLOYEE_NUMBER_PATTERN = re.compile(r'^EMP(\d+)$', re.IGNORECASE)
+
+
+class EmployeeNumberAllocationError(RuntimeError):
+    """Raised when Easy Admin cannot reserve a unique tenant employee number."""
+
+
+def _employee_number_sequence_value(value):
+    match = EMPLOYEE_NUMBER_PATTERN.fullmatch(str(value or '').strip())
+    if not match:
+        return None
+    try:
+        number = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _highest_existing_employee_number(conn, company_id):
+    highest = 0
+    rows = conn.execute(
+        "SELECT emp_number FROM employees WHERE company_id=? AND emp_number IS NOT NULL AND TRIM(emp_number)<>''",
+        (company_id,)
+    ).fetchall()
+    for row in rows:
+        value = _employee_number_sequence_value(row['emp_number'])
+        if value is not None and value > highest:
+            highest = value
+    return highest
+
+
+def _sync_employee_number_sequence(conn, company_id):
+    """Synchronise a tenant sequence upward without ever reusing a number."""
+    highest = _highest_existing_employee_number(conn, company_id)
+    conn.execute(
+        '''INSERT INTO employee_number_sequences (company_id, last_number, updated_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(company_id) DO UPDATE SET
+               last_number=CASE
+                   WHEN employee_number_sequences.last_number < excluded.last_number
+                   THEN excluded.last_number
+                   ELSE employee_number_sequences.last_number
+               END,
+               updated_at=CURRENT_TIMESTAMP''',
+        (company_id, highest)
+    )
+    return highest
+
+
+def _initialise_employee_number_storage(conn):
+    """Create and seed tenant-safe employee sequences from existing records."""
+    conn.execute('''CREATE TABLE IF NOT EXISTS employee_number_sequences (
+        company_id INTEGER PRIMARY KEY,
+        last_number INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    try:
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_employee_number_sequences_company ON employee_number_sequences(company_id)')
+    except sqlite3.Error:
+        pass
+    if not table_exists(conn, 'employees'):
+        return
+    for company in conn.execute('SELECT id FROM companies').fetchall():
+        _sync_employee_number_sequence(conn, int(company['id']))
+
+
+def _allocate_employee_number(conn, company_id, synchronise=True):
+    """Atomically reserve and return the next employee number for a tenant."""
+    if synchronise:
+        _sync_employee_number_sequence(conn, company_id)
+    for _attempt in range(3):
+        row = conn.execute(
+            '''INSERT INTO employee_number_sequences (company_id, last_number, updated_at)
+               VALUES (?, 1, CURRENT_TIMESTAMP)
+               ON CONFLICT(company_id) DO UPDATE SET
+                   last_number=employee_number_sequences.last_number + 1,
+                   updated_at=CURRENT_TIMESTAMP
+               RETURNING last_number''',
+            (company_id,)
+        ).fetchone()
+        if not row:
+            raise EmployeeNumberAllocationError('Employee number sequence did not return a value.')
+        sequence_number = int(row['last_number'])
+        employee_number = f"{EMPLOYEE_NUMBER_PREFIX}{sequence_number:03d}"
+        duplicate = conn.execute(
+            "SELECT 1 FROM employees WHERE company_id=? AND LOWER(COALESCE(emp_number,''))=LOWER(?) LIMIT 1",
+            (company_id, employee_number)
+        ).fetchone()
+        if not duplicate:
+            return employee_number
+        _sync_employee_number_sequence(conn, company_id)
+    raise EmployeeNumberAllocationError('Easy Admin could not reserve a unique employee number after synchronising the tenant sequence.')
+
+
+def _is_employee_number_conflict(exc):
+    message = str(exc or '').lower()
+    return (
+        'idx_employees_company_emp_number_unique' in message
+        or ('duplicate key' in message and 'emp_number' in message)
+        or ('unique constraint' in message and 'employees.company_id' in message and 'emp_number' in message)
+    )
+
+
+def _begin_atomic_write(conn):
+    """Begin an explicit write transaction for PostgreSQL or SQLite."""
+    raw_conn = getattr(conn, '_conn', None)
+    if raw_conn is not None:
+        raw_conn.autocommit = False
+        return
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+    except sqlite3.OperationalError as exc:
+        if 'within a transaction' not in str(exc).lower():
+            raise
+
+
 def validate_import_row(import_type, row, line_no, conn, company_id, seen_values):
     """Validate and normalise one company CSV row without writing to the database."""
     cleaned = {field: normalise_import_value(value) for field, value in row.items()}
@@ -873,16 +990,11 @@ def validate_import_row(import_type, row, line_no, conn, company_id, seen_values
 
         emp_number = cleaned.get('emp_number')
         if emp_number:
-            emp_number_key = emp_number.casefold()
-            if emp_number_key in seen_values.setdefault('employee_numbers', set()):
-                errors.append(f"Line {line_no}, field 'emp_number': duplicate value '{emp_number}' appears more than once in this CSV.")
-            else:
-                seen_values['employee_numbers'].add(emp_number_key)
-            if conn.execute(
-                "SELECT 1 FROM employees WHERE company_id=? AND LOWER(COALESCE(emp_number,''))=LOWER(?) LIMIT 1",
-                (company_id, emp_number)
-            ).fetchone():
-                errors.append(f"Line {line_no}, field 'emp_number': '{emp_number}' already exists for this company.")
+            errors.append(
+                f"Line {line_no}, field 'emp_number': Employee numbers are generated automatically by Easy Admin. "
+                "Leave this field blank or download the current employee import template."
+            )
+        cleaned.pop('emp_number', None)
 
     elif import_type == 'services':
         for field in ('client_price', 'company_cost'):
@@ -960,7 +1072,8 @@ def get_import_template_rows(import_type):
     fields = COMPANY_IMPORT_TABLES.get(import_type)
     if not fields:
         return None
-    sample = {f: '' for f in fields}
+    template_fields = [f for f in fields if not (import_type == 'employees' and f == 'emp_number')]
+    sample = {f: '' for f in template_fields}
     if import_type == 'clients':
         sample.update({'name': 'Example Client', 'phone': '0712345678', 'email': 'client@example.com'})
     elif import_type == 'employees':
@@ -2210,6 +2323,10 @@ def init_db():
         for c_name, c_type in cols:
             try: conn.execute(f'ALTER TABLE {t_name} ADD COLUMN {c_name} {c_type}')
             except: pass
+
+    # Permanent tenant-specific employee numbering. Existing employee numbers
+    # remain unchanged; each tenant sequence starts at its highest valid EMP number.
+    _initialise_employee_number_storage(conn)
 
     # Permanent, tenant-specific invoice and quote numbering. Existing documents
     # retain their current references; future settings apply to new documents.
@@ -9710,15 +9827,24 @@ def admin_import_company_data():
         })
 
     current_line_no = None
+    allocated_employee_numbers = []
     try:
         table = safe_table_name(import_type)
         table_cols = set(table_columns(conn, table))
         inserted = 0
+        _begin_atomic_write(conn)
+        if import_type == 'employees':
+            _sync_employee_number_sequence(conn, cid)
         for current_line_no, row in rows_to_insert:
-            cols = [c for c in row.keys() if c in table_cols]
+            row_to_insert = dict(row)
+            if import_type == 'employees':
+                generated_number = _allocate_employee_number(conn, cid, synchronise=False)
+                row_to_insert['emp_number'] = generated_number
+                allocated_employee_numbers.append(generated_number)
+            cols = [c for c in row_to_insert.keys() if c in table_cols]
             if 'company_id' in table_cols:
                 cols.append('company_id')
-            values = [coerce_import_value_for_db(import_type, c, row[c]) for c in row.keys() if c in table_cols]
+            values = [coerce_import_value_for_db(import_type, c, row_to_insert[c]) for c in row_to_insert.keys() if c in table_cols]
             if 'company_id' in table_cols:
                 values.append(cid)
             placeholders = ','.join(['?'] * len(cols))
@@ -9741,10 +9867,16 @@ def admin_import_company_data():
         }), 400
 
     conn.close()
-    log_action('Hub', 'Imported Company Data', f"Imported {inserted} {import_type} rows for company_id={cid}")
+    employee_range_note = ''
+    if allocated_employee_numbers:
+        employee_range_note = f" Employee numbers allocated: {allocated_employee_numbers[0]} to {allocated_employee_numbers[-1]}."
+    log_action(
+        'Hub', 'Imported Company Data',
+        f"Imported {inserted} {import_type} rows for company_id={cid}.{employee_range_note}"
+    )
     return jsonify({
         "status": "success",
-        "message": f"Imported {inserted} row(s) successfully.",
+        "message": f"Imported {inserted} row(s) successfully.{employee_range_note}",
         "inserted": inserted,
         "valid_rows": inserted,
         "invalid_rows": 0,
@@ -12813,33 +12945,86 @@ def update_employee():
 
     conn = get_db_connection()
     action_msg = None
-    if emp_id:
-        existing = conn.execute("SELECT cv_file, id_file, contract_file FROM employees WHERE id=? AND company_id=?", (emp_id, session['company_id'])).fetchone()
-        if not existing:
-            conn.close()
-            return jsonify({"status": "error", "message": "Employee not found."}), 404
-        final_cv = cv_filename if cv_filename else existing['cv_file']
-        final_id = id_filename if id_filename else existing['id_file']
-        final_contract = contract_filename if contract_filename else existing['contract_file']
-        if not final_id or not final_contract:
-            conn.close()
-            return jsonify({"status": "error", "message": "Upload Signed Contract and Upload ID/Passport Copy are required."}), 400
-        
-        conn.execute('''UPDATE employees SET name=?, job_title=?, emp_type=?, status=?, start_date=?, inactive_date=?, date_of_birth=?, gross_salary=?, id_passport=?, phone=?, email=?, emergency_contact=?, tax_number=?, paye_ref=?, bank_details=?, bank_name=?, account_holder=?, account_number=?, branch_code=?, account_type=?, payment_reference=?, address=?, cv_file=?, id_file=?, contract_file=?, additional_leave=?, notes=?, workday_hours=?, overtime_pay_treatment=?, uif_contributor=?, uif_non_contributor_reason=?, uif_termination_code=? WHERE id=? AND company_id=?''', (data.get('name'), data.get('job_title'), data.get('emp_type'), data.get('status'), start_date, inactive_date, date_of_birth, data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), final_cv, final_id, final_contract, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or '', emp_id, cid))
-        action_msg = ('HR & Payroll', 'Updated Employee', f"Updated profile information for {data.get('name')}")
-    else:
-        count = conn.execute("SELECT COUNT(*) FROM employees WHERE company_id=?", (cid,)).fetchone()[0]
-        emp_num = f"EMP{count+1:03d}"
-        if not id_filename or not contract_filename:
-            conn.close()
-            return jsonify({"status": "error", "message": "Upload Signed Contract and Upload ID/Passport Copy are required."}), 400
-        conn.execute('''INSERT INTO employees (company_id, name, emp_number, job_title, emp_type, status, start_date, inactive_date, date_of_birth, gross_salary, id_passport, phone, email, emergency_contact, tax_number, paye_ref, bank_details, bank_name, account_holder, account_number, branch_code, account_type, payment_reference, address, cv_file, id_file, contract_file, additional_leave, notes, workday_hours, overtime_pay_treatment, uif_contributor, uif_non_contributor_reason, uif_termination_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (cid, data.get('name'), emp_num, data.get('job_title'), data.get('emp_type'), data.get('status'), start_date, inactive_date, date_of_birth, data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), cv_filename, id_filename, contract_filename, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or ''))
-        action_msg = ('HR & Payroll', 'Created Employee', f"Onboarded new employee: {data.get('name')}")
-    conn.commit()
+    allocated_employee_number = None
+    try:
+        _begin_atomic_write(conn)
+        if emp_id:
+            existing = conn.execute("SELECT cv_file, id_file, contract_file FROM employees WHERE id=? AND company_id=?", (emp_id, session['company_id'])).fetchone()
+            if not existing:
+                conn.rollback()
+                conn.close()
+                return jsonify({"status": "error", "message": "Employee not found."}), 404
+            final_cv = cv_filename if cv_filename else existing['cv_file']
+            final_id = id_filename if id_filename else existing['id_file']
+            final_contract = contract_filename if contract_filename else existing['contract_file']
+            if not final_id or not final_contract:
+                conn.rollback()
+                conn.close()
+                return jsonify({"status": "error", "message": "Upload Signed Contract and Upload ID/Passport Copy are required."}), 400
+
+            conn.execute('''UPDATE employees SET name=?, job_title=?, emp_type=?, status=?, start_date=?, inactive_date=?, date_of_birth=?, gross_salary=?, id_passport=?, phone=?, email=?, emergency_contact=?, tax_number=?, paye_ref=?, bank_details=?, bank_name=?, account_holder=?, account_number=?, branch_code=?, account_type=?, payment_reference=?, address=?, cv_file=?, id_file=?, contract_file=?, additional_leave=?, notes=?, workday_hours=?, overtime_pay_treatment=?, uif_contributor=?, uif_non_contributor_reason=?, uif_termination_code=? WHERE id=? AND company_id=?''', (data.get('name'), data.get('job_title'), data.get('emp_type'), data.get('status'), start_date, inactive_date, date_of_birth, data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), final_cv, final_id, final_contract, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or '', emp_id, cid))
+            action_msg = ('HR & Payroll', 'Updated Employee', f"Updated profile information for {data.get('name')}")
+        else:
+            if not id_filename or not contract_filename:
+                conn.rollback()
+                conn.close()
+                return jsonify({"status": "error", "message": "Upload Signed Contract and Upload ID/Passport Copy are required."}), 400
+            for attempt in range(2):
+                if attempt:
+                    _begin_atomic_write(conn)
+                allocated_employee_number = _allocate_employee_number(conn, cid, synchronise=True)
+                try:
+                    conn.execute('''INSERT INTO employees (company_id, name, emp_number, job_title, emp_type, status, start_date, inactive_date, date_of_birth, gross_salary, id_passport, phone, email, emergency_contact, tax_number, paye_ref, bank_details, bank_name, account_holder, account_number, branch_code, account_type, payment_reference, address, cv_file, id_file, contract_file, additional_leave, notes, workday_hours, overtime_pay_treatment, uif_contributor, uif_non_contributor_reason, uif_termination_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (cid, data.get('name'), allocated_employee_number, data.get('job_title'), data.get('emp_type'), data.get('status'), start_date, inactive_date, date_of_birth, data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), cv_filename, id_filename, contract_filename, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or ''))
+                    break
+                except Exception as exc:
+                    if attempt == 0 and _is_employee_number_conflict(exc):
+                        conn.rollback()
+                        continue
+                    raise
+            action_msg = (
+                'HR & Payroll', 'Created Employee',
+                f"Onboarded new employee: {data.get('name')} ({allocated_employee_number})"
+            )
+        conn.commit()
+    except EmployeeNumberAllocationError as exc:
+        conn.rollback()
+        conn.close()
+        log_action(
+            'HR & Payroll', 'Employee Number Allocation Failed',
+            f"Could not allocate employee number for company_id={cid}: {exc}",
+            result='failure', event_type='application'
+        )
+        return jsonify({
+            "status": "error",
+            "message": "Easy Admin could not allocate a unique employee number. No employee was created. Please try again."
+        }), 409
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        if _is_employee_number_conflict(exc):
+            log_action(
+                'HR & Payroll', 'Employee Number Allocation Failed',
+                f"Employee number conflict remained after sequence retry for company_id={cid}.",
+                result='failure', event_type='application'
+            )
+            return jsonify({
+                "status": "error",
+                "message": "Easy Admin could not allocate a unique employee number. No employee was created. Please try again."
+            }), 409
+        log_action(
+            'HR & Payroll', 'Employee Save Failed',
+            f"Employee save failed for company_id={cid}: {safe_import_database_error(exc)}",
+            result='failure', event_type='application'
+        )
+        return jsonify({
+            "status": "error",
+            "message": "The employee could not be saved because the database rejected the record. No changes were made."
+        }), 400
     conn.close()
-    
-    if action_msg: log_action(action_msg[0], action_msg[1], action_msg[2])
-    return jsonify({"status": "success"})
+
+    if action_msg:
+        log_action(action_msg[0], action_msg[1], action_msg[2])
+    return jsonify({"status": "success", "employee_number": allocated_employee_number})
 
 @app.route('/save_interview', methods=['POST'])
 def save_interview():
