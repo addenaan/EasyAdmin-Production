@@ -793,20 +793,42 @@ def _highest_existing_employee_number(conn, company_id):
 
 
 def _sync_employee_number_sequence(conn, company_id):
-    """Synchronise a tenant sequence upward without ever reusing a number."""
+    """Synchronise a tenant sequence upward without ever reusing a number.
+
+    PostgreSQL sequence-table writes deliberately use the raw cursor. The
+    sqlite-compatible cursor attempts SELECT LASTVAL() after every INSERT,
+    which is not valid for this non-serial table and can abort an explicit
+    PostgreSQL transaction.
+    """
     highest = _highest_existing_employee_number(conn, company_id)
-    conn.execute(
-        '''INSERT INTO employee_number_sequences (company_id, last_number, updated_at)
-           VALUES (?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT(company_id) DO UPDATE SET
-               last_number=CASE
-                   WHEN employee_number_sequences.last_number < excluded.last_number
-                   THEN excluded.last_number
-                   ELSE employee_number_sequences.last_number
-               END,
-               updated_at=CURRENT_TIMESTAMP''',
-        (company_id, highest)
-    )
+    raw_conn = getattr(conn, '_conn', None)
+    if raw_conn is not None:
+        with raw_conn.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO employee_number_sequences (company_id, last_number, updated_at)
+                   VALUES (%s, %s, CURRENT_TIMESTAMP)
+                   ON CONFLICT(company_id) DO UPDATE SET
+                       last_number=CASE
+                           WHEN employee_number_sequences.last_number < EXCLUDED.last_number
+                           THEN EXCLUDED.last_number
+                           ELSE employee_number_sequences.last_number
+                       END,
+                       updated_at=CURRENT_TIMESTAMP""",
+                (company_id, highest)
+            )
+    else:
+        conn.execute(
+            """INSERT INTO employee_number_sequences (company_id, last_number, updated_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(company_id) DO UPDATE SET
+                   last_number=CASE
+                       WHEN employee_number_sequences.last_number < excluded.last_number
+                       THEN excluded.last_number
+                       ELSE employee_number_sequences.last_number
+                   END,
+                   updated_at=CURRENT_TIMESTAMP""",
+            (company_id, highest)
+        )
     return highest
 
 
@@ -832,18 +854,33 @@ def _allocate_employee_number(conn, company_id, synchronise=True):
     if synchronise:
         _sync_employee_number_sequence(conn, company_id)
     for _attempt in range(3):
-        row = conn.execute(
-            '''INSERT INTO employee_number_sequences (company_id, last_number, updated_at)
-               VALUES (?, 1, CURRENT_TIMESTAMP)
-               ON CONFLICT(company_id) DO UPDATE SET
-                   last_number=employee_number_sequences.last_number + 1,
-                   updated_at=CURRENT_TIMESTAMP
-               RETURNING last_number''',
-            (company_id,)
-        ).fetchone()
-        if not row:
+        raw_conn = getattr(conn, '_conn', None)
+        if raw_conn is not None:
+            with raw_conn.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO employee_number_sequences (company_id, last_number, updated_at)
+                       VALUES (%s, 1, CURRENT_TIMESTAMP)
+                       ON CONFLICT(company_id) DO UPDATE SET
+                           last_number=employee_number_sequences.last_number + 1,
+                           updated_at=CURRENT_TIMESTAMP
+                       RETURNING last_number""",
+                    (company_id,)
+                )
+                row = cursor.fetchone()
+            sequence_number = int(row[0]) if row else None
+        else:
+            row = conn.execute(
+                """INSERT INTO employee_number_sequences (company_id, last_number, updated_at)
+                   VALUES (?, 1, CURRENT_TIMESTAMP)
+                   ON CONFLICT(company_id) DO UPDATE SET
+                       last_number=employee_number_sequences.last_number + 1,
+                       updated_at=CURRENT_TIMESTAMP
+                   RETURNING last_number""",
+                (company_id,)
+            ).fetchone()
+            sequence_number = int(row['last_number']) if row else None
+        if sequence_number is None:
             raise EmployeeNumberAllocationError('Employee number sequence did not return a value.')
-        sequence_number = int(row['last_number'])
         employee_number = f"{EMPLOYEE_NUMBER_PREFIX}{sequence_number:03d}"
         duplicate = conn.execute(
             "SELECT 1 FROM employees WHERE company_id=? AND LOWER(COALESCE(emp_number,''))=LOWER(?) LIMIT 1",
@@ -13011,14 +13048,19 @@ def update_employee():
                 "status": "error",
                 "message": "Easy Admin could not allocate a unique employee number. No employee was created. Please try again."
             }), 409
+        safe_reason = safe_import_database_error(exc)
+        app.logger.exception(
+            "Employee save failed for company_id=%s after employee-number allocation.",
+            cid
+        )
         log_action(
             'HR & Payroll', 'Employee Save Failed',
-            f"Employee save failed for company_id={cid}: {safe_import_database_error(exc)}",
+            f"Employee save failed for company_id={cid}: {safe_reason}",
             result='failure', event_type='application'
         )
         return jsonify({
             "status": "error",
-            "message": "The employee could not be saved because the database rejected the record. No changes were made."
+            "message": f"The employee could not be saved: {safe_reason} No changes were made."
         }), 400
     conn.close()
 
