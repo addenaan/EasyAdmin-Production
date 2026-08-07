@@ -11,6 +11,7 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
 import app as easyadmin_module
 from app_modules.website_integrations import INTEGRATION_PREFIX, create_integration_app
+from app_modules.file_browser import register_file_browser
 
 
 def create_application() -> Callable[..., Any]:
@@ -22,6 +23,13 @@ def create_application() -> Callable[..., Any]:
             "Easy Admin's app.py was imported but no Flask object named 'app' was found. "
             f"Imported module: {module_path}"
         )
+
+    register_file_browser(
+        primary_app,
+        log_action=easyadmin_module.log_action,
+        log_security_event=easyadmin_module.log_security_event,
+        get_db_connection=easyadmin_module.get_db_connection,
+    )
 
     integration_app = create_integration_app(easyadmin_module)
     return DispatcherMiddleware(primary_app, {INTEGRATION_PREFIX: integration_app})
