@@ -65,6 +65,13 @@ app.secret_key = _load_secret_key()
 
 # --- Security: session inactivity timeout ---
 DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS = int(os.environ.get('DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS', '900'))
+DESKTOP_SESSION_WARNING_SECONDS = int(os.environ.get('DESKTOP_SESSION_WARNING_SECONDS', '300'))
+if DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS < 60:
+    DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS = 60
+if DESKTOP_SESSION_WARNING_SECONDS < 30:
+    DESKTOP_SESSION_WARNING_SECONDS = 30
+if DESKTOP_SESSION_WARNING_SECONDS >= DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS:
+    DESKTOP_SESSION_WARNING_SECONDS = max(30, DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS // 3)
 SESSION_IDLE_TIMEOUT_SECONDS = DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS
 SESSION_TIMEOUT_LOGIN_URL = '/login?timeout=1'
 app.config['SESSION_REFRESH_EACH_REQUEST'] = True
@@ -3883,8 +3890,8 @@ def inject_session_timeout_script(response):
         return response
     if '</body>' not in body or 'session-timeout.js' in body:
         return response
-    script = ('\n<script defer src="/static/session-timeout.js?v=20260625-timeout15-desktop" '
-              'data-easyadmin-session-timeout data-timeout-seconds="%s"></script>\n') % DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS
+    script = ('\n<script defer src="/static/session-timeout.js?v=20260810-session-warning-v1" '
+              'data-easyadmin-session-timeout data-timeout-seconds="%s" data-warning-seconds="%s"></script>\n') % (DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS, DESKTOP_SESSION_WARNING_SECONDS)
     body = body.replace('</body>', script + '</body>', 1)
     response.set_data(body)
     response.headers['Content-Length'] = str(len(response.get_data()))
@@ -4435,7 +4442,12 @@ def restrict_access():
 @app.route('/api/session/ping', methods=['POST'])
 def api_session_ping():
     _touch_session_activity()
-    return jsonify({'status': 'success', 'timeout_seconds': DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS, 'mobile_timeout_disabled': _is_mobile_no_timeout_path()})
+    return jsonify({
+        'status': 'success',
+        'timeout_seconds': DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS,
+        'warning_seconds': DESKTOP_SESSION_WARNING_SECONDS,
+        'mobile_timeout_disabled': _is_mobile_no_timeout_path()
+    })
 
 
 @app.route('/api/session/timeout', methods=['POST'])

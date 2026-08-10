@@ -1,11 +1,11 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v18-security-hardening';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v19-session-warning';
 const APP_SHELL = [
   '/mobile/offline',
   '/static/mobile.css?v=20260622',
   '/static/mobile.js?v=20260622',
   '/static/easyadmin-formatters.js?v=20260622-format',
   '/static/pwa-update.js?v=20260706-update-prompt-password-route-fix',
-  '/static/session-timeout.js?v=20260625-timeout15-desktop',
+  '/static/session-timeout.js?v=20260810-session-warning-v1',
   '/static/staff-portal.css?v=20260706-staffnotify-search',
   '/static/staff-portal.js?v=20260706-notify500-fix',
   '/static/easy_admin_logo.png',

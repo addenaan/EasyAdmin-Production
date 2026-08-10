@@ -3237,10 +3237,6 @@
             window.open(mapUrl, '_blank');
         }
 
-        let idleTimer;
-        const timeoutValue = 1800000; 
-        function resetIdleTimer() { clearTimeout(idleTimer); idleTimer = setTimeout(() => { window.location.href = "/logout"; }, timeoutValue); }
-        window.onload = resetIdleTimer; document.onmousemove = resetIdleTimer; document.onkeypress = resetIdleTimer; document.onclick = resetIdleTimer; document.onscroll = resetIdleTimer;
     </script>
     <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
 </body>
