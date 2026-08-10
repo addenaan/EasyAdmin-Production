@@ -3301,6 +3301,33 @@ def get_contract_day_rules(emp_type):
         'public_holiday_multiplier': 2.0
     }
 
+def calculate_public_holiday_premium(daily_rate, is_daily_rate, ordinary_days_worked, nonordinary_days_worked):
+    """Return the additional public-holiday earning to add to payroll.
+
+    BCEA section 18 distinguishes the employee's total entitlement from the
+    *additional* amount that payroll still needs to add:
+
+    * If the holiday is an ordinary workday and the employee works, total pay
+      must be at least 2.0x the ordinary daily wage.  Monthly salary already
+      contains the first 1.0x; a daily-rate worker's calculated gross already
+      contains the first 1.0x for the worked booking.  Therefore add 1.0x.
+    * If the holiday is not an ordinary workday, a monthly-paid employee must
+      receive the ordinary daily wage plus the amount earned for the work.
+      For a standard full-day booking this is 2.0x additional to monthly salary.
+      A daily-rate worker already has the worked day's 1.0x in calculated gross,
+      so only one further 1.0x is added.
+
+    Explicit booking overtime is still calculated separately by the existing
+    overtime-hours logic.
+    """
+    rate = max(0.0, float(daily_rate or 0.0))
+    ordinary_days = max(0, int(ordinary_days_worked or 0))
+    nonordinary_days = max(0, int(nonordinary_days_worked or 0))
+    if is_daily_rate:
+        return rate * (ordinary_days + nonordinary_days)
+    return (rate * ordinary_days) + (rate * 2.0 * nonordinary_days)
+
+
 def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_dates):
     """Classify booked work for payroll premiums and BCEA hour warnings.
 
@@ -3317,6 +3344,8 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
     saturday_nonordinary_days = 0
     sunday_premium_days = 0
     public_holiday_days = 0
+    public_holiday_ordinary_days = 0
+    public_holiday_nonordinary_days = 0
     explicit_overtime_hours = 0.0
 
     for b in bookings:
@@ -3345,6 +3374,10 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
             # same booking is not paid twice as two different premium day types.
             if is_holiday:
                 public_holiday_days += 1
+                if is_ordinary_schedule_day:
+                    public_holiday_ordinary_days += 1
+                else:
+                    public_holiday_nonordinary_days += 1
             elif is_sunday and rules['sunday_multiplier'] > 1.0:
                 sunday_premium_days += 1
             elif is_saturday and rules['saturday_multiplier'] > 1.0:
@@ -3376,6 +3409,8 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
         'saturday_nonordinary_days': saturday_nonordinary_days,
         'sunday_premium_days': sunday_premium_days,
         'public_holiday_days': public_holiday_days,
+        'public_holiday_ordinary_days': public_holiday_ordinary_days,
+        'public_holiday_nonordinary_days': public_holiday_nonordinary_days,
         # Backwards-compatible aggregate for older display/payroll code.
         'sunday_holiday_days': sunday_premium_days + public_holiday_days,
         'ordinary_hours': ordinary_hours,
@@ -7165,7 +7200,7 @@ def _build_staff_payslip_pdf(row, employee, company):
 
     table_rows = [
         {'label': 'Calculated Gross', 'code': 'Code: 3601', 'earn': r.get('gross_salary') or 0, 'ded': None, 'show': True, 'muted': ''},
-        {'label': 'Overtime / Double Rate', 'code': 'Code: 3605', 'earn': r.get('overtime') or 0, 'ded': None, 'show': abs(float(r.get('overtime') or 0)) > 0.004, 'muted': ''},
+        {'label': 'Overtime / Premium Pay', 'code': 'Code: 3605', 'earn': r.get('overtime') or 0, 'ded': None, 'show': abs(float(r.get('overtime') or 0)) > 0.004, 'muted': ''},
         {'label': 'Reimbursable Expenses (Non-taxable)', 'code': '', 'earn': r.get('reimbursable_expenses') or 0, 'ded': None, 'show': abs(float(r.get('reimbursable_expenses') or 0)) > 0.004, 'green': True},
         {'label': 'Bonus', 'code': 'Code: 3605/3601', 'earn': r.get('bonus') or 0, 'ded': None, 'show': abs(float(r.get('bonus') or 0)) > 0.004},
         {'label': 'Transport Reimbursement (Tax Free)', 'code': 'Code: 3702', 'earn': r.get('transport') or 0, 'ded': None, 'show': abs(float(r.get('transport') or 0)) > 0.004, 'green': True},
@@ -13389,35 +13424,52 @@ def generate_payslip():
     saturday_count = booking_hours['saturday_nonordinary_days']
     sunday_premium_count = booking_hours['sunday_premium_days']
     public_holiday_count = booking_hours['public_holiday_days']
+    public_holiday_ordinary_count = booking_hours['public_holiday_ordinary_days']
+    public_holiday_nonordinary_count = booking_hours['public_holiday_nonordinary_days']
     total_overtime_hours = booking_hours['explicit_overtime_hours']
 
     hourly_rate = daily_rate / workday_hours
     rules = get_contract_day_rules(emp_type)
 
     if is_daily_rate:
-        # Daily-rate workers already receive 1.0x in gross for each booking. Add only the extra
-        # premium portion required to reach the statutory/applicable multiplier.
+        # Existing gross already contains 1.0x for every worked booking. Add only
+        # the premium portion needed for Saturday/Sunday rules and public holidays.
         overtime_amount += daily_rate * max(0.0, rules['saturday_multiplier'] - 1.0) * saturday_count
         overtime_amount += daily_rate * max(0.0, rules['sunday_multiplier'] - 1.0) * sunday_premium_count
-        overtime_amount += daily_rate * max(0.0, rules['public_holiday_multiplier'] - 1.0) * public_holiday_count
     else:
-        # Monthly-rate employees receive the applicable premium amount as an additional earning.
+        # Monthly salary already covers ordinary scheduled days, but not extra
+        # non-ordinary Saturday/Sunday work. Preserve the existing treatment.
         overtime_amount += (hourly_rate * workday_hours * rules['saturday_multiplier']) * saturday_count
         overtime_amount += (hourly_rate * workday_hours * rules['sunday_multiplier']) * sunday_premium_count
-        overtime_amount += (hourly_rate * workday_hours * rules['public_holiday_multiplier']) * public_holiday_count
+
+    # Public-holiday pay is calculated as the *additional* payroll amount, not as
+    # another blanket 2.0x on top of pay that is already included elsewhere.
+    overtime_amount += calculate_public_holiday_premium(
+        daily_rate, is_daily_rate, public_holiday_ordinary_count, public_holiday_nonordinary_count
+    )
 
     if total_overtime_hours > 0:
         overtime_amount += (hourly_rate * 1.5) * total_overtime_hours
         
     display_parts = []
-    if public_holiday_count > 0: display_parts.append(f"{public_holiday_count} Public Holiday @2.0x")
+    if is_daily_rate and public_holiday_count > 0:
+        display_parts.append(f"{public_holiday_count} Public Holiday premium +1.0x")
+    elif not is_daily_rate:
+        if public_holiday_ordinary_count > 0:
+            display_parts.append(f"{public_holiday_ordinary_count} Public Holiday (ordinary day) +1.0x")
+        if public_holiday_nonordinary_count > 0:
+            display_parts.append(f"{public_holiday_nonordinary_count} Public Holiday (non-ordinary day) +2.0x")
     if sunday_premium_count > 0: display_parts.append(f"{sunday_premium_count} Sun @{rules['sunday_multiplier']:.1f}x")
     if saturday_count > 0: display_parts.append(f"{saturday_count} Sat @{rules['saturday_multiplier']:.1f}x")
     if total_overtime_hours > 0: display_parts.append(f"{total_overtime_hours} hrs extra OT @1.5x")
     sundays_display = f"({', '.join(display_parts)})" if display_parts else ""
 
-    days_worked_display = f"({days_worked} shifts @ R{base_salary:.2f})" if is_daily_rate else inactive_salary_note
-    gross = (base_salary * days_worked) if is_daily_rate else payable_base_salary
+    if is_daily_rate:
+        gross = base_salary * days_worked
+        days_worked_display = f"({days_worked} shifts @ R{base_salary:.2f})"
+    else:
+        gross = payable_base_salary
+        days_worked_display = inactive_salary_note
 
     transport_amount = 0.0
     if company and dict(company).get('transport_policy') in ['standard', 'yes']:
