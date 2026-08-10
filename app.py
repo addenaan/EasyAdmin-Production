@@ -3302,9 +3302,18 @@ def get_contract_day_rules(emp_type):
     }
 
 def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_dates):
+    """Classify booked work for payroll premiums and BCEA hour warnings.
+
+    Sunday work, public-holiday work and other work outside the employee's
+    ordinary work pattern are tracked separately from *overtime*.  They may
+    attract their own pay/agreement rules, but are not automatically counted
+    against the BCEA 10-hour weekly overtime limit.  Only overtime explicitly
+    captured on a booking is included in ``overtime_hours``.
+    """
     rules = get_contract_day_rules(emp_type)
     public_holiday_dates = set(public_holiday_dates or [])
     ordinary_days = 0
+    nonordinary_days = 0
     saturday_nonordinary_days = 0
     sunday_premium_days = 0
     public_holiday_days = 0
@@ -3318,62 +3327,88 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
             is_holiday = b_date_str in public_holiday_dates
             is_sunday = weekday == 6
             is_saturday = weekday == 5
+            is_ordinary_schedule_day = weekday in rules['ordinary_weekdays']
 
-            # Public holidays override ordinary/Sunday logic. A public holiday that
-            # falls on a Sunday is paid at the public-holiday rate, not the Sunday rate.
+            # Compliance hours follow the employee's ordinary work pattern. A public
+            # holiday that falls on an ordinary workday remains part of the ordinary
+            # work pattern for weekly-hours purposes, while its premium/pay treatment
+            # is tracked independently below. Likewise, an ordinary Sunday for a true
+            # shift worker is counted as ordinary hours and separately flagged for the
+            # applicable Sunday premium.
+            if is_ordinary_schedule_day:
+                ordinary_days += 1
+            else:
+                nonordinary_days += 1
+
+            # Premium categories are deliberately separate from the overtime bucket.
+            # Public holidays override Sunday/Saturday premium classification so the
+            # same booking is not paid twice as two different premium day types.
             if is_holiday:
                 public_holiday_days += 1
             elif is_sunday and rules['sunday_multiplier'] > 1.0:
                 sunday_premium_days += 1
-                if weekday in rules['ordinary_weekdays']:
-                    ordinary_days += 1
             elif is_saturday and rules['saturday_multiplier'] > 1.0:
                 saturday_nonordinary_days += 1
-            elif weekday in rules['ordinary_weekdays']:
-                ordinary_days += 1
-            else:
-                # Non-ordinary day not otherwise classified; treat as public-holiday style premium.
-                public_holiday_days += 1
+
         try:
-            explicit_overtime_hours += float(b['overtime_hours'] or 0.0)
+            explicit_overtime_hours += max(0.0, float(b['overtime_hours'] or 0.0))
         except Exception:
             pass
 
     hours_per_day = float(workday_hours or 0.0)
+    ordinary_hours = ordinary_days * hours_per_day
+    nonordinary_hours = nonordinary_days * hours_per_day
     saturday_nonordinary_hours = saturday_nonordinary_days * hours_per_day
     sunday_premium_hours = sunday_premium_days * hours_per_day
     public_holiday_hours = public_holiday_days * hours_per_day
-    ordinary_hours = ordinary_days * hours_per_day
 
-    # For weekly BCEA warnings, ordinary Sunday shift-worker hours are counted once as ordinary hours.
-    # Non-ordinary/overtime warning hours include non-ordinary Saturdays, public holidays,
-    # non-ordinary Sundays and explicit overtime captured on the booking.
-    sunday_nonordinary_hours = 0.0 if emp_type == 'Shift Worker' else sunday_premium_hours
-    nonordinary_hours = saturday_nonordinary_hours + public_holiday_hours + sunday_nonordinary_hours
-    overtime_hours = nonordinary_hours + explicit_overtime_hours
+    # IMPORTANT: The BCEA 10-hour weekly overtime test is applied to explicit
+    # overtime only. Sunday/public-holiday/non-ordinary hours remain visible as
+    # separate categories so their own rules can be reviewed without generating
+    # a false overtime-limit warning.
+    overtime_hours = explicit_overtime_hours
+    base_work_hours = ordinary_hours + nonordinary_hours
+    total_hours = base_work_hours + explicit_overtime_hours
 
     return {
         'ordinary_days': ordinary_days,
+        'nonordinary_days': nonordinary_days,
         'saturday_nonordinary_days': saturday_nonordinary_days,
         'sunday_premium_days': sunday_premium_days,
         'public_holiday_days': public_holiday_days,
-        # Backwards-compatible aggregate for older display code.
+        # Backwards-compatible aggregate for older display/payroll code.
         'sunday_holiday_days': sunday_premium_days + public_holiday_days,
         'ordinary_hours': ordinary_hours,
+        'nonordinary_hours': nonordinary_hours,
+        'base_work_hours': base_work_hours,
         'saturday_nonordinary_hours': saturday_nonordinary_hours,
         'sunday_premium_hours': sunday_premium_hours,
         'public_holiday_hours': public_holiday_hours,
         'sunday_holiday_hours': sunday_premium_hours + public_holiday_hours,
-        'nonordinary_hours': nonordinary_hours,
         'explicit_overtime_hours': explicit_overtime_hours,
+        # Keep the existing key for callers, but it now means actual captured OT.
         'overtime_hours': overtime_hours,
-        'total_hours': ordinary_hours + overtime_hours
+        'total_hours': total_hours
     }
 
-def get_bcea_hours_warning(ordinary_hours, overtime_hours, emp_type):
-    ordinary_hours = float(ordinary_hours or 0)
-    overtime_hours = float(overtime_hours or 0)
-    total_hours = ordinary_hours + overtime_hours
+def get_bcea_hours_warning(ordinary_hours, overtime_hours, emp_type, total_hours=None,
+                           nonordinary_hours=0.0, sunday_hours=0.0,
+                           public_holiday_hours=0.0, saturday_nonordinary_hours=0.0):
+    """Return BCEA-style weekly warnings without conflating premium work with OT.
+
+    ``overtime_hours`` must contain only actual overtime hours captured by the
+    business. Sunday/public-holiday/non-ordinary work is reported separately.
+    """
+    ordinary_hours = max(0.0, float(ordinary_hours or 0))
+    overtime_hours = max(0.0, float(overtime_hours or 0))
+    nonordinary_hours = max(0.0, float(nonordinary_hours or 0))
+    sunday_hours = max(0.0, float(sunday_hours or 0))
+    public_holiday_hours = max(0.0, float(public_holiday_hours or 0))
+    saturday_nonordinary_hours = max(0.0, float(saturday_nonordinary_hours or 0))
+    if total_hours is None:
+        total_hours = ordinary_hours + nonordinary_hours + overtime_hours
+    total_hours = max(0.0, float(total_hours or 0))
+
     warnings = []
     status = 'green'
 
@@ -3386,25 +3421,50 @@ def get_bcea_hours_warning(ordinary_hours, overtime_hours, emp_type):
 
     if overtime_hours > 10:
         status = 'red'
-        warnings.append(f'BCEA overtime / non-ordinary work limit exceeded: {overtime_hours:.2f}/10.00 hrs')
+        warnings.append(f'BCEA overtime limit exceeded: {overtime_hours:.2f}/10.00 hrs')
     elif overtime_hours >= 8:
-        if status != 'red': status = 'yellow'
-        warnings.append(f'BCEA overtime / non-ordinary work near weekly maximum: {overtime_hours:.2f}/10.00 hrs')
+        if status != 'red':
+            status = 'yellow'
+        warnings.append(f'BCEA overtime near weekly maximum: {overtime_hours:.2f}/10.00 hrs')
 
-    if total_hours > 55:
-        status = 'red'
-        warnings.append(f'Combined ordinary and overtime hours exceed 55.00 hrs: {total_hours:.2f} hrs')
-
+    # Contract <25 Hrs remains an Easy Admin contract-hours control. All hours
+    # actually worked count toward this threshold, irrespective of premium type.
     if emp_type == 'Contract <25 Hrs':
         contract_hours = total_hours
         if contract_hours > 25:
             status = 'red'
             warnings.append(f'Contract <25 Hrs threshold exceeded: {contract_hours:.2f}/25.00 hrs')
         elif contract_hours >= 22:
-            if status != 'red': status = 'yellow'
+            if status != 'red':
+                status = 'yellow'
             warnings.append(f'Contract <25 Hrs is near 25-hour threshold: {contract_hours:.2f}/25.00 hrs')
 
-    return {'status': status, 'ordinary_hours': round(ordinary_hours, 2), 'overtime_hours': round(overtime_hours, 2), 'total_hours': round(total_hours, 2), 'messages': warnings}
+    # Informational notices do not change the traffic-light status. These work
+    # categories have their own agreement/pay rules and are not automatically OT.
+    if public_holiday_hours > 0:
+        warnings.append(
+            f'Public holiday work: {public_holiday_hours:.2f} hrs - public-holiday agreement/pay rules apply separately from the 10-hour overtime limit.'
+        )
+    if sunday_hours > 0:
+        warnings.append(
+            f'Sunday work: {sunday_hours:.2f} hrs - Sunday work/pay rules apply separately from the 10-hour overtime limit.'
+        )
+    other_nonordinary_hours = max(0.0, nonordinary_hours - sunday_hours)
+    if other_nonordinary_hours > 0 and saturday_nonordinary_hours > 0:
+        warnings.append(
+            f"Non-ordinary Saturday work: {saturday_nonordinary_hours:.2f} hrs - review the employee's agreed ordinary hours; Easy Admin does not automatically classify these hours as overtime."
+        )
+
+    return {
+        'status': status,
+        'ordinary_hours': round(ordinary_hours, 2),
+        'overtime_hours': round(overtime_hours, 2),
+        'nonordinary_hours': round(nonordinary_hours, 2),
+        'sunday_hours': round(sunday_hours, 2),
+        'public_holiday_hours': round(public_holiday_hours, 2),
+        'total_hours': round(total_hours, 2),
+        'messages': warnings
+    }
 
 
 def employee_name_matches(booking_employee, employee_name):
@@ -3496,7 +3556,14 @@ def analyse_employee_hours_for_period(conn, company_id, employee, start_date, en
 
     public_holidays = get_public_holiday_dates_between(conn, start_date, end_date)
     hours = analyse_booking_hours(bookings, employee['emp_type'], workday_hours, public_holidays)
-    warning = get_bcea_hours_warning(hours['ordinary_hours'], hours['overtime_hours'], employee['emp_type'])
+    warning = get_bcea_hours_warning(
+        hours['ordinary_hours'], hours['overtime_hours'], employee['emp_type'],
+        total_hours=hours['total_hours'],
+        nonordinary_hours=hours['nonordinary_hours'],
+        sunday_hours=hours['sunday_premium_hours'],
+        public_holiday_hours=hours['public_holiday_hours'],
+        saturday_nonordinary_hours=hours['saturday_nonordinary_hours']
+    )
     return hours, warning
 
 def is_employee_booked_on_date(conn, company_id, employee_name, target_date, exclude_booking_id=None):
@@ -3569,6 +3636,10 @@ def get_booking_staff_hours_summary(conn, company_id, employee, target_date, pro
         'week_hours': round(week_hours['total_hours'], 2),
         'week_ordinary_hours': round(week_hours['ordinary_hours'], 2),
         'week_overtime_hours': round(week_hours['overtime_hours'], 2),
+        'week_nonordinary_hours': round(week_hours['nonordinary_hours'], 2),
+        'week_sunday_hours': round(week_hours['sunday_premium_hours'], 2),
+        'week_public_holiday_hours': round(week_hours['public_holiday_hours'], 2),
+        'week_saturday_nonordinary_hours': round(week_hours['saturday_nonordinary_hours'], 2),
         'week_status': week_warning['status'],
         'week_messages': week_warning['messages'],
         'month_start': month_start.strftime('%Y-%m-%d'),
@@ -13376,7 +13447,14 @@ def generate_payslip():
     leave = calculate_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'], benefit_ref_date)
     sick = calculate_sick_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'], benefit_ref_date)
     family = calculate_family_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'], benefit_ref_date)
-    bcea_warning = get_bcea_hours_warning(booking_hours['ordinary_hours'], booking_hours['overtime_hours'], emp_type)
+    bcea_warning = get_bcea_hours_warning(
+        booking_hours['ordinary_hours'], booking_hours['overtime_hours'], emp_type,
+        total_hours=booking_hours['total_hours'],
+        nonordinary_hours=booking_hours['nonordinary_hours'],
+        sunday_hours=booking_hours['sunday_premium_hours'],
+        public_holiday_hours=booking_hours['public_holiday_hours'],
+        saturday_nonordinary_hours=booking_hours['saturday_nonordinary_hours']
+    )
     
     conn.close()
 
