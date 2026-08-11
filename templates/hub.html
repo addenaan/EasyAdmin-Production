@@ -574,30 +574,43 @@
 
     {% if session.get('is_superadmin') or session.get('is_company_admin') %}
     <div class="modal fade" id="auditModal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
             <div class="modal-content">
                 <div class="modal-header bg-dark text-white">
-                    <h5 class="modal-title">System Audit Trail (Last 90 Days)</h5>
+                    <div>
+                        <h5 class="modal-title mb-0">System Audit Trail</h5>
+                        <div class="small text-white-50">Last 90 days · loaded in pages for faster performance</div>
+                    </div>
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
-                <div class="modal-body bg-light" style="max-height: 60vh; overflow-y: auto;">
-                    <table class="table table-hover table-sm bg-white border shadow-sm align-middle" style="font-size: 0.9rem;">
-                        <thead class="table-light">
-                            <tr>
-                                <th>Timestamp</th>
-                                <th>User</th>
-                                <th>Event</th>
-                                <th>Result</th>
-                                <th>App</th>
-                                <th>Action</th>
-                                <th>Affected Record</th>
-                                <th>IP Address</th>
-                                <th>Browser/User-Agent</th>
-                                <th>Details</th>
-                            </tr>
-                        </thead>
-                        <tbody id="auditTableBody"></tbody>
-                    </table>
+                <div class="modal-body bg-light">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-sm bg-white border shadow-sm align-middle mb-0" style="font-size: 0.9rem;">
+                            <thead class="table-light sticky-top">
+                                <tr>
+                                    <th>Timestamp</th>
+                                    <th>User</th>
+                                    <th>Event</th>
+                                    <th>Result</th>
+                                    <th>App</th>
+                                    <th>Action</th>
+                                    <th>Affected Record</th>
+                                    <th>IP Address</th>
+                                    <th>Browser/User-Agent</th>
+                                    <th>Details</th>
+                                </tr>
+                            </thead>
+                            <tbody id="auditTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="modal-footer justify-content-between">
+                    <div id="auditLoadStatus" class="small text-muted">Ready</div>
+                    <div>
+                        <button type="button" class="btn btn-outline-secondary btn-sm me-2" onclick="refreshAuditLogs()">Refresh</button>
+                        <button type="button" class="btn btn-outline-primary btn-sm me-2 d-none" id="auditLoadMoreBtn" onclick="loadMoreAuditLogs()">Load More</button>
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2055,50 +2068,124 @@
 
         {% if session.get('is_superadmin') or session.get('is_company_admin') %}
         const auditModal = document.getElementById('auditModal') ? new bootstrap.Modal(document.getElementById('auditModal')) : null;
+        const auditPageSize = 100;
+        let auditNextBeforeId = null;
+        let auditHasMore = false;
+        let auditLoading = false;
+        let auditLoadedCount = 0;
+
         function auditEscape(value) {
             return String(value ?? '').replace(/[&<>"']/g, function(ch) {
                 return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch];
             });
         }
-        function openAuditModal() {
-            adminFetch('/admin/audit_logs').then(r => r.json()).then(data => {
-                const tbody = document.getElementById('auditTableBody');
-                if(!tbody) return;
-                tbody.innerHTML = '';
-                if(data.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted p-4">No system activity found in the last 90 days.</td></tr>';
-                } else {
-                    data.forEach(log => {
-                        let badgeColor = "secondary";
-                        const appName = String(log.app_name || '');
-                        if(appName.includes("Booking")) badgeColor = "primary";
-                        if(appName.includes("Finance")) badgeColor = "warning text-dark";
-                        if(appName.includes("Payroll")) badgeColor = "success";
-                        if(appName.includes("Invoicing")) badgeColor = "info text-dark";
-                        if(appName.includes("System")) badgeColor = "dark";
-                        if(appName.includes("Security")) badgeColor = "danger";
-                        const result = String(log.result || 'success').toLowerCase();
-                        const resultClass = result === 'success' ? 'success' : (result === 'blocked' ? 'warning text-dark' : 'danger');
-                        const affected = [log.record_type, log.record_id].filter(Boolean).join(' #');
 
-                        tbody.innerHTML += `
-                            <tr>
-                                <td class="text-nowrap small text-muted">${auditEscape(log.timestamp)}</td>
-                                <td><strong>${auditEscape(log.username)}</strong></td>
-                                <td><span class="badge bg-light text-dark border">${auditEscape(log.event_type || 'application')}</span></td>
-                                <td><span class="badge bg-${resultClass}">${auditEscape(log.result || 'success')}</span></td>
-                                <td><span class="badge bg-${badgeColor}">${auditEscape(log.app_name)}</span></td>
-                                <td>${auditEscape(log.action)}</td>
-                                <td class="small text-muted">${auditEscape(affected || '')}</td>
-                                <td class="small text-muted">${auditEscape(log.ip_address || '')}</td>
-                                <td class="small text-muted" style="max-width: 220px; word-break: break-word;">${auditEscape(log.user_agent || '')}</td>
-                                <td class="text-muted small">${auditEscape(log.details)}</td>
-                            </tr>
-                        `;
-                    });
-                }
-                auditModal.show();
-            });
+        function auditRowHtml(log) {
+            let badgeColor = 'secondary';
+            const appName = String(log.app_name || '');
+            if(appName.includes('Booking')) badgeColor = 'primary';
+            if(appName.includes('Finance')) badgeColor = 'warning text-dark';
+            if(appName.includes('Payroll')) badgeColor = 'success';
+            if(appName.includes('Invoicing')) badgeColor = 'info text-dark';
+            if(appName.includes('System')) badgeColor = 'dark';
+            if(appName.includes('Security')) badgeColor = 'danger';
+            const result = String(log.result || 'success').toLowerCase();
+            const resultClass = result === 'success' ? 'success' : (result === 'blocked' ? 'warning text-dark' : 'danger');
+            const affected = [log.record_type, log.record_id].filter(Boolean).join(' #');
+            return `
+                <tr>
+                    <td class="text-nowrap small text-muted">${auditEscape(log.timestamp)}</td>
+                    <td><strong>${auditEscape(log.username)}</strong></td>
+                    <td><span class="badge bg-light text-dark border">${auditEscape(log.event_type || 'application')}</span></td>
+                    <td><span class="badge bg-${resultClass}">${auditEscape(log.result || 'success')}</span></td>
+                    <td><span class="badge bg-${badgeColor}">${auditEscape(log.app_name)}</span></td>
+                    <td>${auditEscape(log.action)}</td>
+                    <td class="small text-muted">${auditEscape(affected || '')}</td>
+                    <td class="small text-muted">${auditEscape(log.ip_address || '')}</td>
+                    <td class="small text-muted" style="max-width: 220px; word-break: break-word;">${auditEscape(log.user_agent || '')}</td>
+                    <td class="text-muted small" style="max-width: 360px; word-break: break-word;">${auditEscape(log.details)}</td>
+                </tr>`;
+        }
+
+        function setAuditLoadingState(message) {
+            const status = document.getElementById('auditLoadStatus');
+            if(status) status.textContent = message || '';
+            const button = document.getElementById('auditLoadMoreBtn');
+            if(button) {
+                button.disabled = auditLoading;
+                button.classList.toggle('d-none', !auditHasMore);
+                button.textContent = auditLoading ? 'Loading…' : 'Load More';
+            }
+        }
+
+        function loadAuditLogs(append = false) {
+            if(auditLoading) return Promise.resolve();
+            auditLoading = true;
+            const tbody = document.getElementById('auditTableBody');
+            if(!tbody) {
+                auditLoading = false;
+                return Promise.resolve();
+            }
+            if(!append) {
+                auditNextBeforeId = null;
+                auditHasMore = false;
+                auditLoadedCount = 0;
+                tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted p-4"><span class="spinner-border spinner-border-sm me-2"></span>Loading audit activity…</td></tr>';
+            }
+            setAuditLoadingState(append ? 'Loading more activity…' : 'Loading latest activity…');
+
+            const params = new URLSearchParams({limit: String(auditPageSize)});
+            if(append && auditNextBeforeId) params.set('before_id', String(auditNextBeforeId));
+
+            return adminFetch('/admin/audit_logs?' + params.toString())
+                .then(response => {
+                    if(!response.ok) throw new Error('Unable to load the audit trail.');
+                    return response.json();
+                })
+                .then(payload => {
+                    // Backwards compatibility in case a browser briefly reaches an older worker during a rolling deploy.
+                    const logs = Array.isArray(payload) ? payload : (payload.logs || []);
+                    auditHasMore = Array.isArray(payload) ? false : !!payload.has_more;
+                    auditNextBeforeId = Array.isArray(payload) ? null : payload.next_before_id;
+
+                    if(!append) tbody.innerHTML = '';
+                    if(logs.length) {
+                        const htmlRows = logs.map(auditRowHtml).join('');
+                        tbody.insertAdjacentHTML('beforeend', htmlRows);
+                        auditLoadedCount += logs.length;
+                    } else if(!append) {
+                        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted p-4">No system activity found in the last 90 days.</td></tr>';
+                    }
+                    setAuditLoadingState(auditLoadedCount
+                        ? `${auditLoadedCount} audit entr${auditLoadedCount === 1 ? 'y' : 'ies'} loaded${auditHasMore ? ' · more available' : ''}`
+                        : 'No audit activity found');
+                })
+                .catch(error => {
+                    if(!append) {
+                        tbody.innerHTML = `<tr><td colspan="10" class="text-center text-danger p-4">${auditEscape(error.message || 'Unable to load the audit trail.')}</td></tr>`;
+                    }
+                    const status = document.getElementById('auditLoadStatus');
+                    if(status) status.textContent = error.message || 'Unable to load the audit trail.';
+                })
+                .finally(() => {
+                    auditLoading = false;
+                    setAuditLoadingState(auditLoadedCount
+                        ? `${auditLoadedCount} audit entr${auditLoadedCount === 1 ? 'y' : 'ies'} loaded${auditHasMore ? ' · more available' : ''}`
+                        : (document.getElementById('auditLoadStatus')?.textContent || 'Ready'));
+                });
+        }
+
+        function openAuditModal() {
+            if(auditModal) auditModal.show();
+            loadAuditLogs(false);
+        }
+
+        function loadMoreAuditLogs() {
+            if(auditHasMore && auditNextBeforeId) loadAuditLogs(true);
+        }
+
+        function refreshAuditLogs() {
+            loadAuditLogs(false);
         }
 
         const usersModal = document.getElementById('usersModal') ? new bootstrap.Modal(document.getElementById('usersModal')) : null;

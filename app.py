@@ -76,6 +76,14 @@ SESSION_IDLE_TIMEOUT_SECONDS = DESKTOP_SESSION_IDLE_TIMEOUT_SECONDS
 SESSION_TIMEOUT_LOGIN_URL = '/login?timeout=1'
 app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
+# --- Performance diagnostics ---
+# Slow requests are logged to the private Render log so remaining bottlenecks can
+# be identified without exposing timings or data to normal users.
+try:
+    SLOW_REQUEST_LOG_SECONDS = max(0.5, float(os.environ.get('EASYADMIN_SLOW_REQUEST_LOG_SECONDS', '2.0')))
+except (TypeError, ValueError):
+    SLOW_REQUEST_LOG_SECONDS = 2.0
+
 
 def validate_password_strength(password, username=''):
     password = password or ''
@@ -2623,7 +2631,19 @@ def init_db():
         'CREATE INDEX IF NOT EXISTS idx_attachments_company_link ON attachments(company_id, linked_type, linked_id)',
         'CREATE INDEX IF NOT EXISTS idx_clients_company_name ON clients(company_id, name)',
         'CREATE INDEX IF NOT EXISTS idx_services_company_name ON services(company_id, name)',
-        'CREATE INDEX IF NOT EXISTS idx_interviews_company_datetime ON interviews(company_id, interview_datetime)'
+        'CREATE INDEX IF NOT EXISTS idx_interviews_company_datetime ON interviews(company_id, interview_datetime)',
+        # Performance indexes for high-frequency tenant lookups and audit history.
+        'CREATE INDEX IF NOT EXISTS idx_audit_logs_company_timestamp_id ON audit_logs(company_id, timestamp DESC, id DESC)',
+        'CREATE INDEX IF NOT EXISTS idx_audit_logs_company_id_desc ON audit_logs(company_id, id DESC)',
+        'CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_bookings_company_employee_start ON bookings(company_id, employee, start)',
+        'CREATE INDEX IF NOT EXISTS idx_payslips_company_employee_date ON payslips(company_id, employee_id, date)',
+        'CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id)',
+        'CREATE INDEX IF NOT EXISTS idx_quote_items_quote ON quote_items(quote_id)',
+        'CREATE INDEX IF NOT EXISTS idx_users_company_username ON users(company_id, username)',
+        'CREATE INDEX IF NOT EXISTS idx_settings_company_key ON settings(company_id, key)',
+        'CREATE INDEX IF NOT EXISTS idx_custom_field_values_lookup ON custom_field_values(company_id, module_name, record_id)',
+        'CREATE INDEX IF NOT EXISTS idx_tenant_custom_fields_lookup ON tenant_custom_fields(company_id, module_name, visible, sort_order)'
     ]
     for sql in index_statements:
         try: conn.execute(sql)
@@ -2664,6 +2684,33 @@ def _safe_audit_details(details):
     return details
 
 
+_AUDIT_RETENTION_LOCK = threading.Lock()
+_AUDIT_RETENTION_LAST_RUN = 0.0
+try:
+    AUDIT_RETENTION_CLEANUP_INTERVAL_SECONDS = max(300, int(os.environ.get('EASYADMIN_AUDIT_CLEANUP_INTERVAL_SECONDS', '21600')))
+except (TypeError, ValueError):
+    AUDIT_RETENTION_CLEANUP_INTERVAL_SECONDS = 21600
+
+
+def _maybe_cleanup_audit_logs(conn):
+    """Prune old audit rows periodically instead of scanning on every write."""
+    global _AUDIT_RETENTION_LAST_RUN
+    now = time.monotonic()
+    if now - _AUDIT_RETENTION_LAST_RUN < AUDIT_RETENTION_CLEANUP_INTERVAL_SECONDS:
+        return
+    with _AUDIT_RETENTION_LOCK:
+        now = time.monotonic()
+        if now - _AUDIT_RETENTION_LAST_RUN < AUDIT_RETENTION_CLEANUP_INTERVAL_SECONDS:
+            return
+        # Mark before the delete so concurrent request threads do not all perform
+        # the same retention scan if the database is temporarily unavailable.
+        _AUDIT_RETENTION_LAST_RUN = now
+        try:
+            conn.execute("DELETE FROM audit_logs WHERE timestamp < datetime('now', '-90 days')")
+        except Exception:
+            app.logger.exception('Audit retention cleanup failed; audit logging will continue.')
+
+
 def log_action(app_name, action, details, record_type=None, record_id=None, result='success', event_type='application', company_id=None, username=None):
     """Write an enhanced audit log entry.
 
@@ -2684,7 +2731,7 @@ def log_action(app_name, action, details, record_type=None, record_id=None, resu
             pass
     conn = get_db_connection()
     try:
-        conn.execute("DELETE FROM audit_logs WHERE timestamp < datetime('now', '-90 days')")
+        _maybe_cleanup_audit_logs(conn)
         conn.execute(
             """INSERT INTO audit_logs
                (company_id, username, app_name, action, details, timestamp, ip_address, user_agent, record_type, record_id, result, event_type)
@@ -4291,6 +4338,32 @@ def _rate_limit_response(retry_after):
         resp = Response('Too many attempts. Please wait a few minutes and try again.', status=429)
     resp.headers['Retry-After'] = str(retry_after)
     return resp
+
+
+@app.before_request
+def _start_request_performance_timer():
+    g.easyadmin_request_started_at = time.perf_counter()
+
+
+@app.after_request
+def _record_request_performance(response):
+    started = getattr(g, 'easyadmin_request_started_at', None)
+    if started is None:
+        return response
+    elapsed = max(0.0, time.perf_counter() - started)
+    try:
+        response.headers['Server-Timing'] = f'app;dur={elapsed * 1000:.1f}'
+    except Exception:
+        pass
+    if (elapsed >= SLOW_REQUEST_LOG_SECONDS
+            and request.endpoint != 'static'
+            and request.path != '/health'):
+        app.logger.warning(
+            'Slow request %.3fs method=%s path=%s endpoint=%s status=%s company_id=%s username=%s',
+            elapsed, request.method, request.path, request.endpoint, response.status_code,
+            session.get('company_id'), session.get('username')
+        )
+    return response
 
 
 @app.before_request
@@ -9236,13 +9309,54 @@ def generate_holidays():
 
 @app.route('/admin/audit_logs', methods=['GET'])
 def get_audit_logs():
-    if not session.get('is_superadmin') and not session.get('is_company_admin'): return "Forbidden", 403
+    if not session.get('is_superadmin') and not session.get('is_company_admin'):
+        return "Forbidden", 403
+
+    # Keyset pagination keeps the audit trail fast even when a tenant has many
+    # thousands of rows.  Fetch one extra row so the UI knows whether to offer
+    # a Load More button without running an expensive COUNT(*).
+    try:
+        limit = int(request.args.get('limit') or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(25, min(limit, 250))
+    try:
+        before_id = int(request.args.get('before_id')) if request.args.get('before_id') else None
+    except (TypeError, ValueError):
+        before_id = None
+
     conn = get_db_connection()
-    logs = conn.execute('''SELECT * FROM audit_logs 
-                           WHERE company_id=? AND timestamp >= datetime('now', '-90 days') 
-                           ORDER BY timestamp DESC''', (session['company_id'],)).fetchall()
-    conn.close()
-    return jsonify([dict(l) for l in logs])
+    try:
+        params = [session['company_id']]
+        where_before = ''
+        if before_id:
+            where_before = ' AND id < ?'
+            params.append(before_id)
+        params.append(limit + 1)
+        rows = conn.execute(
+            f'''SELECT id, company_id, username, app_name, action, details, timestamp,
+                       ip_address, user_agent, record_type, record_id, result, event_type
+                FROM audit_logs
+                WHERE company_id=?
+                  AND timestamp >= datetime('now', '-90 days')
+                  {where_before}
+                ORDER BY id DESC
+                LIMIT ?''',
+            tuple(params)
+        ).fetchall()
+    finally:
+        conn.close()
+
+    has_more = len(rows) > limit
+    visible_rows = rows[:limit]
+    logs = [dict(row) for row in visible_rows]
+    next_before_id = logs[-1]['id'] if has_more and logs else None
+    return jsonify({
+        'logs': logs,
+        'has_more': has_more,
+        'next_before_id': next_before_id,
+        'page_size': limit
+    })
 
 @app.route('/admin/switch_company', methods=['POST'])
 def switch_company():

@@ -6,12 +6,111 @@ connect to Supabase PostgreSQL when DATABASE_URL is configured.
 import os
 import re
 import sqlite3
+import threading
+import time
+import atexit
 from collections.abc import Mapping
 from datetime import date, datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 POSTGRES_ENV_KEYS = ("DATABASE_URL", "SUPABASE_DATABASE_URL", "POSTGRES_URL")
+
+
+# PostgreSQL connections are pooled per Gunicorn worker process.  The app opens
+# and closes database handles frequently, so reusing TCP/SSL connections removes
+# a large amount of connection setup latency without changing caller behaviour.
+_POSTGRES_POOL = None
+_POSTGRES_POOL_DSN = None
+_POSTGRES_POOL_LOCK = threading.Lock()
+
+
+def _env_int(name, default, minimum=1, maximum=100):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(minimum, min(maximum, value))
+
+
+def _env_float(name, default, minimum=0.05, maximum=30.0):
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = float(default)
+    return max(minimum, min(maximum, value))
+
+
+def _get_postgres_pool(dsn):
+    global _POSTGRES_POOL, _POSTGRES_POOL_DSN
+    with _POSTGRES_POOL_LOCK:
+        if _POSTGRES_POOL is not None and _POSTGRES_POOL_DSN == dsn:
+            return _POSTGRES_POOL
+        if _POSTGRES_POOL is not None:
+            try:
+                _POSTGRES_POOL.closeall()
+            except Exception:
+                pass
+            _POSTGRES_POOL = None
+        try:
+            from psycopg2.pool import ThreadedConnectionPool
+        except ImportError as exc:
+            raise RuntimeError("psycopg2-binary is required when DATABASE_URL is set.") from exc
+        min_conn = _env_int('EASYADMIN_DB_POOL_MIN', 1, minimum=1, maximum=20)
+        max_conn = _env_int('EASYADMIN_DB_POOL_MAX', 8, minimum=min_conn, maximum=50)
+        _POSTGRES_POOL = ThreadedConnectionPool(min_conn, max_conn, dsn=dsn)
+        _POSTGRES_POOL_DSN = dsn
+        return _POSTGRES_POOL
+
+
+def _checkout_postgres_connection(dsn):
+    pool = _get_postgres_pool(dsn)
+    deadline = time.monotonic() + _env_float('EASYADMIN_DB_POOL_WAIT_SECONDS', 3.0)
+    while True:
+        try:
+            raw_conn = pool.getconn()
+            break
+        except Exception as exc:
+            # psycopg2's ThreadedConnectionPool raises immediately when all
+            # connections are busy.  Wait briefly so a request does not fail
+            # merely because another thread is finishing a query.
+            if time.monotonic() >= deadline or 'pool exhausted' not in str(exc).lower():
+                raise
+            time.sleep(0.025)
+    try:
+        if raw_conn.closed:
+            pool.putconn(raw_conn, close=True)
+            return _checkout_postgres_connection(dsn)
+        # A previous explicit employee/import transaction may have temporarily
+        # disabled autocommit.  Every checkout starts from the app's normal
+        # autocommit state.
+        if not raw_conn.autocommit:
+            try:
+                raw_conn.rollback()
+            except Exception:
+                pass
+            raw_conn.autocommit = True
+        return raw_conn, pool
+    except Exception:
+        try:
+            pool.putconn(raw_conn, close=True)
+        except Exception:
+            pass
+        raise
+
+
+def _close_postgres_pool():
+    global _POSTGRES_POOL
+    with _POSTGRES_POOL_LOCK:
+        if _POSTGRES_POOL is not None:
+            try:
+                _POSTGRES_POOL.closeall()
+            except Exception:
+                pass
+            _POSTGRES_POOL = None
+
+
+atexit.register(_close_postgres_pool)
 
 
 def get_database_url():
@@ -135,6 +234,10 @@ class PgCursor:
         self.lastrowid = None
         self.rowcount = -1
         self.description = None
+        try:
+            connection._open_cursors.append(self)
+        except Exception:
+            pass
 
     def execute(self, sql, params=None):
         translated = translate_sql(sql)
@@ -177,15 +280,18 @@ class PgCursor:
             self._cursor.close()
         except Exception:
             pass
+        try:
+            self.connection._open_cursors.remove(self)
+        except Exception:
+            pass
 
 
 class PgConnection:
     def __init__(self, dsn):
-        try:
-            import psycopg2
-        except ImportError as exc:
-            raise RuntimeError("psycopg2-binary is required when DATABASE_URL is set.") from exc
-        self._conn = psycopg2.connect(_normalise_postgres_url(dsn))
+        normalised_dsn = _normalise_postgres_url(dsn)
+        self._conn, self._pool = _checkout_postgres_connection(normalised_dsn)
+        self._closed = False
+        self._open_cursors = []
         # The legacy app catches migration/introspection errors in many places.
         # Autocommit avoids leaving PostgreSQL transactions in an aborted state.
         self._conn.autocommit = True
@@ -215,7 +321,40 @@ class PgConnection:
             pass
 
     def close(self):
-        self._conn.close()
+        if self._closed:
+            return
+        self._closed = True
+        close_physical = False
+        # Close any cursors the legacy sqlite-style call sites left open before
+        # the underlying PostgreSQL connection is returned to the pool.
+        for cursor in list(self._open_cursors):
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        self._open_cursors.clear()
+        try:
+            # Explicit write transactions temporarily disable autocommit.
+            # Never return an open/aborted transaction to another request.
+            if not self._conn.autocommit:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    close_physical = True
+                try:
+                    self._conn.autocommit = True
+                except Exception:
+                    close_physical = True
+            if self._conn.closed:
+                close_physical = True
+        finally:
+            try:
+                self._pool.putconn(self._conn, close=close_physical)
+            except Exception:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
 
 
 def connect_sqlite(database_path):
