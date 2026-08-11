@@ -763,8 +763,13 @@
                         </div>
                     </div>
                     <div class="mb-3">
+                        <label class="form-label fw-bold small">Notes</label>
+                        <textarea id="editLeaveNotes" class="form-control border-warning" rows="3" maxlength="4000" placeholder="Capture any relevant leave notes"></textarea>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label fw-bold small">Update Document</label>
-                        <input type="file" id="editLeaveDocUpload" class="form-control form-control-sm" accept=".pdf, image/jpeg, image/jpg">
+                        <input type="file" id="editLeaveDocUpload" class="form-control form-control-sm" accept=".pdf,.doc,.docx,.txt,image/*">
+                        <div id="editLeaveCurrentDocument" class="form-text small mt-1"></div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -799,8 +804,12 @@
                             </select>
                         </div>
                         <div class="mb-3">
+                            <label class="small fw-bold">Notes</label>
+                            <textarea class="form-control border-warning" id="leaveNotes" name="notes" rows="3" maxlength="4000" placeholder="Capture any relevant leave notes"></textarea>
+                        </div>
+                        <div class="mb-3">
                             <label class="small fw-bold">Upload Supporting Document (Optional)</label>
-                            <input type="file" class="form-control form-control-sm" id="leaveDoc" name="leave_doc" accept=".pdf, image/*">
+                            <input type="file" class="form-control form-control-sm" id="leaveDoc" name="leave_doc" accept=".pdf,.doc,.docx,.txt,image/*">
                             <div class="form-text small">e.g. Doctor's Note for Sick Leave.</div>
                         </div>
                     </form>
@@ -1993,10 +2002,17 @@
             leaveModal.show();
         }
 
-        function saveLeave() {
+        async function saveLeave() {
             const fd = new FormData(document.getElementById('leaveForm'));
             if(!fd.get('date') || !fd.get('days')) return alert("Date and Days are required.");
-            fetch('/record_leave', { method: 'POST', body: fd }).then(() => location.reload());
+            try {
+                const res = await fetch('/record_leave', { method: 'POST', body: fd });
+                const data = await res.json().catch(() => ({}));
+                if(!res.ok || data.status === 'error') throw new Error(data.message || 'Leave could not be saved.');
+                location.reload();
+            } catch(err) {
+                alert(err.message || 'Leave could not be saved.');
+            }
         }
 
         // --- UI-19 LOGIC ---
@@ -2258,9 +2274,12 @@
                 } else {
                     data.leave_records.forEach(l => { 
                         let attachmentHTML = ''; 
-                        if (l.doc) attachmentHTML = `<br><a href="/uploads/leave/${l.doc}" target="_blank" class="small text-primary text-decoration-none fw-bold">📎 View Document</a>`; 
-                        const actionsHTML = `<button class="btn btn-sm btn-outline-secondary ms-2" onclick="openEditLeave(${l.id}, '${l.date}', ${l.days}, '${l.type}')">✏️ Edit</button> <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteLeave(${l.id})">🗑️</button>`; 
-                        leaveList.innerHTML += `<li class="list-group-item py-2"><div class="d-flex justify-content-between align-items-center"><div>🏖️ ${l.date} <span class="badge bg-warning text-dark ms-1">${l.days} days (${l.type})</span>${attachmentHTML}</div><div>${actionsHTML}</div></div></li>`; 
+                        if (l.attachment_url) attachmentHTML = `<br><a href="${l.attachment_url}" target="_blank" rel="noopener" class="small text-primary text-decoration-none fw-bold">📎 View Attachment</a>`; 
+                        const notesHTML = l.notes ? `<div class="small text-muted mt-1"><strong>Notes:</strong> ${String(l.notes).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}</div>` : '';
+                        const encodedNotes = encodeURIComponent(l.notes || '');
+                        const encodedAttachmentUrl = encodeURIComponent(l.attachment_url || '');
+                        const actionsHTML = `<button class="btn btn-sm btn-outline-secondary ms-2" onclick="openEditLeave(${l.id}, '${l.date}', ${l.days}, '${l.type}', '${encodedNotes}', '${encodedAttachmentUrl}')">✏️ Edit</button> <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteLeave(${l.id})">🗑️</button>`; 
+                        leaveList.innerHTML += `<li class="list-group-item py-2"><div class="d-flex justify-content-between align-items-center"><div>🏖️ ${l.date} <span class="badge bg-warning text-dark ms-1">${l.days} days (${l.type})</span>${notesHTML}${attachmentHTML}</div><div>${actionsHTML}</div></div></li>`; 
                     }); 
                 }
                 document.getElementById('reportResults').style.display = 'block'; 
@@ -2271,8 +2290,8 @@
         function exportEmpExcel() { 
             let csv = 'SECTION: BOOKINGS WORKED\nDate,Day of Week,Client Name,Booking Notes\n'; 
             currentEmpReportData.dates_worked.forEach(r => { csv += `"${r.date}","${r.day || ''}","${r.client}"\n`; }); 
-            csv += `\nTotal Hours,${currentEmpReportData.total_hours}\n\nSECTION: LEAVE TAKEN\nDate,Days,Leave Type\n`; 
-            currentEmpReportData.leave_records.forEach(l => { csv += `"${l.date}","${l.days}","${l.type}"\n`; }); 
+            csv += `\nTotal Hours,${currentEmpReportData.total_hours}\n\nSECTION: LEAVE TAKEN\nDate,Days,Leave Type,Notes,Attachment\n`; 
+            currentEmpReportData.leave_records.forEach(l => { const esc = v => String(v || '').replace(/"/g, '""'); csv += `"${esc(l.date)}","${esc(l.days)}","${esc(l.type)}","${esc(l.notes)}","${esc(l.attachment_url)}"\n`; }); 
             csv += `\nTotal Leave Days,${currentEmpReportData.total_leave}\n`; 
             let blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' }); 
             let link = document.createElement("a"); 
@@ -2288,13 +2307,17 @@
             html2pdf().set({ margin: 0.5, filename: `Activity_Report_${document.getElementById('reportEmpNameDisplay').innerText}.pdf`, jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' } }).from(el).save(); 
         }
         
-        function openEditLeave(id, date, days, type) { 
+        function openEditLeave(id, date, days, type, encodedNotes='', encodedAttachmentUrl='') { 
             reportModal.hide(); 
             document.getElementById('editLeaveRecordId').value = id; 
             document.getElementById('editLeaveDate').value = date; 
             document.getElementById('editLeaveDays').value = days; 
             document.getElementById('editLeaveType').value = type; 
+            document.getElementById('editLeaveNotes').value = decodeURIComponent(encodedNotes || '');
             document.getElementById('editLeaveDocUpload').value = ''; 
+            const currentDoc = document.getElementById('editLeaveCurrentDocument');
+            const attachmentUrl = decodeURIComponent(encodedAttachmentUrl || '');
+            currentDoc.innerHTML = attachmentUrl ? `<a href="${attachmentUrl}" target="_blank" rel="noopener" class="text-primary fw-bold">📎 View current attachment</a>` : '<span class="text-muted">No attachment currently saved.</span>';
             editLeaveModal.show(); 
         }
         
@@ -2304,9 +2327,10 @@
             fd.append('date', document.getElementById('editLeaveDate').value); 
             fd.append('days', document.getElementById('editLeaveDays').value); 
             fd.append('leave_type', document.getElementById('editLeaveType').value); 
+            fd.append('notes', document.getElementById('editLeaveNotes').value);
             const docFile = document.getElementById('editLeaveDocUpload').files[0]; 
             if(docFile) fd.append('leave_doc', docFile); 
-            fetch('/update_leave', {method:'POST', body: fd}).then(() => location.reload()); 
+            fetch('/update_leave', {method:'POST', body: fd}).then(async res => { const data = await res.json().catch(() => ({})); if(!res.ok || data.status === 'error') throw new Error(data.message || 'Leave could not be updated.'); location.reload(); }).catch(err => alert(err.message || 'Leave could not be updated.')); 
         }
         
         function deleteLeave(id) { 

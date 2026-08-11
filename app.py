@@ -624,7 +624,7 @@ COMPANY_IMPORT_TABLES = {
     'services': ['name', 'client_price', 'company_cost'],
     'bookings': ['title', 'start', 'employee', 'booking_type', 'transport', 'booking_notes', 'overtime_hours', 'is_invoiced'],
     'expenses': ['date', 'category', 'supplier', 'description', 'amount', 'invoice_file'],
-    'leave_records': ['employee_id', 'date_taken', 'days', 'leave_type', 'document_file']
+    'leave_records': ['employee_id', 'date_taken', 'days', 'leave_type', 'notes', 'document_file']
 }
 
 
@@ -2375,7 +2375,7 @@ def init_db():
         'quotes': [('client_id', 'INTEGER')],
         'employees': [('start_date', 'TEXT'), ('inactive_date', 'TEXT'), ('gross_salary', 'REAL DEFAULT 0'), ('emp_number', 'TEXT'), ('id_passport', 'TEXT'), ('job_title', 'TEXT'), ('status', 'TEXT DEFAULT "Active"'), ('phone', 'TEXT'), ('email', 'TEXT'), ('address', 'TEXT'), ('emergency_contact', 'TEXT'), ('tax_number', 'TEXT'), ('paye_ref', 'TEXT'), ('bank_details', 'TEXT'), ('bank_name', 'TEXT'), ('account_holder', 'TEXT'), ('account_number', 'TEXT'), ('branch_code', 'TEXT'), ('account_type', 'TEXT'), ('payment_reference', 'TEXT'), ('google_event_id', 'TEXT'), ('emp_type', 'TEXT DEFAULT "Full-time (5 Days)"'), ('cv_file', 'TEXT'), ('id_file', 'TEXT'), ('contract_file', 'TEXT'), ('additional_leave', 'REAL DEFAULT 0'), ('notes', 'TEXT'), ('workday_hours', 'REAL DEFAULT 7'), ('overtime_pay_treatment', 'TEXT DEFAULT "irregular"'), ('uif_contributor', 'TEXT DEFAULT "Yes"'), ('uif_non_contributor_reason', 'TEXT'), ('uif_termination_code', 'TEXT')],
         'payslips': [('transport', 'REAL DEFAULT 0'), ('overtime', 'REAL DEFAULT 0'), ('bonus', 'REAL DEFAULT 0'), ('reimbursable_expenses', 'REAL DEFAULT 0'), ('loan_repayment', 'REAL DEFAULT 0'), ('payslip_type', 'TEXT DEFAULT "regular"'), ('adjustment_of_payslip_id', 'INTEGER'), ('adjustment_reason', 'TEXT'), ('created_at', 'TEXT')],
-        'leave_records': [('leave_type', 'TEXT DEFAULT "Annual Leave"'), ('document_file', 'TEXT')],
+        'leave_records': [('leave_type', 'TEXT DEFAULT "Annual Leave"'), ('notes', 'TEXT'), ('document_file', 'TEXT')],
         'expenses': [('invoice_file', 'TEXT')]
     }
     for t_name, cols in loose_cols.items():
@@ -2403,6 +2403,22 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_staff_leave_requests_employee ON staff_leave_requests(company_id, employee_id, start_date)')
     except sqlite3.OperationalError: pass
+    # Preserve the employee portal note on historical approved requests where the
+    # formal leave record did not previously have a notes column. Existing manual
+    # leave notes are never overwritten.
+    try:
+        conn.execute('''UPDATE leave_records
+                        SET notes=(SELECT r.reason FROM staff_leave_requests r
+                                   WHERE r.leave_record_id=leave_records.id
+                                     AND r.company_id=leave_records.company_id
+                                   LIMIT 1)
+                        WHERE COALESCE(notes, '')=''
+                          AND EXISTS (SELECT 1 FROM staff_leave_requests r
+                                      WHERE r.leave_record_id=leave_records.id
+                                        AND r.company_id=leave_records.company_id
+                                        AND COALESCE(r.reason, '')!='')''')
+    except Exception:
+        pass
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_users_staff_employee ON users(company_id, employee_id, is_staff)')
     except sqlite3.OperationalError: pass
 
@@ -5801,10 +5817,16 @@ def _build_reports_payload(report_type, filters):
                                       WHERE lr.company_id=? AND lr.date_taken BETWEEN ? AND ?
                                       ORDER BY e.name ASC, lr.date_taken ASC""", (session['company_id'], filters['start_date'], filters['end_date'])).fetchall()
             if report_type == 'leave_taken_report':
-                columns = ['Date Taken', 'Employee', 'Employee No.', 'Leave Type', 'Days', 'Document']
+                columns = ['Date Taken', 'Employee', 'Employee No.', 'Leave Type', 'Days', 'Notes', 'Attachment']
                 for lr in leave_rows:
                     d = dict(lr)
-                    rows.append([d.get('date_taken') or '', d.get('employee_name') or '', d.get('emp_number') or '', d.get('leave_type') or 'Annual Leave', _report_money(d.get('days')), 'Yes' if d.get('document_file') else 'No'])
+                    attachment = ''
+                    if d.get('document_file'):
+                        attachment = {
+                            'text': 'View attachment',
+                            'url': url_for('leave_record_attachment', leave_id=d.get('id'), _external=True)
+                        }
+                    rows.append([d.get('date_taken') or '', d.get('employee_name') or '', d.get('emp_number') or '', d.get('leave_type') or 'Annual Leave', _report_money(d.get('days')), d.get('notes') or '', attachment])
             else:
                 grouped = {}
                 for lr in leave_rows:
@@ -5834,10 +5856,16 @@ def _build_reports_payload(report_type, filters):
                                     LEFT JOIN employees e ON e.id=r.employee_id AND e.company_id=r.company_id
                                     WHERE {' AND '.join(where)}
                                     ORDER BY r.start_date ASC, e.name ASC""", params).fetchall()
-            columns = ['Employee', 'Employee No.', 'Leave Type', 'Start Date', 'End Date', 'Days', 'Status', 'Requested At', 'Reviewed By', 'Admin Note']
+            columns = ['Employee', 'Employee No.', 'Leave Type', 'Start Date', 'End Date', 'Days', 'Status', 'Employee Note', 'Requested At', 'Reviewed By', 'Admin Note', 'Attachment']
             for r in reqs:
                 d = dict(r)
-                rows.append([d.get('employee_name') or '', d.get('emp_number') or '', d.get('leave_type') or '', d.get('start_date') or '', d.get('end_date') or '', _report_money(d.get('days')), d.get('status') or 'Pending', d.get('requested_at') or '', d.get('reviewed_by') or '', d.get('admin_note') or ''])
+                attachment = ''
+                if d.get('attachment_file'):
+                    attachment = {
+                        'text': 'View attachment',
+                        'url': url_for('leave_request_attachment', request_id=d.get('id'), _external=True)
+                    }
+                rows.append([d.get('employee_name') or '', d.get('emp_number') or '', d.get('leave_type') or '', d.get('start_date') or '', d.get('end_date') or '', _report_money(d.get('days')), d.get('status') or 'Pending', d.get('reason') or '', d.get('requested_at') or '', d.get('reviewed_by') or '', d.get('admin_note') or '', attachment])
 
         elif report_type == 'dates_worked_report':
             columns = ['Date', 'Day', 'Employee', 'Client', 'Project', 'Service', 'Status']
@@ -6025,7 +6053,14 @@ def export_reports_csv(report_type):
     writer.writerow([])
     writer.writerow(payload['columns'])
     for row in payload['rows']:
-        writer.writerow(row)
+        export_row = []
+        for cell in row:
+            if isinstance(cell, dict) and cell.get('url'):
+                label = str(cell.get('text') or 'View attachment').strip()
+                export_row.append(f"{label}: {cell.get('url')}")
+            else:
+                export_row.append(cell)
+        writer.writerow(export_row)
     filename = f"Easy_Admin_{report_type}_{filters['start_date']}_to_{filters['end_date']}.csv"
     log_action('Reports', 'Exported Report', f"Exported {payload['title']} from {filters['start_date']} to {filters['end_date']}")
     response = Response(output.getvalue(), mimetype='text/csv')
@@ -7042,6 +7077,7 @@ def _staff_leave_request_dict(row, employee_name=''):
         'reason': r.get('reason') or '',
         'status': r.get('status') or 'Pending',
         'attachment_file': r.get('attachment_file') or '',
+        'attachment_url': (url_for('leave_request_attachment', request_id=r.get('id')) if r.get('attachment_file') and r.get('id') else ''),
         'requested_at': format_display_date(r.get('requested_at')),
         'reviewed_by': r.get('reviewed_by') or '',
         'reviewed_at': format_display_date(r.get('reviewed_at')),
@@ -8350,9 +8386,9 @@ def api_staff_admin_review_leave(request_id):
         new_status = 'Approved' if decision == 'Approve' else 'Declined'
         leave_record_id = req['leave_record_id'] or None
         if new_status == 'Approved' and not leave_record_id:
-            cur = conn.execute('''INSERT INTO leave_records (company_id, employee_id, date_taken, days, leave_type, document_file)
-                                  VALUES (?, ?, ?, ?, ?, ?)''',
-                               (cid, req['employee_id'], req['start_date'], req['days'], req['leave_type'], req['attachment_file']))
+            cur = conn.execute('''INSERT INTO leave_records (company_id, employee_id, date_taken, days, leave_type, notes, document_file)
+                                  VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                               (cid, req['employee_id'], req['start_date'], req['days'], req['leave_type'], req['reason'] or '', req['attachment_file']))
             leave_record_id = getattr(cur, 'lastrowid', None)
         conn.execute('''UPDATE staff_leave_requests
                         SET status=?, reviewed_by=?, reviewed_at=?, admin_note=?, leave_record_id=?
@@ -13395,33 +13431,133 @@ def delete_interview():
     log_action('HR & Payroll', 'Deleted Interview', "Removed a candidate interview record.")
     return jsonify({"status": "success"})
 
+def _save_leave_supporting_document(file_obj):
+    # Validate and save a leave supporting document with a collision-safe filename.
+    if not file_obj or not getattr(file_obj, 'filename', ''):
+        return None
+    if not is_allowed_attachment(file_obj.filename):
+        raise ValueError(f'File type not allowed: {file_obj.filename}')
+    file_obj.stream.seek(0, os.SEEK_END)
+    size = file_obj.stream.tell()
+    file_obj.stream.seek(0)
+    if size > MAX_ATTACHMENT_SIZE:
+        raise ValueError(f'File too large: {file_obj.filename}. Maximum size is 20MB.')
+    safe_original = secure_filename(file_obj.filename) or 'leave_document'
+    stored = f"leave_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_original}"
+    folder = os.path.join(app.config['UPLOAD_FOLDER'], 'leave')
+    os.makedirs(folder, exist_ok=True)
+    file_obj.save(os.path.join(folder, stored))
+    return stored
+
+
+def _leave_attachment_file_response(filename, log_detail):
+    stored = os.path.basename(str(filename or '').strip())
+    if not stored or stored != str(filename or '').strip():
+        return 'Attachment not found.', 404
+    folder = os.path.join(app.config['UPLOAD_FOLDER'], 'leave')
+    target = os.path.join(folder, stored)
+    if not os.path.isfile(target):
+        return 'Attachment file is unavailable.', 404
+    log_action('HR & Payroll', 'Viewed Leave Attachment', log_detail)
+    response = send_from_directory(folder, stored, as_attachment=False)
+    response.headers['Cache-Control'] = 'private, no-store, no-cache, must-revalidate, max-age=0'
+    return response
+
+
+@app.route('/hr/leave_records/<int:leave_id>/attachment')
+def leave_record_attachment(leave_id):
+    if not _session_has_payroll_read_access():
+        return 'Forbidden', 403
+    cid = session.get('company_id')
+    conn = get_db_connection()
+    try:
+        row = conn.execute('''SELECT lr.document_file, e.name AS employee_name
+                              FROM leave_records lr
+                              LEFT JOIN employees e ON e.id=lr.employee_id AND e.company_id=lr.company_id
+                              WHERE lr.id=? AND lr.company_id=?''', (leave_id, cid)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row['document_file']:
+        return 'Attachment not found.', 404
+    return _leave_attachment_file_response(row['document_file'], f"Leave record {leave_id} for {row['employee_name'] or 'employee'}")
+
+
+@app.route('/hr/leave_requests/<int:request_id>/attachment')
+def leave_request_attachment(request_id):
+    cid = session.get('company_id')
+    if not cid:
+        return 'Forbidden', 403
+    admin_reader = _staff_is_admin()
+    staff_reader = _staff_is_user()
+    if not (admin_reader or staff_reader):
+        return 'Forbidden', 403
+    conn = get_db_connection()
+    try:
+        row = conn.execute('''SELECT r.employee_id, r.attachment_file, e.name AS employee_name
+                              FROM staff_leave_requests r
+                              LEFT JOIN employees e ON e.id=r.employee_id AND e.company_id=r.company_id
+                              WHERE r.id=? AND r.company_id=?''', (request_id, cid)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return 'Attachment not found.', 404
+    if staff_reader and not admin_reader and int(row['employee_id'] or 0) != int(session.get('employee_id') or 0):
+        return 'Forbidden', 403
+    if not row['attachment_file']:
+        return 'Attachment not found.', 404
+    return _leave_attachment_file_response(row['attachment_file'], f"Leave request {request_id} for {row['employee_name'] or 'employee'}")
+
+
 @app.route('/record_leave', methods=['POST'])
 def record_leave():
     data, doc_file = request.form, request.files.get('leave_doc')
-    doc_filename = secure_filename(doc_file.filename) if doc_file and doc_file.filename else None
-    if doc_filename: doc_file.save(os.path.join(app.config['UPLOAD_FOLDER'], 'leave', doc_filename))
+    notes = (data.get('notes') or '').strip()[:4000]
+    try:
+        doc_filename = _save_leave_supporting_document(doc_file)
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
     conn = get_db_connection()
-    conn.execute('INSERT INTO leave_records (company_id, employee_id, date_taken, days, leave_type, document_file) VALUES (?, ?, ?, ?, ?, ?)', (session['company_id'], data.get('employee_id'), data.get('date'), data.get('days'), data.get('leave_type'), doc_filename))
-    conn.commit()
-    conn.close()
-    
-    log_action('HR & Payroll', 'Logged Leave', f"Recorded {data.get('days')} days of {data.get('leave_type')}")
-    return jsonify({"status": "success"})
+    try:
+        employee = conn.execute('SELECT id, name FROM employees WHERE id=? AND company_id=?', (data.get('employee_id'), session['company_id'])).fetchone()
+        if not employee:
+            return jsonify({'status': 'error', 'message': 'Employee not found for this company.'}), 404
+        conn.execute('''INSERT INTO leave_records (company_id, employee_id, date_taken, days, leave_type, notes, document_file)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                     (session['company_id'], data.get('employee_id'), data.get('date'), data.get('days'), data.get('leave_type'), notes, doc_filename))
+        conn.commit()
+    finally:
+        conn.close()
+    log_action('HR & Payroll', 'Logged Leave', f"Recorded {data.get('days')} days of {data.get('leave_type')} for {employee['name']}")
+    return jsonify({'status': 'success', 'message': 'Leave recorded successfully.'})
+
 
 @app.route('/update_leave', methods=['POST'])
 def update_leave():
     data, doc_file = request.form, request.files.get('leave_doc')
+    notes = (data.get('notes') or '').strip()[:4000]
     conn = get_db_connection()
-    if doc_file and doc_file.filename:
-        doc_filename = secure_filename(doc_file.filename)
-        doc_file.save(os.path.join(app.config['UPLOAD_FOLDER'], 'leave', doc_filename))
-        conn.execute('UPDATE leave_records SET date_taken=?, days=?, leave_type=?, document_file=? WHERE id=? AND company_id=?', (data.get('date'), data.get('days'), data.get('leave_type'), doc_filename, data.get('leave_id'), session['company_id']))
-    else: conn.execute('UPDATE leave_records SET date_taken=?, days=?, leave_type=? WHERE id=? AND company_id=?', (data.get('date'), data.get('days'), data.get('leave_type'), data.get('leave_id'), session['company_id']))
-    conn.commit()
-    conn.close()
-    
+    try:
+        existing = conn.execute('SELECT id, document_file FROM leave_records WHERE id=? AND company_id=?', (data.get('leave_id'), session['company_id'])).fetchone()
+        if not existing:
+            return jsonify({'status': 'error', 'message': 'Leave record not found.'}), 404
+        if doc_file and doc_file.filename:
+            try:
+                doc_filename = _save_leave_supporting_document(doc_file)
+            except ValueError as exc:
+                return jsonify({'status': 'error', 'message': str(exc)}), 400
+            conn.execute('''UPDATE leave_records SET date_taken=?, days=?, leave_type=?, notes=?, document_file=?
+                            WHERE id=? AND company_id=?''',
+                         (data.get('date'), data.get('days'), data.get('leave_type'), notes, doc_filename, data.get('leave_id'), session['company_id']))
+        else:
+            conn.execute('''UPDATE leave_records SET date_taken=?, days=?, leave_type=?, notes=?
+                            WHERE id=? AND company_id=?''',
+                         (data.get('date'), data.get('days'), data.get('leave_type'), notes, data.get('leave_id'), session['company_id']))
+        conn.commit()
+    finally:
+        conn.close()
     log_action('HR & Payroll', 'Updated Leave', f"Modified a leave record ({data.get('days')} days).")
-    return jsonify({"status": "success"})
+    return jsonify({'status': 'success', 'message': 'Leave updated successfully.'})
+
 
 @app.route('/delete_leave', methods=['POST'])
 def delete_leave():
@@ -13429,9 +13565,9 @@ def delete_leave():
     conn.execute('DELETE FROM leave_records WHERE id=? AND company_id=?', (request.get_json().get('leave_id'), session['company_id']))
     conn.commit()
     conn.close()
-    
-    log_action('HR & Payroll', 'Deleted Leave', "Deleted a leave record entry.")
-    return jsonify({"status": "success"})
+    log_action('HR & Payroll', 'Deleted Leave', 'Deleted a leave record entry.')
+    return jsonify({'status': 'success'})
+
 
 @app.route('/api/save_payslip', methods=['POST'])
 def save_payslip():
@@ -14672,7 +14808,15 @@ def generate_report():
         except Exception:
             weekday = ''
         dates_worked.append({"date": work_date, "day": weekday, "client": b['title'], "notes": b['booking_notes'] or ""})
-    leave_records = [{"id": l['id'], "date": l['date_taken'], "days": l['days'], "type": l['leave_type'], "doc": l['document_file']} for l in leave]
+    leave_records = [{
+        "id": l['id'],
+        "date": l['date_taken'],
+        "days": l['days'],
+        "type": l['leave_type'],
+        "notes": (dict(l).get('notes') or ''),
+        "doc": l['document_file'],
+        "attachment_url": (url_for('leave_record_attachment', leave_id=l['id']) if l['document_file'] else '')
+    } for l in leave]
     return jsonify({"total_hours": round(len(dates_worked) * workday_hours, 2), "dates_worked": dates_worked, "total_leave": sum(l['days'] for l in leave_records), "leave_records": leave_records})
 
 # ==========================================================

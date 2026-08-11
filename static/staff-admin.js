@@ -52,7 +52,7 @@
             <div class="item-top">
                 <div>
                     <div class="row-title">${safe(r.employee_name)} — ${safe(r.leave_type)}</div>
-                    <div class="row-meta">${safe(fmtDate(r.start_date))} to ${safe(fmtDate(r.end_date))} • ${safe(r.days)} day(s)<br>${r.reason ? safe(r.reason) : 'No reason supplied.'}${r.admin_note ? '<br>Admin note: ' + safe(r.admin_note) : ''}</div>
+                    <div class="row-meta">${safe(fmtDate(r.start_date))} to ${safe(fmtDate(r.end_date))} • ${safe(r.days)} day(s)<br>${r.reason ? safe(r.reason) : 'No reason supplied.'}${r.admin_note ? '<br>Admin note: ' + safe(r.admin_note) : ''}${r.attachment_url ? '<br><a class="fw-bold text-primary" href="' + safe(r.attachment_url) + '" target="_blank" rel="noopener">📎 View attachment</a>' : ''}</div>
                 </div>
                 <span class="badge ${statusClass(r.status)}">${safe(r.status)}</span>
             </div>

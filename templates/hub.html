@@ -626,13 +626,23 @@
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body bg-light">
-                    <button class="btn btn-primary mb-3 fw-bold" onclick="openCompanyForm(null)">+ Add New Company</button>
+                    <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
+                        <button class="btn btn-primary fw-bold" onclick="openCompanyForm(null)">+ Add New Company</button>
+                        <div class="input-group" style="max-width: 430px;">
+                            <span class="input-group-text">🔎</span>
+                            <input type="search" id="companySearchInput" class="form-control" placeholder="Search company name, ID, industry or app" oninput="renderCompaniesTable()" autocomplete="off">
+                            <button type="button" class="btn btn-outline-secondary" onclick="clearCompanySearch()">Clear</button>
+                        </div>
+                    </div>
+                    <div id="companySearchStatus" class="small text-muted mb-2"></div>
+                    <div class="table-responsive">
                     <table class="table table-hover bg-white border shadow-sm">
                         <thead class="table-light">
                             <tr><th>ID</th><th>Company Name</th><th>Industry</th><th>App Licensing</th><th>Website Integration</th><th>Actions</th></tr>
                         </thead>
                         <tbody id="companiesTableBody"></tbody>
                     </table>
+                    </div>
                 </div>
             </div>
         </div>
@@ -782,13 +792,23 @@
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body bg-light">
-                    <button class="btn btn-primary mb-3 fw-bold" onclick="openUserForm(null)">+ Add New User</button>
+                    <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
+                        <button class="btn btn-primary fw-bold" onclick="openUserForm(null)">+ Add New User</button>
+                        <div class="input-group" style="max-width: 460px;">
+                            <span class="input-group-text">🔎</span>
+                            <input type="search" id="userAccountSearchInput" class="form-control" placeholder="Search username, email, company, role or app" oninput="renderUsersTable()" autocomplete="off">
+                            <button type="button" class="btn btn-outline-secondary" onclick="clearUserAccountSearch()">Clear</button>
+                        </div>
+                    </div>
+                    <div id="userAccountSearchStatus" class="small text-muted mb-2"></div>
+                    <div class="table-responsive">
                     <table class="table table-hover bg-white border shadow-sm align-middle">
                         <thead class="table-light">
                             <tr><th>Username</th><th>Email</th><th>Assigned Company</th><th>Role</th><th>App Permissions</th><th>Actions</th></tr>
                         </thead>
                         <tbody id="usersTableBody"></tbody>
                     </table>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1051,6 +1071,10 @@
             }
             return fetch(url, options);
         }
+
+        function adminSearchNormalise(value) {
+            return String(value == null ? '' : value).toLowerCase().trim();
+        }
         
         const companyHasBooking = {{ 'true' if session.get('comp_can_booking') else 'false' }};
         const companyHasFinance = {{ 'true' if session.get('comp_can_finance') else 'false' }};
@@ -1060,6 +1084,7 @@
         const companyHasFranchiseReports = {{ 'true' if session.get('comp_can_franchise_reports') else 'false' }};
 
         let companiesList = [];
+        let usersList = [];
         let templateUploadModal = null;
 
         document.addEventListener('DOMContentLoaded', function() {
@@ -1452,6 +1477,57 @@
             }
         });
 
+        function companySearchText(c) {
+            const apps = [];
+            if(c.can_booking) apps.push('booking operations');
+            if(c.can_invoicing) apps.push('invoicing quotes');
+            if(c.can_finance) apps.push('finance');
+            if(c.can_accounting) apps.push('accounting');
+            if(c.can_payroll) apps.push('hr payroll');
+            if(c.can_franchise_reports) apps.push('franchise reports');
+            return [c.id, c.name, c.industry_template, apps.join(' '), c.website_integration_enabled ? 'website integration enabled' : 'website integration disabled'].filter(Boolean).join(' ').toLowerCase();
+        }
+
+        function renderCompaniesTable() {
+            const tbody = document.getElementById('companiesTableBody');
+            if(!tbody) return;
+            const searchInput = document.getElementById('companySearchInput');
+            const query = adminSearchNormalise(searchInput ? searchInput.value : '');
+            const filtered = companiesList.filter(c => !query || companySearchText(c).includes(query));
+            tbody.innerHTML = '';
+            filtered.forEach(c => {
+                let apps = [];
+                if(c.can_booking) apps.push('Booking');
+                if(c.can_invoicing) apps.push('Invoicing');
+                if(c.can_finance) apps.push('Finance');
+                if(c.can_accounting) apps.push('Accounting');
+                if(c.can_payroll) apps.push('Payroll');
+                if(c.can_franchise_reports) apps.push('Franchise Reports');
+                tbody.innerHTML += `
+                    <tr>
+                        <td>${c.id}</td>
+                        <td><strong>${c.name}</strong></td>
+                        <td><span class="badge bg-dark">${c.industry_template || 'Cleaning'}</span></td>
+                        <td><span class="text-success fw-bold small">${apps.join(', ') || 'None'}</span></td>
+                        <td>${c.website_integration_enabled ? '<span class="badge bg-success">Enabled</span>' : (c.website_integration_key_id ? '<span class="badge bg-secondary">Disabled</span>' : '<span class="badge bg-light text-dark border">Not configured</span>')}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-primary me-1" onclick='openCompanyForm(${JSON.stringify(c).replace(/'/g, "&#39;")})'>Edit</button>
+                            <button class="btn btn-sm btn-outline-dark" onclick='openTenantSetupWizard(${c.id})'>Setup Wizard</button>
+                        </td>
+                    </tr>`;
+            });
+            if(!filtered.length) tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No companies match your search.</td></tr>';
+            const status = document.getElementById('companySearchStatus');
+            if(status) status.textContent = query ? `Showing ${filtered.length} of ${companiesList.length} companies` : `${companiesList.length} companies`;
+        }
+
+        function clearCompanySearch() {
+            const input = document.getElementById('companySearchInput');
+            if(input) input.value = '';
+            renderCompaniesTable();
+            if(input) input.focus();
+        }
+
         function fetchCompanies() {
             adminFetch('/admin/companies').then(r => r.json()).then(data => {
                 companiesList = data;
@@ -1477,34 +1553,7 @@
                         uCompany.appendChild(opt);
                     });
                 }
-
-                const tbody = document.getElementById('companiesTableBody');
-                if(tbody) {
-                    tbody.innerHTML = '';
-                    data.forEach(c => {
-                        let apps = [];
-                        if(c.can_booking) apps.push('Booking');
-                        if(c.can_invoicing) apps.push('Invoicing');
-                        if(c.can_finance) apps.push('Finance');
-                        if(c.can_accounting) apps.push('Accounting');
-                        if(c.can_payroll) apps.push('Payroll');
-                        if(c.can_franchise_reports) apps.push('Franchise Reports');
-
-                        tbody.innerHTML += `
-                            <tr>
-                                <td>${c.id}</td>
-                                <td><strong>${c.name}</strong></td>
-                                <td><span class="badge bg-dark">${c.industry_template || 'Cleaning'}</span></td>
-                                <td><span class="text-success fw-bold small">${apps.join(', ') || 'None'}</span></td>
-                                <td>${c.website_integration_enabled ? '<span class="badge bg-success">Enabled</span>' : (c.website_integration_key_id ? '<span class="badge bg-secondary">Disabled</span>' : '<span class="badge bg-light text-dark border">Not configured</span>')}</td>
-                                <td>
-                                    <button class="btn btn-sm btn-outline-primary me-1" onclick='openCompanyForm(${JSON.stringify(c).replace(/'/g, "&#39;")})'>Edit</button>
-                                    <button class="btn btn-sm btn-outline-dark" onclick='openTenantSetupWizard(${c.id})'>Setup Wizard</button>
-                                </td>
-                            </tr>
-                        `;
-                    });
-                }
+                renderCompaniesTable();
             });
         }
 
@@ -2208,47 +2257,76 @@
             setupPermissionPair('userCanHiring', 'userCanHiringReadonly');
         });
 
+        function userSearchText(u) {
+            const roles = [u.is_superadmin ? 'superadmin' : '', u.is_company_admin ? 'company admin' : (!u.is_superadmin ? 'staff' : '')];
+            const apps = [];
+            if(u.can_booking || u.can_booking_readonly) apps.push('booking operations');
+            if(u.can_invoicing || u.can_invoicing_readonly) apps.push('invoicing quotes');
+            if(u.can_finance || u.can_finance_readonly) apps.push('finance');
+            if(u.can_accounting || u.can_accounting_readonly) apps.push('accounting');
+            if(u.can_payroll || u.can_payroll_readonly) apps.push('hr payroll employee admin');
+            if(u.can_hiring || u.can_hiring_readonly) apps.push('hiring interviews');
+            if(u.can_franchise_reports) apps.push('franchise reports');
+            return [u.username, u.email, u.company_name, u.company_id, roles.join(' '), apps.join(' ')].filter(Boolean).join(' ').toLowerCase();
+        }
+
+        function renderUsersTable() {
+            const tbody = document.getElementById('usersTableBody');
+            if(!tbody) return;
+            const searchInput = document.getElementById('userAccountSearchInput');
+            const query = adminSearchNormalise(searchInput ? searchInput.value : '');
+            const filtered = usersList.filter(u => !query || userSearchText(u).includes(query));
+            tbody.innerHTML = '';
+            filtered.forEach(u => {
+                let roles = [];
+                if(u.is_superadmin) roles.push('<span class="badge bg-warning text-dark">Superadmin</span>');
+                else if(u.is_company_admin) roles.push('<span class="badge bg-danger">Company Admin</span>');
+                else roles.push('<span class="badge bg-secondary">Staff</span>');
+
+                let apps = [];
+                function addAppBadge(fullFlag, readFlag, fullLabel, readLabel, badgeClass) {
+                    if(fullFlag) apps.push(`<span class="badge ${badgeClass}">${fullLabel}</span>`);
+                    else if(readFlag) apps.push(`<span class="badge bg-secondary">${readLabel} Read Only</span>`);
+                }
+                addAppBadge(u.can_booking, u.can_booking_readonly, 'Booking', 'Booking', 'bg-primary');
+                addAppBadge(u.can_invoicing, u.can_invoicing_readonly, 'Invoicing', 'Invoicing', 'bg-info text-dark');
+                addAppBadge(u.can_finance, u.can_finance_readonly, 'Finance', 'Finance', 'bg-warning text-dark');
+                addAppBadge(u.can_accounting, u.can_accounting_readonly, 'Accounting', 'Accounting', 'bg-dark');
+                addAppBadge(u.can_payroll, u.can_payroll_readonly, 'Employee Admin + Payroll', 'Employee Admin + Payroll', 'bg-success');
+                addAppBadge(u.can_hiring, u.can_hiring_readonly, 'Hiring', 'Hiring', 'bg-primary');
+                if(u.can_franchise_reports && u.company_can_franchise_reports) apps.push('<span class="badge bg-primary">Franchise Reports</span>');
+                else if(u.can_franchise_reports && !u.company_can_franchise_reports) apps.push('<span class="badge bg-warning text-dark">Franchise Reports Disabled at Company</span>');
+
+                let actions = u.is_superadmin ? '' : `
+                    <button class="btn btn-sm btn-outline-primary fw-bold" onclick='openUserForm(${JSON.stringify(u).replace(/'/g, "&#39;")})'>Edit</button>
+                    <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteUser(${u.id})">Del</button>`;
+
+                tbody.innerHTML += `
+                    <tr>
+                        <td><strong>${u.username}</strong></td>
+                        <td>${u.email || '<span class="text-muted small">Not set</span>'}</td>
+                        <td>${u.company_name || 'N/A'}</td>
+                        <td>${roles.join(' ')}</td>
+                        <td>${apps.join(' ') || '<span class="text-muted small">No Access</span>'}</td>
+                        <td>${actions}</td>
+                    </tr>`;
+            });
+            if(!filtered.length) tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No user accounts match your search.</td></tr>';
+            const status = document.getElementById('userAccountSearchStatus');
+            if(status) status.textContent = query ? `Showing ${filtered.length} of ${usersList.length} users` : `${usersList.length} users`;
+        }
+
+        function clearUserAccountSearch() {
+            const input = document.getElementById('userAccountSearchInput');
+            if(input) input.value = '';
+            renderUsersTable();
+            if(input) input.focus();
+        }
+
         function openUsersModal() {
             adminFetch('/admin/users').then(r => r.json()).then(data => {
-                const tbody = document.getElementById('usersTableBody');
-                if(!tbody) return;
-                tbody.innerHTML = '';
-                data.forEach(u => {
-                    let roles = [];
-                    if(u.is_superadmin) roles.push('<span class="badge bg-warning text-dark">Superadmin</span>');
-                    else if(u.is_company_admin) roles.push('<span class="badge bg-danger">Company Admin</span>');
-                    else roles.push('<span class="badge bg-secondary">Staff</span>');
-
-                    let apps = [];
-                    function addAppBadge(fullFlag, readFlag, fullLabel, readLabel, badgeClass) {
-                        if(fullFlag) apps.push(`<span class="badge ${badgeClass}">${fullLabel}</span>`);
-                        else if(readFlag) apps.push(`<span class="badge bg-secondary">${readLabel} Read Only</span>`);
-                    }
-                    addAppBadge(u.can_booking, u.can_booking_readonly, 'Booking', 'Booking', 'bg-primary');
-                    addAppBadge(u.can_invoicing, u.can_invoicing_readonly, 'Invoicing', 'Invoicing', 'bg-info text-dark');
-                    addAppBadge(u.can_finance, u.can_finance_readonly, 'Finance', 'Finance', 'bg-warning text-dark');
-                    addAppBadge(u.can_accounting, u.can_accounting_readonly, 'Accounting', 'Accounting', 'bg-dark');
-                    addAppBadge(u.can_payroll, u.can_payroll_readonly, 'Employee Admin + Payroll', 'Employee Admin + Payroll', 'bg-success');
-                    addAppBadge(u.can_hiring, u.can_hiring_readonly, 'Hiring', 'Hiring', 'bg-primary');
-                    if(u.can_franchise_reports && u.company_can_franchise_reports) apps.push('<span class="badge bg-primary">Franchise Reports</span>');
-                    else if(u.can_franchise_reports && !u.company_can_franchise_reports) apps.push('<span class="badge bg-warning text-dark">Franchise Reports Disabled at Company</span>');
-
-                    let actions = u.is_superadmin ? '' : `
-                        <button class="btn btn-sm btn-outline-primary fw-bold" onclick='openUserForm(${JSON.stringify(u).replace(/'/g, "&#39;")})'>Edit</button>
-                        <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteUser(${u.id})">Del</button>
-                    `;
-
-                    tbody.innerHTML += `
-                        <tr>
-                            <td><strong>${u.username}</strong></td>
-                            <td>${u.email || '<span class="text-muted small">Not set</span>'}</td>
-                            <td>${u.company_name || 'N/A'}</td>
-                            <td>${roles.join(' ')}</td>
-                            <td>${apps.join(' ') || '<span class="text-muted small">No Access</span>'}</td>
-                            <td>${actions}</td>
-                        </tr>
-                    `;
-                });
+                usersList = data;
+                renderUsersTable();
                 usersModal.show();
             });
         }

@@ -255,6 +255,10 @@ function renderReport(payload) {
     }
     tbody.innerHTML = payload.rows.map(row => '<tr>' + row.map((cell, idx) => {
         const columnName = (payload.columns || [])[idx] || '';
+        if (cell && typeof cell === 'object' && cell.url) {
+            const label = cell.text || 'View attachment';
+            return `<td><a href="${escapeHtml(cell.url)}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-primary fw-bold">📎 ${escapeHtml(label)}</a></td>`;
+        }
         const text = moneyMaybe(cell, columnName);
         const longClass = String(text || '').length > 55 ? ' class="long-text"' : '';
         return `<td${longClass}>${escapeHtml(text)}</td>`;
