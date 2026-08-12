@@ -451,16 +451,16 @@
                     </div>
 
                     <div id="bulkStep3" style="display:none;">
-                        <p class="text-muted small mb-3">The system will automatically generate a booking for every matching day of the week between your Start and End dates.</p>
+                        <p class="text-muted small mb-3">The system will automatically generate bookings on the selected days between your Start and End dates. Enable <strong>Every second week</strong> for a fortnightly schedule.</p>
                         
                         <div class="row mb-3">
                             <div class="col-md-6">
                                 <label class="small fw-bold">Start Date</label>
-                                <input type="date" id="bulkStartDate" class="form-control border-dark">
+                                <input type="date" id="bulkStartDate" class="form-control border-dark" onchange="updateBulkSchedulePreview()">
                             </div>
                             <div class="col-md-6">
                                 <label class="small fw-bold">End Date</label>
-                                <input type="date" id="bulkEndDate" class="form-control border-dark">
+                                <input type="date" id="bulkEndDate" class="form-control border-dark" onchange="updateBulkSchedulePreview()">
                             </div>
                         </div>
                         
@@ -494,14 +494,29 @@
                         <div class="mb-3 bg-white p-3 border rounded border-info">
                             <label class="form-label fw-bold text-info-emphasis small mb-2">Select {{ booking_label }} Days</label>
                             <div class="d-flex flex-wrap gap-3">
-                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="0" id="bDay0"><label class="form-check-label small" for="bDay0">Monday</label></div>
-                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="1" id="bDay1"><label class="form-check-label small" for="bDay1">Tuesday</label></div>
-                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="2" id="bDay2"><label class="form-check-label small" for="bDay2">Wednesday</label></div>
-                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="3" id="bDay3"><label class="form-check-label small" for="bDay3">Thursday</label></div>
-                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="4" id="bDay4"><label class="form-check-label small" for="bDay4">Friday</label></div>
-                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="5" id="bDay5"><label class="form-check-label small" for="bDay5">Saturday</label></div>
-                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="6" id="bDay6"><label class="form-check-label small" for="bDay6">Sunday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="0" id="bDay0" onchange="updateBulkSchedulePreview()"><label class="form-check-label small" for="bDay0">Monday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="1" id="bDay1" onchange="updateBulkSchedulePreview()"><label class="form-check-label small" for="bDay1">Tuesday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="2" id="bDay2" onchange="updateBulkSchedulePreview()"><label class="form-check-label small" for="bDay2">Wednesday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="3" id="bDay3" onchange="updateBulkSchedulePreview()"><label class="form-check-label small" for="bDay3">Thursday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="4" id="bDay4" onchange="updateBulkSchedulePreview()"><label class="form-check-label small" for="bDay4">Friday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="5" id="bDay5" onchange="updateBulkSchedulePreview()"><label class="form-check-label small" for="bDay5">Saturday</label></div>
+                                <div class="form-check"><input class="form-check-input bulk-day" type="checkbox" value="6" id="bDay6" onchange="updateBulkSchedulePreview()"><label class="form-check-label small" for="bDay6">Sunday</label></div>
                             </div>
+                            <hr class="my-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="bulkEverySecondWeek" onchange="updateBulkSchedulePreview()">
+                                <label class="form-check-label fw-bold" for="bulkEverySecondWeek">Every second week</label>
+                            </div>
+                            <div class="form-text">When enabled, the first selected day on or after the Start Date anchors the schedule, then the selected days repeat every 2 weeks.</div>
+                        </div>
+
+                        <div class="mb-3 border rounded p-3 bg-light" id="bulkSchedulePreview" aria-live="polite">
+                            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                                <span class="fw-bold">Schedule Preview</span>
+                                <span class="badge text-bg-secondary" id="bulkScheduleFrequency">Every week</span>
+                            </div>
+                            <div class="small text-muted" id="bulkSchedulePreviewText">Select one or more days to preview the schedule.</div>
+                            <div class="small mt-2" id="bulkSchedulePreviewDates"></div>
                         </div>
 
                         <div class="mb-3">
@@ -2029,6 +2044,9 @@
             const bulkProject = document.getElementById('bulkProject');
             if (bulkProject) { bulkProject.value = ''; filterProjectSelectByClient('bulkProject', selectedBulkClientId); }
             document.querySelectorAll('.bulk-day').forEach(cb => cb.checked = false);
+            const everySecondWeek = document.getElementById('bulkEverySecondWeek');
+            if (everySecondWeek) everySecondWeek.checked = false;
+            updateBulkSchedulePreview();
             
             updateBulkUI();
             bulkBookingModal.show();
@@ -2096,6 +2114,102 @@
             return values;
         }
 
+        function parseBulkLocalDate(dateText) {
+            if (!dateText || !/^\d{4}-\d{2}-\d{2}$/.test(dateText)) return null;
+            const [year, month, day] = dateText.split('-').map(Number);
+            const parsed = new Date(year, month - 1, day);
+            if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) return null;
+            return parsed;
+        }
+
+        function bulkMondayWeekday(dateValue) {
+            return (dateValue.getDay() + 6) % 7; // Monday=0 ... Sunday=6
+        }
+
+        function generateBulkPreviewDates(startDateText, endDateText, selectedDays, recurrenceWeeks) {
+            const start = parseBulkLocalDate(startDateText);
+            const end = parseBulkLocalDate(endDateText);
+            if (!start || !end || start > end || selectedDays.length === 0) return [];
+
+            const allowedDays = new Set(selectedDays.map(Number));
+            let firstMatch = null;
+            const probe = new Date(start);
+            while (probe <= end) {
+                if (allowedDays.has(bulkMondayWeekday(probe))) {
+                    firstMatch = new Date(probe);
+                    break;
+                }
+                probe.setDate(probe.getDate() + 1);
+            }
+            if (!firstMatch) return [];
+
+            const anchorWeekStart = new Date(firstMatch);
+            anchorWeekStart.setDate(anchorWeekStart.getDate() - bulkMondayWeekday(anchorWeekStart));
+            anchorWeekStart.setHours(0, 0, 0, 0);
+
+            const dates = [];
+            const current = new Date(start);
+            current.setHours(0, 0, 0, 0);
+            while (current <= end) {
+                if (allowedDays.has(bulkMondayWeekday(current))) {
+                    const currentWeekStart = new Date(current);
+                    currentWeekStart.setDate(currentWeekStart.getDate() - bulkMondayWeekday(currentWeekStart));
+                    currentWeekStart.setHours(0, 0, 0, 0);
+                    const weekOffset = Math.round((currentWeekStart - anchorWeekStart) / (7 * 24 * 60 * 60 * 1000));
+                    if (weekOffset >= 0 && weekOffset % recurrenceWeeks === 0) {
+                        dates.push(new Date(current));
+                    }
+                }
+                current.setDate(current.getDate() + 1);
+            }
+            return dates;
+        }
+
+        function formatBulkPreviewDate(dateValue) {
+            return dateValue.toLocaleDateString(undefined, {
+                weekday: 'short', day: '2-digit', month: 'short', year: 'numeric'
+            });
+        }
+
+        function updateBulkSchedulePreview() {
+            const previewText = document.getElementById('bulkSchedulePreviewText');
+            const previewDates = document.getElementById('bulkSchedulePreviewDates');
+            const frequencyBadge = document.getElementById('bulkScheduleFrequency');
+            if (!previewText || !previewDates || !frequencyBadge) return;
+
+            const startDate = document.getElementById('bulkStartDate')?.value || '';
+            const endDate = document.getElementById('bulkEndDate')?.value || '';
+            const selectedDays = Array.from(document.querySelectorAll('.bulk-day:checked')).map(cb => cb.value);
+            const recurrenceWeeks = document.getElementById('bulkEverySecondWeek')?.checked ? 2 : 1;
+            frequencyBadge.textContent = recurrenceWeeks === 2 ? 'Every second week' : 'Every week';
+
+            if (!startDate || !endDate) {
+                previewText.textContent = 'Enter a Start Date and End Date to preview the schedule.';
+                previewDates.textContent = '';
+                return;
+            }
+            if (startDate > endDate) {
+                previewText.textContent = 'End Date must be on or after the Start Date.';
+                previewDates.textContent = '';
+                return;
+            }
+            if (selectedDays.length === 0) {
+                previewText.textContent = 'Select one or more days to preview the schedule.';
+                previewDates.textContent = '';
+                return;
+            }
+
+            const dates = generateBulkPreviewDates(startDate, endDate, selectedDays, recurrenceWeeks);
+            previewText.textContent = `${dates.length} booking date${dates.length === 1 ? '' : 's'} will be generated.`;
+            if (dates.length === 0) {
+                previewDates.textContent = 'No selected days fall within this date range.';
+                return;
+            }
+
+            const shown = dates.slice(0, 8).map(formatBulkPreviewDate);
+            previewDates.textContent = `First dates: ${shown.join(' • ')}${dates.length > shown.length ? ' • …' : ''}`;
+        }
+
         function saveBulkBooking() {
             const service = getMultiSelectValues('bulkService');
             const startDate = document.getElementById('bulkStartDate').value;
@@ -2103,6 +2217,7 @@
             const time = document.getElementById('bulkTime').value;
             const notes = document.getElementById('bulkNotes').value;
             const isSplit = document.getElementById('bulkSplit').checked;
+            const recurrenceWeeks = document.getElementById('bulkEverySecondWeek')?.checked ? 2 : 1;
             
             let days = [];
             document.querySelectorAll('.bulk-day:checked').forEach(cb => days.push(cb.value));
@@ -2159,7 +2274,8 @@
                 start_date: startDate,
                 end_date: endDate,
                 time: time, 
-                days: days, 
+                days: days,
+                recurrence_weeks: recurrenceWeeks,
                 booking_type: service, 
                 booking_notes: notes,
                 assignments: assignments,
@@ -2175,12 +2291,17 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             })
-            .then(res => res.json())
-            .then(data => {
-                alert(data.message);
-                bulkBookingModal.hide();
-                calendar.refetchEvents();
-                loadDashboardLists(); 
+            .then(async res => ({ ok: res.ok, data: await res.json() }))
+            .then(({ ok, data }) => {
+                alert(data.message || (ok ? 'Bookings generated.' : 'Unable to generate bookings.'));
+                if (ok && data.status === 'success') {
+                    bulkBookingModal.hide();
+                    calendar.refetchEvents();
+                    loadDashboardLists();
+                }
+            })
+            .catch(() => alert('Unable to generate bookings. Please try again.'))
+            .finally(() => {
                 btn.innerText = "Generate Dates";
                 btn.disabled = false;
             });

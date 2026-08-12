@@ -11581,6 +11581,62 @@ def async_google_sync(bookings_list, company_name, company_id=None):
 
     conn.close()
 
+def _generate_bulk_recurring_dates(start_dt, end_dt, allowed_days, recurrence_weeks=1):
+    """Return matching recurring dates using the first eligible date as the anchor week.
+
+    Weekday values follow datetime.weekday(): Monday=0 ... Sunday=6.  A recurrence
+    of 1 preserves the existing weekly behaviour; 2 represents every second week.
+    The generic interval keeps the scheduling engine ready for future 3/4-week UI
+    options without changing existing booking records.
+    """
+    if start_dt > end_dt:
+        raise ValueError('End Date must be on or after the Start Date.')
+
+    try:
+        recurrence_weeks = int(recurrence_weeks or 1)
+    except (TypeError, ValueError):
+        raise ValueError('The booking recurrence interval is invalid.')
+    if recurrence_weeks < 1 or recurrence_weeks > 52:
+        raise ValueError('The booking recurrence interval must be between 1 and 52 weeks.')
+
+    try:
+        selected_days = sorted({int(day) for day in allowed_days})
+    except (TypeError, ValueError):
+        raise ValueError('One or more selected booking days are invalid.')
+    if not selected_days or any(day < 0 or day > 6 for day in selected_days):
+        raise ValueError('Please select at least one valid booking day.')
+
+    first_match = None
+    probe = start_dt
+    while probe <= end_dt:
+        if probe.weekday() in selected_days:
+            first_match = probe
+            break
+        probe += timedelta(days=1)
+    if first_match is None:
+        return []
+
+    anchor_week_start = first_match - timedelta(days=first_match.weekday())
+    scheduled = []
+    curr = start_dt
+    while curr <= end_dt:
+        if curr.weekday() in selected_days:
+            current_week_start = curr - timedelta(days=curr.weekday())
+            week_offset = (current_week_start - anchor_week_start).days // 7
+            if week_offset >= 0 and week_offset % recurrence_weeks == 0:
+                scheduled.append(curr.strftime('%Y-%m-%d'))
+        curr += timedelta(days=1)
+    return scheduled
+
+
+def _bulk_recurrence_label(recurrence_weeks):
+    if recurrence_weeks == 1:
+        return 'every week'
+    if recurrence_weeks == 2:
+        return 'every second week'
+    return f'every {recurrence_weeks} weeks'
+
+
 @app.route('/generate_recurring', methods=['POST'])
 def generate_recurring():
     if not session.get('can_booking') and not session.get('is_superadmin'): 
@@ -11604,26 +11660,30 @@ def generate_recurring():
     
     start_str = data.get('start_date')
     end_str = data.get('end_date')
-    days_list = data.get('days') 
-    
-    if start_str and end_str:
-        try:
-            start_dt = datetime.strptime(start_str[:10], '%Y-%m-%d')
-            end_dt = datetime.strptime(end_str[:10], '%Y-%m-%d')
-            allowed_days = [int(d) for d in days_list] if days_list else list(range(7))
-            curr = start_dt
-            while curr <= end_dt:
-                if curr.weekday() in allowed_days:
-                    dates_to_schedule.append(curr.strftime('%Y-%m-%d'))
-                curr += timedelta(days=1)
-        except Exception as e:
-            print(f"Error parsing start/end dates: {e}")
+    days_list = data.get('days')
+    recurrence_weeks = data.get('recurrence_weeks', 1)
+
+    if not start_str or not end_str:
+        conn.close()
+        return jsonify({"status": "error", "message": "Start Date and End Date are required."}), 400
+
+    try:
+        start_dt = datetime.strptime(start_str[:10], '%Y-%m-%d')
+        end_dt = datetime.strptime(end_str[:10], '%Y-%m-%d')
+        allowed_days = [int(d) for d in days_list] if days_list else list(range(7))
+        recurrence_weeks = int(recurrence_weeks or 1)
+        dates_to_schedule = _generate_bulk_recurring_dates(
+            start_dt, end_dt, allowed_days, recurrence_weeks
+        )
+    except ValueError as exc:
+        conn.close()
+        return jsonify({"status": "error", "message": str(exc)}), 400
 
     dates_to_schedule = sorted(list(set(dates_to_schedule)))
-    
+
     if not dates_to_schedule:
         conn.close()
-        return jsonify({"status": "error", "message": "No valid dates found in that range matching those days."})
+        return jsonify({"status": "error", "message": "No valid dates found in that range matching those days."}), 400
 
     sync_payload = []
     cursor = conn.cursor()
@@ -11680,11 +11740,18 @@ def generate_recurring():
         if _item.get('db_id'):
             notify_staff_booking_event_async(session.get('company_id'), _item.get('db_id'), 'booking_new', 'New booking assigned', 'You have a new booking scheduled{date}.')
     
-    log_action('Booking & Ops', 'Created Contract', f"Auto-scheduled {len(dates_to_schedule)} days for {client_name}")
-    
+    recurrence_label = _bulk_recurrence_label(recurrence_weeks)
+    log_action(
+        'Booking & Ops',
+        'Created Contract',
+        f"Auto-scheduled {len(dates_to_schedule)} days for {client_name} ({recurrence_label})"
+    )
+
     return jsonify({
-        "status": "success", 
-        "message": f"Successfully generated {len(dates_to_schedule)} matching days!"
+        "status": "success",
+        "message": f"Successfully generated {len(dates_to_schedule)} matching days ({recurrence_label})!",
+        "recurrence_weeks": recurrence_weeks,
+        "generated_dates": dates_to_schedule
     })
 
 
