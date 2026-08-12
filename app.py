@@ -1986,6 +1986,19 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('UPDATE invoice_items SET unit_price=amount WHERE unit_price IS NULL')
     except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE invoice_items ADD COLUMN project_id INTEGER')
+    except sqlite3.OperationalError: pass
+    conn.execute('''CREATE TABLE IF NOT EXISTS invoice_projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        invoice_id INTEGER NOT NULL,
+        project_id INTEGER NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(company_id, invoice_id, project_id)
+    )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_projects_invoice ON invoice_projects(company_id, invoice_id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_projects_project ON invoice_projects(company_id, project_id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_items_project ON invoice_items(project_id)')
     conn.execute('''CREATE TABLE IF NOT EXISTS invoice_payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         company_id INTEGER,
@@ -3104,12 +3117,41 @@ def normalise_billing_item(item):
         amount = round(quantity * unit_price, 2)
     return {
         'booking_id': item.get('booking_id'),
+        'project_id': item.get('project_id'),
         'service_date': item.get('service_date'),
         'description': item.get('description') or '',
         'quantity': quantity,
         'unit_price': unit_price,
         'amount': amount
     }
+
+def _normalise_project_invoice_ids(data):
+    """Return ordered, unique positive project IDs from invoice payload.
+
+    The UI supports both the legacy single ``project_id`` field and the newer
+    ``project_ids`` list used by multi-project invoices. Tenant ownership is
+    validated separately against the database.
+    """
+    data = data or {}
+    raw_ids = data.get('project_ids') or []
+    if not isinstance(raw_ids, (list, tuple)):
+        raw_ids = [raw_ids]
+    legacy_id = data.get('project_id')
+    if legacy_id not in (None, '', 0, '0'):
+        raw_ids = [legacy_id] + list(raw_ids)
+
+    project_ids = []
+    seen = set()
+    for raw_id in raw_ids:
+        try:
+            project_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if project_id <= 0 or project_id in seen:
+            continue
+        seen.add(project_id)
+        project_ids.append(project_id)
+    return project_ids
 
 def calculate_invoice_due_now(total, amount_due_now=None):
     total = sanitize_money(total)
@@ -15364,47 +15406,81 @@ def save_invoice():
 
     invoice_type = (data.get('invoice_type') or 'standard').strip().lower()
     project_id = None
+    project_ids = []
 
     # Use the invoice-specific discount submitted from the invoice screen.
     # The client profile discount is only a default that pre-populates the form;
     # users may override it for this individual invoice.
     if invoice_type == 'project':
-        try:
-            project_id = int(data.get('project_id') or 0)
-        except Exception:
-            project_id = 0
-        project = conn.execute('''SELECT p.*, c.id AS linked_client_id, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
-                                  FROM projects p
-                                  LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
-                                  WHERE p.id=? AND p.company_id=?''', (project_id, cid)).fetchone()
-        if not project:
+        project_ids = _normalise_project_invoice_ids(data)
+        if not project_ids:
             conn.close()
-            return jsonify({"status": "error", "message": "Project not found for this company."}), 400
-        if (project['status'] or '').lower() == 'cancelled':
+            return jsonify({"status": "error", "message": "Select at least one valid project to invoice."}), 400
+
+        placeholders = ','.join('?' for _ in project_ids)
+        project_rows = conn.execute(f"""SELECT p.*, c.id AS linked_client_id, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
+                                       FROM projects p
+                                       LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
+                                       WHERE p.company_id=? AND p.id IN ({placeholders})""", [cid] + project_ids).fetchall()
+        project_map = {int(row['id']): row for row in project_rows}
+        if len(project_map) != len(project_ids):
             conn.close()
-            return jsonify({"status": "error", "message": "Cancelled projects cannot be invoiced."}), 400
-        if not project['linked_client_id']:
+            return jsonify({"status": "error", "message": "One or more selected projects were not found for this company."}), 400
+
+        selected_projects = [project_map[pid] for pid in project_ids]
+        for project in selected_projects:
+            if (project['status'] or '').lower() == 'cancelled':
+                conn.close()
+                return jsonify({"status": "error", "message": f"Cancelled project '{project['project_name'] or project['id']}' cannot be invoiced."}), 400
+            if not project['linked_client_id']:
+                conn.close()
+                return jsonify({"status": "error", "message": f"Project '{project['project_name'] or project['id']}' is not linked to a valid client."}), 400
+
+        linked_client_ids = {int(project['linked_client_id']) for project in selected_projects}
+        if len(linked_client_ids) != 1:
             conn.close()
-            return jsonify({"status": "error", "message": "This project is not linked to a valid client."}), 400
-        project_client = get_client_by_id(conn, cid, project['linked_client_id'])
+            return jsonify({"status": "error", "message": "All projects on one invoice must belong to the same client."}), 400
+
+        linked_client_id = next(iter(linked_client_ids))
+        submitted_client_id = data.get('client_id')
+        if submitted_client_id not in (None, '', 0, '0'):
+            try:
+                submitted_client_id = int(submitted_client_id)
+            except (TypeError, ValueError):
+                submitted_client_id = 0
+            if submitted_client_id and submitted_client_id != linked_client_id:
+                conn.close()
+                return jsonify({"status": "error", "message": "The selected client does not match the selected project(s)."}), 400
+
+        project_client = get_client_by_id(conn, cid, linked_client_id)
+        if not project_client:
+            conn.close()
+            return jsonify({"status": "error", "message": "The selected project client could not be loaded."}), 400
         client_id = project_client['id']
         client_name = client_display_name(project_client)
-        project_label = project['project_name'] or 'Project'
-        if project['project_code']:
-            project_label = f"{project_label} ({project['project_code']})"
-        project_fixed_price = float(project['fixed_price'] or 0)
+
+        # Keep the first project in invoices.project_id for backward compatibility.
+        # All selected projects are additionally recorded in invoice_projects.
+        project_id = project_ids[0]
         submitted_items = data.get('items') or []
         if submitted_items:
             items = submitted_items
         else:
-            items = [{
-                'booking_id': None,
-                'service_date': project['start_date'] or data.get('date'),
-                'description': f"Project: {project_label}",
-                'quantity': 1,
-                'unit_price': project_fixed_price,
-                'amount': project_fixed_price
-            }]
+            items = []
+            for project in selected_projects:
+                project_label = project['project_name'] or 'Project'
+                if project['project_code']:
+                    project_label = f"{project_label} ({project['project_code']})"
+                project_fixed_price = float(project['fixed_price'] or 0)
+                items.append({
+                    'booking_id': None,
+                    'project_id': project['id'],
+                    'service_date': project['start_date'] or data.get('date'),
+                    'description': f"Project: {project_label}",
+                    'quantity': 1,
+                    'unit_price': project_fixed_price,
+                    'amount': project_fixed_price
+                })
     else:
         try:
             client = resolve_client_from_payload(conn, cid, data, id_key='client_id', name_key='client_name')
@@ -15418,6 +15494,22 @@ def save_invoice():
     items = [normalise_billing_item(item) for item in (items or [])]
     items = [item for item in items if item.get('description') and float(item.get('amount') or 0) > 0]
 
+    if invoice_type == 'project':
+        selected_project_id_set = set(project_ids)
+        for item in items:
+            raw_item_project_id = item.get('project_id')
+            if raw_item_project_id in (None, '', 0, '0'):
+                continue
+            try:
+                item_project_id = int(raw_item_project_id)
+            except (TypeError, ValueError):
+                conn.close()
+                return jsonify({"status": "error", "message": "A project invoice line contains an invalid project reference."}), 400
+            if item_project_id not in selected_project_id_set:
+                conn.close()
+                return jsonify({"status": "error", "message": "A project invoice line does not belong to one of the selected projects."}), 400
+            item['project_id'] = item_project_id
+
     discount_percent = sanitize_percent(data.get('discount_percent', 0))
     original_subtotal = round(sum(float(item.get('amount') or 0) for item in items), 2)
     discount_percent, discount_amount, discounted_subtotal = calculate_invoice_discount(original_subtotal, discount_percent)
@@ -15427,30 +15519,56 @@ def save_invoice():
     amount_due_now, balance_remaining = calculate_invoice_due_now(total, data.get('amount_due_now'))
     
     invoice_number = allocate_billing_document_number(conn, cid, 'invoice')
-    cursor = conn.cursor()
-    cursor.execute("""INSERT INTO invoices (company_id, client_id, client_name, date, due_date, subtotal, vat_amount, total, status, discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id, invoice_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                   (cid, client_id, client_name, data['date'], data['due_date'], original_subtotal, vat_amount, total, 'Unpaid', discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id, invoice_number))
-    inv_id = cursor.lastrowid
-    
-    for item in items:
-        cursor.execute("INSERT INTO invoice_items (invoice_id, booking_id, service_date, description, quantity, unit_price, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                       (inv_id, item.get('booking_id'), item.get('service_date'), item['description'], item.get('quantity', 1), item.get('unit_price', item['amount']), item['amount']))
+    try:
+        # Keep the invoice, invoice lines, project status and booking invoiced
+        # flags together. PostgreSQL normally runs in autocommit mode in Easy
+        # Admin, so explicitly open a transaction for this document save.
+        _begin_atomic_write(conn)
+        cursor = conn.cursor()
+        cursor.execute("""INSERT INTO invoices (company_id, client_id, client_name, date, due_date, subtotal, vat_amount, total, status, discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id, invoice_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (cid, client_id, client_name, data['date'], data['due_date'], original_subtotal, vat_amount, total, 'Unpaid', discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id, invoice_number))
+        inv_id = cursor.lastrowid
         
-        if item.get('booking_id'):
-            cursor.execute("UPDATE bookings SET is_invoiced=1 WHERE id=? AND company_id=?", (item['booking_id'], cid))
+        for item in items:
+            cursor.execute("INSERT INTO invoice_items (invoice_id, booking_id, project_id, service_date, description, quantity, unit_price, amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           (inv_id, item.get('booking_id'), item.get('project_id'), item.get('service_date'), item['description'], item.get('quantity', 1), item.get('unit_price', item['amount']), item['amount']))
+            
+            if item.get('booking_id'):
+                cursor.execute("UPDATE bookings SET is_invoiced=1 WHERE id=? AND company_id=?", (item['booking_id'], cid))
 
-    if invoice_type == 'project' and project_id:
-        cursor.execute("UPDATE projects SET status='Invoiced', updated_at=CURRENT_TIMESTAMP WHERE id=? AND company_id=?", (project_id, cid))
+        if invoice_type == 'project' and project_ids:
+            for selected_project_id in project_ids:
+                cursor.execute("""INSERT OR IGNORE INTO invoice_projects (company_id, invoice_id, project_id)
+                                  VALUES (?, ?, ?)""", (cid, inv_id, selected_project_id))
+                cursor.execute("UPDATE projects SET status='Invoiced', updated_at=CURRENT_TIMESTAMP WHERE id=? AND company_id=?", (selected_project_id, cid))
+                # Project invoice lines represent the project as a whole rather
+                # than carrying every linked booking_id. Mark all bookings
+                # currently assigned to the project during the same save.
+                cursor.execute("UPDATE bookings SET is_invoiced=1 WHERE company_id=? AND project_id=?", (cid, selected_project_id))
 
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        raise
+
+    # Automatic Accounting posting intentionally remains a separate safe step:
+    # an Accounting configuration problem must not undo a valid invoice.
+    raw_conn = getattr(conn, '_conn', None)
+    if raw_conn is not None and not raw_conn.autocommit:
+        raw_conn.autocommit = True
     accounting_result = _auto_post_invoice_to_accounting_if_enabled(conn, cid, inv_id)
 
-    conn.commit()
     conn.close()
     if accounting_result.get('posted'):
         log_action('Accounting', 'Auto Posted Invoice', f"Invoice {invoice_number} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
     else:
         log_action('Accounting', 'Invoice Auto Post Skipped/Failed', f"Invoice {invoice_number}: {accounting_result.get('message')}")
-    log_action('Invoicing', 'Created Invoice', f"Generated Invoice {invoice_number} for {client_name}")
+    project_count_note = f" across {len(project_ids)} project(s)" if invoice_type == 'project' and project_ids else ''
+    log_action('Invoicing', 'Created Invoice', f"Generated Invoice {invoice_number} for {client_name}{project_count_note}")
     response_message = 'Invoice created and automatically posted to Accounting.' if accounting_result.get('posted') else 'Invoice created. ' + (accounting_result.get('message') or '')
     return jsonify({
         "status": "success",
