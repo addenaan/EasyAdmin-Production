@@ -3788,25 +3788,61 @@ def get_booking_staff_hours_summary(conn, company_id, employee, target_date, pro
         'month_status': worst_status
     }
 
+def _employee_booking_status(employee):
+    """Return the normalised employment status used by booking eligibility checks."""
+    data = dict(employee) if employee is not None and not isinstance(employee, dict) else (employee or {})
+    return str(data.get('status') or 'Active').strip().lower() or 'active'
+
+
+def _employee_is_bookable(employee):
+    """Only Active, non-Supplier people may be newly assigned to bookings."""
+    data = dict(employee) if employee is not None and not isinstance(employee, dict) else (employee or {})
+    emp_type = str(data.get('emp_type') or '').strip().lower()
+    return emp_type != 'supplier' and _employee_booking_status(data) == 'active'
+
+
 def validate_booking_employees_available(conn, company_id, assignments, booking_date, exclude_booking_id=None):
+    """Validate new booking assignments without affecting historical booking display.
+
+    Resigned, Terminated, Inactive and any other non-Active employee status remains
+    visible on historical records but cannot be newly assigned through create/edit/
+    recurring booking workflows.
+    """
     employee_names = []
+    seen_names = set()
     for assignment in assignments:
         for name in (assignment.get('employee') or '').split(','):
             clean_name = name.strip()
-            if clean_name and clean_name not in employee_names:
+            key = clean_name.lower()
+            if clean_name and key not in seen_names:
                 employee_names.append(clean_name)
+                seen_names.add(key)
 
-    unavailable = []
+    missing = []
+    not_bookable = []
+    on_leave = []
     for emp_name in employee_names:
-        emp = conn.execute('SELECT * FROM employees WHERE company_id=? AND name=?', (company_id, emp_name)).fetchone()
+        emp = conn.execute('''SELECT * FROM employees
+                              WHERE company_id=? AND LOWER(TRIM(COALESCE(name, '')))=LOWER(?)''',
+                           (company_id, emp_name)).fetchone()
         if not emp:
+            missing.append(emp_name)
+            continue
+        if not _employee_is_bookable(emp):
+            emp_dict = dict(emp)
+            status = str(emp_dict.get('status') or 'Active').strip() or 'Active'
+            not_bookable.append(f"{emp_dict.get('name') or emp_name} ({status})")
             continue
         leave_dates = get_employee_leave_dates(conn, company_id, emp['id'], booking_date, booking_date)
         if booking_date.strftime('%Y-%m-%d') in leave_dates:
-            unavailable.append(emp_name)
+            on_leave.append(dict(emp).get('name') or emp_name)
 
-    if unavailable:
-        return False, f"Cannot book employee on leave: {', '.join(unavailable)}"
+    if missing:
+        return False, f"Employee not found for this company: {', '.join(missing)}"
+    if not_bookable:
+        return False, "Only employees/providers with Active status can be assigned to bookings: " + ', '.join(not_bookable)
+    if on_leave:
+        return False, f"Cannot book employee on leave: {', '.join(on_leave)}"
     return True, ''
 
 def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str=None):
@@ -10423,12 +10459,15 @@ def booking_index():
     cid = session['company_id']
     ensure_tenant_template(conn, cid)
     clients = prepare_client_options(conn.execute('SELECT * FROM clients WHERE company_id=? ORDER BY name ASC, surname ASC, id ASC', (cid,)).fetchall())
+    # Keep the full non-supplier list for historical/project display, while every
+    # booking-assignment control receives only currently Active people.
     employees = conn.execute("SELECT * FROM employees WHERE company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL) ORDER BY name ASC", (cid,)).fetchall()
-    active_booking_employees = conn.execute("""SELECT * FROM employees
-                                               WHERE company_id=?
-                                               AND (emp_type != 'Supplier' OR emp_type IS NULL)
-                                               AND LOWER(COALESCE(status, 'Active')) != 'inactive'
-                                               ORDER BY name ASC""", (cid,)).fetchall()
+    bookable_employees = conn.execute("""SELECT * FROM employees
+                                      WHERE company_id=?
+                                      AND (emp_type != 'Supplier' OR emp_type IS NULL)
+                                      AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active'
+                                      ORDER BY name ASC""", (cid,)).fetchall()
+    active_booking_employees = bookable_employees
     services = [dict(row) for row in conn.execute('SELECT * FROM services WHERE company_id=? ORDER BY name ASC', (cid,)).fetchall()]
     projects = [dict(row) for row in conn.execute('''SELECT p.*, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name
                                                      FROM projects p
@@ -10439,7 +10478,7 @@ def booking_index():
     booking_custom_fields = get_tenant_custom_fields(conn, cid, 'booking', visible_only=True)
     conn.commit()
     conn.close()
-    return render_template('booking_index.html', clients=clients, employees=employees, active_booking_employees=active_booking_employees, services=services, projects=projects, session=session, tenant_labels=tenant_labels, booking_custom_fields=booking_custom_fields)
+    return render_template('booking_index.html', clients=clients, employees=employees, bookable_employees=bookable_employees, active_booking_employees=active_booking_employees, services=services, projects=projects, session=session, tenant_labels=tenant_labels, booking_custom_fields=booking_custom_fields)
 
 @app.route('/api/booking-dashboard-summary')
 def api_booking_dashboard_summary():
@@ -10460,7 +10499,7 @@ def api_booking_dashboard_summary():
         active_employee_rows = conn.execute("""SELECT id, name
                                                FROM employees
                                                WHERE company_id=?
-                                               AND LOWER(COALESCE(status, 'Active')) != 'inactive'
+                                               AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active'
                                                AND LOWER(COALESCE(emp_type, '')) NOT IN ('supplier', 'provider')
                                                AND TRIM(COALESCE(name, '')) != ''
                                                ORDER BY name ASC""", (cid,)).fetchall()
@@ -10811,11 +10850,12 @@ def booking_staff_hours():
     if employee_name:
         emp = conn.execute('''SELECT * FROM employees
                               WHERE company_id=? AND name=?
-                              AND (emp_type != 'Supplier' OR emp_type IS NULL)''',
+                              AND (emp_type != 'Supplier' OR emp_type IS NULL)
+                              AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active' ''',
                            (cid, employee_name)).fetchone()
         if not emp:
             conn.close()
-            return jsonify({"status": "error", "message": "Employee not found"}), 404
+            return jsonify({"status": "error", "message": "Employee is not available for new bookings. Only Active employees/providers can be assigned."}), 404
         summary = get_booking_staff_hours_summary(conn, cid, emp, target_date, overtime_hours, exclude_booking_id, True)
         conn.close()
         return jsonify({"status": "success", "employee": summary})
@@ -10823,6 +10863,7 @@ def booking_staff_hours():
     employees = conn.execute('''SELECT * FROM employees
                                 WHERE company_id=?
                                 AND (emp_type != 'Supplier' OR emp_type IS NULL)
+                                AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active'
                                 ORDER BY name ASC''', (cid,)).fetchall()
     summaries = [get_booking_staff_hours_summary(conn, cid, emp, target_date, 0, exclude_booking_id, False) for emp in employees]
     conn.close()
@@ -11160,7 +11201,7 @@ def api_bulk_bookings_update():
         if update_employees:
             seen_selected = set()
             invalid_employees = []
-            inactive_employees = []
+            unavailable_employees = []
             for raw_name in selected_employee_names:
                 clean_name = str(raw_name or '').strip()
                 key = clean_name.lower()
@@ -11169,8 +11210,9 @@ def api_bulk_bookings_update():
                     if clean_name:
                         invalid_employees.append(clean_name)
                     continue
-                if str(employee.get('status') or 'Active').strip().lower() == 'inactive':
-                    inactive_employees.append(employee.get('name') or clean_name)
+                if not _employee_is_bookable(employee):
+                    status = str(employee.get('status') or 'Active').strip() or 'Active'
+                    unavailable_employees.append(f"{employee.get('name') or clean_name} ({status})")
                     continue
                 if key not in seen_selected:
                     canonical_selected_employees.append(employee.get('name') or clean_name)
@@ -11178,12 +11220,12 @@ def api_bulk_bookings_update():
             if invalid_employees:
                 conn.close()
                 return jsonify({'status': 'error', 'message': 'Employee not found for this company: ' + ', '.join(invalid_employees)}), 400
-            if inactive_employees:
+            if unavailable_employees:
                 conn.close()
-                return jsonify({'status': 'error', 'message': 'Inactive employees cannot be assigned through bulk manage: ' + ', '.join(inactive_employees)}), 400
+                return jsonify({'status': 'error', 'message': 'Only employees/providers with Active status can be assigned through bulk manage: ' + ', '.join(unavailable_employees)}), 400
             if not canonical_selected_employees:
                 conn.close()
-                return jsonify({'status': 'error', 'message': 'Please select at least one active employee.'}), 400
+                return jsonify({'status': 'error', 'message': 'Please select at least one active employee/provider.'}), 400
 
         custom_config = get_tenant_custom_fields(conn, cid, 'booking', visible_only=True)
         custom_by_key = {f['field_key']: f for f in custom_config}
