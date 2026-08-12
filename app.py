@@ -4617,6 +4617,40 @@ def restrict_access():
 
     if session.get('is_staff'):
         allowed_staff_paths = ('/staff', '/staff/mobile', '/staff/download_attachment/', '/staff/download_payslip/', '/api/staff/', '/api/session/', '/change_password', '/change-password', '/password/change', '/logout')
+
+        # Staff Portal access is valid only while the linked employee record is Active.
+        # This is checked on every staff request because Staff Mobile intentionally has
+        # no inactivity timeout and an employee may be resigned/terminated while a
+        # mobile session is still open. Historical records remain untouched.
+        if path != '/logout':
+            staff_check_conn = get_db_connection()
+            try:
+                active_staff_employee = _staff_employee_row(staff_check_conn)
+            finally:
+                staff_check_conn.close()
+            if not active_staff_employee:
+                blocked_username = session.get('username')
+                blocked_company_id = session.get('company_id')
+                blocked_employee_id = session.get('employee_id')
+                session.clear()
+                try:
+                    log_security_event(
+                        'Staff Portal Access Blocked',
+                        f'Staff account linked to employee_id={blocked_employee_id} is not Active or no longer exists.',
+                        result='blocked',
+                        company_id=blocked_company_id,
+                        username=blocked_username or 'unknown'
+                    )
+                except Exception:
+                    pass
+                if _request_expects_json() or path.startswith('/api/'):
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Staff Portal access is disabled because your employee profile is not Active. Please contact your administrator.',
+                        'redirect': url_for('login', staff_disabled=1)
+                    }), 401
+                return redirect(url_for('login', staff_disabled=1))
+
         if path == '/mobile':
             return redirect(url_for('staff_mobile'))
         if path == '/hub':
@@ -4737,12 +4771,45 @@ def api_session_timeout():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    error = 'Your session expired after 15 minutes of inactivity. Please log in again.' if request.args.get('timeout') else None
+    if request.args.get('timeout'):
+        error = 'Your session expired after 15 minutes of inactivity. Please log in again.'
+    elif request.args.get('staff_disabled'):
+        error = 'Staff Portal access is disabled because your employee profile is not Active. Please contact your administrator.'
+    else:
+        error = None
     if request.method == 'POST':
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM users WHERE username = ?', (request.form['username'],)).fetchone()
         
         if user and check_password_hash(user['password_hash'], request.form['password']):
+            user_data = dict(user)
+            if bool(user_data.get('is_staff', 0)):
+                linked_employee_id = user_data.get('employee_id')
+                linked_employee = None
+                if linked_employee_id and user_data.get('company_id'):
+                    linked_employee = conn.execute(
+                        'SELECT id, name, status FROM employees WHERE id=? AND company_id=?',
+                        (linked_employee_id, user_data.get('company_id'))
+                    ).fetchone()
+                if not linked_employee or _employee_booking_status(linked_employee) != 'active':
+                    employee_status = str(dict(linked_employee).get('status') or 'Missing') if linked_employee else 'Missing'
+                    attempted_username = (request.form.get('username') or '').strip()
+                    try:
+                        log_security_event(
+                            'Staff Login Blocked',
+                            f'Correct credentials supplied for a staff account linked to a non-Active employee (employee_id={linked_employee_id}, status={employee_status}).',
+                            result='blocked',
+                            company_id=user_data.get('company_id'),
+                            username=attempted_username or user_data.get('username') or 'unknown'
+                        )
+                    except Exception:
+                        pass
+                    conn.close()
+                    return render_template(
+                        'login.html',
+                        error='Staff Portal access is disabled because your employee profile is not Active. Please contact your administrator.'
+                    )
+
             session.clear()
             session.permanent = True
             session['logged_in'] = True
@@ -6955,11 +7022,20 @@ def _staff_json_error(message, status_code=400):
 
 
 def _staff_employee_row(conn):
+    """Return the linked Staff Portal employee only while their status is Active.
+
+    Blank legacy statuses continue to normalise to Active, matching the central
+    employee-status behaviour used by Booking & Operations. Resigned, Terminated,
+    Inactive, On Leave and any other explicit non-Active status are denied.
+    """
     employee_id = session.get('employee_id')
     cid = session.get('company_id')
     if not employee_id or not cid:
         return None
-    return conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (employee_id, cid)).fetchone()
+    return conn.execute('''SELECT * FROM employees
+                           WHERE id=? AND company_id=?
+                             AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active' ''',
+                        (employee_id, cid)).fetchone()
 
 
 def _staff_date_range(default_days=30):
@@ -7668,6 +7744,12 @@ def _send_staff_notification_to_employee_ids(company_id, employee_ids, notificat
         _ensure_staff_notification_schema(conn)
         for employee_id in employee_ids:
             try:
+                active_employee = conn.execute('''SELECT id FROM employees
+                                                  WHERE id=? AND company_id=?
+                                                    AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active' ''',
+                                               (employee_id, company_id)).fetchone()
+                if not active_employee:
+                    continue
                 payload = _notification_payload(title, message, target_url, notification_type, data)
                 notification_id = _insert_staff_notification(conn, company_id, employee_id, notification_type, title, message, related_booking_id, related_leave_request_id, payload.get('data'), created_by)
                 logged += 1
@@ -7731,7 +7813,10 @@ def _employee_ids_from_booking_employee_names(conn, company_id, employee_names):
         names = [str(n or '').strip() for n in (employee_names or []) if str(n or '').strip()]
     if not names:
         return ids
-    employees = conn.execute('SELECT id, name FROM employees WHERE company_id=?', (company_id,)).fetchall()
+    employees = conn.execute('''SELECT id, name FROM employees
+                              WHERE company_id=?
+                                AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active' ''',
+                           (company_id,)).fetchall()
     combined = ', '.join(names)
     for emp in employees:
         if employee_name_matches(combined, emp['name']):
@@ -8251,6 +8336,7 @@ def api_staff_admin_employees():
                                FROM employees e
                                LEFT JOIN users u ON u.employee_id=e.id AND u.company_id=e.company_id AND COALESCE(u.is_staff,0)=1
                                WHERE e.company_id=?
+                                 AND LOWER(TRIM(COALESCE(NULLIF(e.status, ''), 'Active')))='active'
                                ORDER BY e.name ASC''', (cid,)).fetchall()
         return jsonify({'status': 'success', 'employees': [dict(r) for r in rows]})
     except Exception as exc:
@@ -8278,9 +8364,12 @@ def api_staff_admin_account_save():
         return _staff_json_error(password_strength_message(password, username), 400)
     conn = get_db_connection()
     try:
-        employee = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (employee_id, cid)).fetchone()
+        employee = conn.execute('''SELECT * FROM employees
+                                   WHERE id=? AND company_id=?
+                                     AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active' ''',
+                                (employee_id, cid)).fetchone()
         if not employee:
-            return _staff_json_error('Employee not found for this company.', 404)
+            return _staff_json_error('Only an Active employee can have Staff Portal access.', 400)
         existing = conn.execute('SELECT * FROM users WHERE company_id=? AND employee_id=? AND COALESCE(is_staff,0)=1', (cid, employee_id)).fetchone()
         try:
             if existing:
@@ -8369,7 +8458,7 @@ def api_staff_admin_send_notification():
             placeholders = ','.join(['?'] * len(requested_ids))
             rows = conn.execute(f'''SELECT DISTINCT e.id, e.name FROM employees e
                                     JOIN users u ON u.company_id=e.company_id AND u.employee_id=e.id AND COALESCE(u.is_staff,0)=1
-                                    WHERE e.company_id=? AND e.id IN ({placeholders}) AND COALESCE(e.status,'Active') != 'Inactive'
+                                    WHERE e.company_id=? AND e.id IN ({placeholders}) AND LOWER(TRIM(COALESCE(NULLIF(e.status, ''), 'Active')))='active'
                                     ORDER BY e.name ASC''', [cid] + requested_ids).fetchall()
             employee_ids = [r['id'] for r in rows]
             if not employee_ids:
@@ -8377,7 +8466,7 @@ def api_staff_admin_send_notification():
         elif broadcast:
             rows = conn.execute('''SELECT e.id FROM employees e
                                    JOIN users u ON u.company_id=e.company_id AND u.employee_id=e.id AND COALESCE(u.is_staff,0)=1
-                                   WHERE e.company_id=? AND COALESCE(e.status,'Active') != 'Inactive'
+                                   WHERE e.company_id=? AND LOWER(TRIM(COALESCE(NULLIF(e.status, ''), 'Active')))='active'
                                    ORDER BY e.name ASC''', (cid,)).fetchall()
             employee_ids = [r['id'] for r in rows]
         else:
@@ -8387,7 +8476,7 @@ def api_staff_admin_send_notification():
                 employee_id = 0
             row = conn.execute('''SELECT e.id FROM employees e
                                   JOIN users u ON u.company_id=e.company_id AND u.employee_id=e.id AND COALESCE(u.is_staff,0)=1
-                                  WHERE e.id=? AND e.company_id=? AND COALESCE(e.status,'Active') != 'Inactive' ''', (employee_id, cid)).fetchone()
+                                  WHERE e.id=? AND e.company_id=? AND LOWER(TRIM(COALESCE(NULLIF(e.status, ''), 'Active')))='active' ''', (employee_id, cid)).fetchone()
             if not row:
                 return _staff_json_error('Please select a valid active staff portal user.', 400)
             employee_ids = [employee_id]
