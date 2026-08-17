@@ -8,6 +8,7 @@ import os.path
 import shutil
 import calendar
 import threading
+import queue
 import json
 import re
 import secrets
@@ -7845,37 +7846,145 @@ def _notify_staff_booking_event_worker(company_id, booking_id, notification_type
     _send_staff_notification_to_employee_ids(company_id, employee_ids, notification_type, title, (message or '').replace('{date}', detail).strip(), related_booking_id=booking_id, target_url=target_url, created_by='System')
 
 
-def notify_staff_booking_event_async(company_id, booking_id, notification_type, title, message):
+# --- Bounded staff notification queue ---
+# Booking operations can create many notifications at once (for example the Bulk
+# Booking Scheduler).  Starting one background thread per booking can consume all
+# PostgreSQL connections in the per-worker connection pool.  A small daemon queue
+# keeps notification delivery asynchronous without allowing unbounded database
+# connection concurrency.
+def _notification_env_int(name, default, minimum=1, maximum=5000):
     try:
-        threading.Thread(target=_notify_staff_booking_event_worker, args=(company_id, booking_id, notification_type, title, message), daemon=True).start()
-    except Exception:
-        pass
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(minimum, min(maximum, value))
+
+
+_STAFF_NOTIFICATION_WORKER_COUNT = _notification_env_int('EASYADMIN_NOTIFICATION_WORKERS', 1, 1, 4)
+_STAFF_NOTIFICATION_QUEUE_MAX = _notification_env_int('EASYADMIN_NOTIFICATION_QUEUE_MAX', 2000, 100, 5000)
+_STAFF_NOTIFICATION_QUEUE = queue.Queue(maxsize=_STAFF_NOTIFICATION_QUEUE_MAX)
+_STAFF_NOTIFICATION_WORKERS_STARTED = False
+_STAFF_NOTIFICATION_WORKERS_LOCK = threading.Lock()
+
+
+def _staff_notification_queue_worker():
+    while True:
+        job = _STAFF_NOTIFICATION_QUEUE.get()
+        try:
+            if job is None:
+                return
+            func, args, kwargs = job
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                app.logger.exception('Background staff notification failed.')
+        finally:
+            _STAFF_NOTIFICATION_QUEUE.task_done()
+
+
+def _ensure_staff_notification_workers():
+    global _STAFF_NOTIFICATION_WORKERS_STARTED
+    if _STAFF_NOTIFICATION_WORKERS_STARTED:
+        return
+    with _STAFF_NOTIFICATION_WORKERS_LOCK:
+        if _STAFF_NOTIFICATION_WORKERS_STARTED:
+            return
+        for worker_number in range(_STAFF_NOTIFICATION_WORKER_COUNT):
+            threading.Thread(
+                target=_staff_notification_queue_worker,
+                name=f'easyadmin-staff-notification-{worker_number + 1}',
+                daemon=True,
+            ).start()
+        _STAFF_NOTIFICATION_WORKERS_STARTED = True
+
+
+def _enqueue_staff_notification(func, *args, **kwargs):
+    _ensure_staff_notification_workers()
+    try:
+        _STAFF_NOTIFICATION_QUEUE.put_nowait((func, args, kwargs))
+        return True
+    except queue.Full:
+        # Never make a booking, leave or delete operation fail merely because a
+        # notification backlog is full.  The operational transaction has already
+        # succeeded; record the skipped notification privately for diagnosis.
+        app.logger.error(
+            'Staff notification queue full; notification skipped. queue_max=%s',
+            _STAFF_NOTIFICATION_QUEUE_MAX,
+        )
+        return False
+
+
+def _notify_staff_booking_events_worker(company_id, booking_ids, notification_type, title, message):
+    seen = set()
+    for booking_id in booking_ids or []:
+        try:
+            booking_id = int(booking_id)
+        except (TypeError, ValueError):
+            continue
+        if booking_id in seen:
+            continue
+        seen.add(booking_id)
+        _notify_staff_booking_event_worker(company_id, booking_id, notification_type, title, message)
+
+
+def notify_staff_booking_events_async(company_id, booking_ids, notification_type, title, message):
+    return _enqueue_staff_notification(
+        _notify_staff_booking_events_worker,
+        company_id,
+        list(booking_ids or []),
+        notification_type,
+        title,
+        message,
+    )
+
+
+def notify_staff_booking_event_async(company_id, booking_id, notification_type, title, message):
+    return notify_staff_booking_events_async(company_id, [booking_id], notification_type, title, message)
+
+
+def _notify_staff_employee_names_worker(company_id, employee_names, notification_type, title, message, target_url='/staff/mobile'):
+    conn = get_db_connection()
+    try:
+        employee_ids = _employee_ids_from_booking_employee_names(conn, company_id, employee_names)
+    finally:
+        conn.close()
+    _send_staff_notification_to_employee_ids(
+        company_id,
+        employee_ids,
+        notification_type,
+        title,
+        message,
+        target_url=target_url,
+        created_by='System',
+    )
 
 
 def notify_staff_employee_names_async(company_id, employee_names, notification_type, title, message, target_url='/staff/mobile'):
-    def worker():
-        conn = get_db_connection()
-        try:
-            employee_ids = _employee_ids_from_booking_employee_names(conn, company_id, employee_names)
-        finally:
-            conn.close()
-        _send_staff_notification_to_employee_ids(company_id, employee_ids, notification_type, title, message, target_url=target_url, created_by='System')
-    try:
-        threading.Thread(target=worker, daemon=True).start()
-    except Exception:
-        pass
+    return _enqueue_staff_notification(
+        _notify_staff_employee_names_worker,
+        company_id,
+        employee_names,
+        notification_type,
+        title,
+        message,
+        target_url,
+    )
 
 
 def notify_staff_leave_status_async(company_id, employee_id, request_id, status, leave_type, start_date, end_date):
     title = 'Leave approved' if status == 'Approved' else 'Leave declined'
     message = f'Your {leave_type} request from {format_display_date(start_date)} to {format_display_date(end_date)} was {status.lower()}.'
-    try:
-        threading.Thread(target=_send_staff_notification_to_employee_ids,
-                         args=(company_id, [employee_id], 'leave_status', title, message),
-                         kwargs={'related_leave_request_id': request_id, 'target_url': '/staff/mobile?tab=leave', 'created_by': 'System'},
-                         daemon=True).start()
-    except Exception:
-        pass
+    return _enqueue_staff_notification(
+        _send_staff_notification_to_employee_ids,
+        company_id,
+        [employee_id],
+        'leave_status',
+        title,
+        message,
+        related_leave_request_id=request_id,
+        target_url='/staff/mobile?tab=leave',
+        created_by='System',
+    )
 
 
 @app.route('/staff')
@@ -11468,8 +11577,8 @@ def api_bulk_bookings_update():
             update_google_event(item['google_event_id'], item['client_name'], item['date'], item['time'], item['employee'], item['booking_type'], item['transport'], session['company_name'], session.get('company_id'))
         except Exception as exc:
             print(f"Google Sync Error on bulk booking update: {_format_google_calendar_error(exc)}")
-    for booking_id in updated_ids:
-        notify_staff_booking_event_async(session.get('company_id'), booking_id, 'booking_updated', 'Booking updated', 'One of your bookings was modified{date}.')
+    if updated_ids:
+        notify_staff_booking_events_async(session.get('company_id'), updated_ids, 'booking_updated', 'Booking updated', 'One of your bookings was modified{date}.')
     for removed_names, booking_id, booking_date in removed_employee_notifications:
         notify_staff_employee_names_async(
             session.get('company_id'),
@@ -11644,8 +11753,8 @@ def add_booking():
     conn.commit()
     conn.close()
     
-    for _booking_id in booking_ids:
-        notify_staff_booking_event_async(session.get('company_id'), _booking_id, 'booking_new', 'New booking assigned', 'You have a new booking scheduled{date}.')
+    if booking_ids:
+        notify_staff_booking_events_async(session.get('company_id'), booking_ids, 'booking_new', 'New booking assigned', 'You have a new booking scheduled{date}.')
     log_action('Booking & Ops', 'Created Booking', f"Client: {client_name}, Date: {data['date']}")
     return jsonify({"status": "success", "booking_ids": booking_ids})
 
@@ -11909,9 +12018,9 @@ def generate_recurring():
     
     if session.get('comp_google_calendar'):
         threading.Thread(target=async_google_sync, args=(sync_payload, session.get('company_name'), session.get('company_id'))).start()
-    for _item in sync_payload:
-        if _item.get('db_id'):
-            notify_staff_booking_event_async(session.get('company_id'), _item.get('db_id'), 'booking_new', 'New booking assigned', 'You have a new booking scheduled{date}.')
+    recurring_booking_ids = [_item.get('db_id') for _item in sync_payload if _item.get('db_id')]
+    if recurring_booking_ids:
+        notify_staff_booking_events_async(session.get('company_id'), recurring_booking_ids, 'booking_new', 'New booking assigned', 'You have a new booking scheduled{date}.')
     
     recurrence_label = _bulk_recurrence_label(recurrence_weeks)
     log_action(
