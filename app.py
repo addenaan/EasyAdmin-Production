@@ -13458,6 +13458,22 @@ def sync_existing_bookings_google_calendar():
         return jsonify({"status": "error", "message": "Failed: " + _format_google_calendar_error(exc)}), 400
 
 
+def _apply_company_email_headers(msg, settings, to_email):
+    """Apply tenant SMTP From/Reply-To headers consistently.
+
+    The Email & Calendar Settings field stored as ``sender_email`` is labelled
+    "Default Reply-To Sender Email" in the UI.  It must therefore be used
+    as the Reply-To header, not as the SMTP From identity.  SMTP providers
+    commonly require the authenticated mailbox to remain the From address.
+    """
+    smtp_user = str(settings.get('smtp_user') or '').strip()
+    reply_to = str(settings.get('sender_email') or '').strip()
+    msg['From'] = smtp_user
+    msg['To'] = to_email
+    if reply_to:
+        msg['Reply-To'] = reply_to
+
+
 @app.route('/email_payslip', methods=['POST'])
 def email_payslip():
     if not session.get('can_payroll') and not session.get('is_superadmin'): return jsonify({"message": "Forbidden"}), 403
@@ -13475,8 +13491,7 @@ def email_payslip():
     try:
         msg = EmailMessage()
         msg['Subject'] = f"Payslip - {date_str}"
-        msg['From'] = s_dict.get('sender_email', s_dict.get('smtp_user'))
-        msg['To'] = emp['email']
+        _apply_company_email_headers(msg, s_dict, emp['email'])
         msg.set_content(f"Dear {emp['name']},\n\nPlease find your attached payslip for {date_str}.\n\nKind regards,\n{session.get('company_name')}")
         msg.add_attachment(pdf_file.read(), maintype='application', subtype='pdf', filename=f"Payslip_{emp['name']}_{date_str}.pdf")
         
@@ -16408,8 +16423,7 @@ def _send_pdf_email(pdf_bytes, filename, email, doc_name, client_name):
     try:
         msg = EmailMessage()
         msg['Subject'] = f"{doc_name.replace('_', ' ')} from {session.get('company_name')}"
-        msg['From'] = s_dict.get('sender_email', s_dict.get('smtp_user'))
-        msg['To'] = email
+        _apply_company_email_headers(msg, s_dict, email)
         msg.set_content(f"Dear {client_name},\n\nPlease find attached your {doc_name.replace('_', ' ')}.\n\nThank you for your business.\n\nKind regards,\n{session.get('company_name')}")
         msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename=filename)
         port = int(s_dict.get('smtp_port', 465))
@@ -17054,8 +17068,7 @@ def email_document():
     try:
         msg = EmailMessage()
         msg['Subject'] = f"{doc_name.replace('_', ' ')} from {session.get('company_name')}"
-        msg['From'] = s_dict.get('sender_email', s_dict.get('smtp_user'))
-        msg['To'] = email
+        _apply_company_email_headers(msg, s_dict, email)
         msg.set_content(f"Dear {client_name},\n\nPlease find attached your {doc_name.replace('_', ' ')}.\n\nThank you for your business.\n\nKind regards,\n{session.get('company_name')}")
         msg.add_attachment(pdf_file.read(), maintype='application', subtype='pdf', filename=f"{doc_name}.pdf")
         
