@@ -414,10 +414,11 @@
                     </div>
                     <div class="mb-3"><label class="form-label small fw-bold text-primary">Client Type</label><select id="cType" class="form-select border-primary"><option value="Ad hoc">Ad hoc (Once-off)</option><option value="Monthly Contract">Monthly Contract</option></select></div>
                     <div class="mb-3"><label class="form-label small fw-bold text-primary">Discount Percent</label><div class="input-group"><input type="number" id="cDiscountPercent" class="form-control" min="0" max="100" step="0.01" placeholder="0"><span class="input-group-text">%</span></div><div class="form-text small">Applied automatically when creating invoices for this client.</div></div>
-                    <div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Telephone Number</label><input type="text" id="cPhone" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Email Address</label><input type="email" id="cEmail" class="form-control" placeholder="For emailing invoices"></div></div>
+                    <div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Telephone Number</label><input type="text" id="cPhone" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Email Address</label><input type="text" inputmode="email" autocomplete="email" id="cEmail" class="form-control" placeholder="client@example.com; accounts@example.com"><div class="form-text small">To add multiple email addresses, separate each email address with a semicolon (;).</div></div></div>
                     <div class="mb-3"><label class="form-label small fw-bold text-primary">Physical Address</label><div class="row"><div class="col-4 mb-2"><label class="form-label small fw-bold text-muted">Building Number</label><input type="text" id="cBuildingNumber" class="form-control"></div><div class="col-8 mb-2"><label class="form-label small fw-bold text-muted">Street Name</label><input type="text" id="cStreetName" class="form-control"></div></div><div class="row"><div class="col-7 mb-2"><label class="form-label small fw-bold text-muted">Suburb</label><input type="text" id="cSuburb" class="form-control"></div><div class="col-5 mb-2"><label class="form-label small fw-bold text-muted">Postal Code</label><input type="text" id="cPostalCode" class="form-control"></div></div><textarea id="cAddress" class="form-control d-none" rows="2"></textarea></div>
                     <div class="mb-3"><label class="form-label small fw-bold">Company Name</label><input type="text" id="cCompany" class="form-control" placeholder="For Tax Invoices"></div>
                     <div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Company Reg No.</label><input type="text" id="cRegNo" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">VAT No.</label><input type="text" id="cVatNo" class="form-control"></div></div>
+                    <div class="mb-3"><label class="form-label small fw-bold text-primary">Client Notes</label><textarea id="cNotes" class="form-control" rows="4" placeholder="Add internal client notes, service instructions, billing preferences or other information..."></textarea><div class="form-text small">Internal notes only. These notes are not added to invoices, quotes, statements or client emails.</div></div>
                 </div>
                 <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveClient()">Save Client</button></div>
             </div>
@@ -1049,7 +1050,7 @@
         }
 
         function emailStmtPDF() {
-            const email = prompt("Enter the client's email address to send this statement:", currentStmtEmail);
+            const email = prompt("Enter the client's email address(es), separated by semicolons, to send this statement:", currentStmtEmail);
             if(!email) return;
             
             const btn = document.getElementById('btnEmailStmt');
@@ -1111,6 +1112,7 @@
             document.getElementById('cCompany').value = client ? (client.company_name || '') : '';
             document.getElementById('cRegNo').value = client ? (client.registration_number || '') : '';
             document.getElementById('cVatNo').value = client ? (client.vat_number || '') : '';
+            document.getElementById('cNotes').value = client ? (client.notes || '') : '';
             clientProfileModal.show();
         }
 
@@ -1225,6 +1227,7 @@
                 company_name: document.getElementById('cCompany').value,
                 registration_number: document.getElementById('cRegNo').value,
                 vat_number: document.getElementById('cVatNo').value,
+                notes: document.getElementById('cNotes').value,
                 _source_app: 'Invoicing & Quotes'
             };
             if(!data.name) return alert('First Name is required.');
@@ -2215,7 +2218,7 @@
         }
 
         function emailDocPDF() {
-            const email = prompt("Enter the client's email address to send this document:", currentClientEmail);
+            const email = prompt("Enter the client's email address(es), separated by semicolons, to send this document:", currentClientEmail);
             if(!email) return;
             
             const btn = document.getElementById('btnEmailDoc');

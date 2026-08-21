@@ -620,7 +620,7 @@ def safe_table_name(name):
 
 
 COMPANY_IMPORT_TABLES = {
-    'clients': ['name', 'surname', 'company_name', 'registration_number', 'vat_number', 'building_number', 'street_name', 'suburb', 'postal_code', 'address', 'phone', 'email', 'client_type', 'discount_percent'],
+    'clients': ['name', 'surname', 'company_name', 'registration_number', 'vat_number', 'building_number', 'street_name', 'suburb', 'postal_code', 'address', 'phone', 'email', 'client_type', 'discount_percent', 'notes'],
     'employees': ['name', 'emp_number', 'id_passport', 'date_of_birth', 'job_title', 'status', 'emp_type', 'gross_salary', 'start_date', 'inactive_date', 'phone', 'email', 'address', 'emergency_contact', 'tax_number', 'paye_ref', 'bank_name', 'account_holder', 'account_number', 'branch_code', 'account_type', 'payment_reference', 'workday_hours', 'overtime_pay_treatment', 'notes'],
     'services': ['name', 'client_price', 'company_cost'],
     'bookings': ['title', 'start', 'employee', 'booking_type', 'transport', 'booking_notes', 'overtime_hours', 'is_invoiced'],
@@ -774,6 +774,46 @@ def valid_email_address(value):
     if not text:
         return True
     return bool(re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', text))
+
+
+CLIENT_EMAIL_PATTERN = re.compile(r'^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$')
+
+
+def parse_recipient_email_addresses(value, *, allow_empty=False):
+    """Return a validated, de-duplicated list of semicolon-delimited addresses.
+
+    Client profiles store multiple recipient addresses in the existing email
+    column using semicolons.  The canonical stored form remains a single string,
+    while outgoing RFC email headers use a comma-separated representation.
+    """
+    text = str(value or '').strip()
+    if not text:
+        if allow_empty:
+            return []
+        raise ValueError('At least one email address is required.')
+
+    raw_addresses = [part.strip() for part in text.split(';')]
+    if any(not part for part in raw_addresses):
+        raise ValueError('Email addresses must be separated by a single semicolon (;) without empty entries.')
+
+    invalid = [address for address in raw_addresses if not CLIENT_EMAIL_PATTERN.fullmatch(address)]
+    if invalid:
+        raise ValueError('Invalid email address: ' + ', '.join(invalid))
+
+    recipients = []
+    seen = set()
+    for address in raw_addresses:
+        key = address.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        recipients.append(address)
+    return recipients
+
+
+def normalise_client_email_field(value):
+    recipients = parse_recipient_email_addresses(value, allow_empty=True)
+    return '; '.join(recipients)
 
 
 EMPLOYEE_NUMBER_PREFIX = 'EMP'
@@ -994,7 +1034,14 @@ def validate_import_row(import_type, row, line_no, conn, company_id, seen_values
             cleaned[field] = number
 
     for email_field in ('email',):
-        if email_field in cleaned and not valid_email_address(cleaned[email_field]):
+        if email_field not in cleaned:
+            continue
+        if import_type == 'clients':
+            try:
+                cleaned[email_field] = normalise_client_email_field(cleaned[email_field])
+            except ValueError as exc:
+                errors.append(f"Line {line_no}, field '{email_field}': {exc}")
+        elif not valid_email_address(cleaned[email_field]):
             errors.append(f"Line {line_no}, field '{email_field}': '{cleaned[email_field]}' is not a valid email address.")
 
     if import_type == 'clients':
@@ -2384,7 +2431,7 @@ def init_db():
 
     loose_cols = {
         'bookings': [('client_id', 'INTEGER'), ('google_event_id', 'TEXT'), ('booking_type', 'TEXT DEFAULT "Standard Home Clean"'), ('transport', 'TEXT DEFAULT ""'), ('booking_notes', 'TEXT DEFAULT ""'), ('overtime_hours', 'REAL DEFAULT 0'), ('is_invoiced', 'INTEGER DEFAULT 0'), ('project_id', 'INTEGER')],
-        'clients': [('surname', 'TEXT'), ('address', 'TEXT'), ('building_number', 'TEXT'), ('street_name', 'TEXT'), ('suburb', 'TEXT'), ('postal_code', 'TEXT'), ('phone', 'TEXT'), ('email', 'TEXT'), ('client_type', 'TEXT DEFAULT "Ad hoc"'), ('discount_percent', 'REAL DEFAULT 0'), ('company_name', 'TEXT'), ('registration_number', 'TEXT'), ('vat_number', 'TEXT')],
+        'clients': [('surname', 'TEXT'), ('address', 'TEXT'), ('building_number', 'TEXT'), ('street_name', 'TEXT'), ('suburb', 'TEXT'), ('postal_code', 'TEXT'), ('phone', 'TEXT'), ('email', 'TEXT'), ('client_type', 'TEXT DEFAULT "Ad hoc"'), ('discount_percent', 'REAL DEFAULT 0'), ('company_name', 'TEXT'), ('registration_number', 'TEXT'), ('vat_number', 'TEXT'), ('notes', 'TEXT')],
         'invoices': [('client_id', 'INTEGER')],
         'quotes': [('client_id', 'INTEGER')],
         'employees': [('start_date', 'TEXT'), ('inactive_date', 'TEXT'), ('gross_salary', 'REAL DEFAULT 0'), ('emp_number', 'TEXT'), ('id_passport', 'TEXT'), ('job_title', 'TEXT'), ('status', 'TEXT DEFAULT "Active"'), ('phone', 'TEXT'), ('email', 'TEXT'), ('address', 'TEXT'), ('emergency_contact', 'TEXT'), ('tax_number', 'TEXT'), ('paye_ref', 'TEXT'), ('bank_details', 'TEXT'), ('bank_name', 'TEXT'), ('account_holder', 'TEXT'), ('account_number', 'TEXT'), ('branch_code', 'TEXT'), ('account_type', 'TEXT'), ('payment_reference', 'TEXT'), ('google_event_id', 'TEXT'), ('emp_type', 'TEXT DEFAULT "Full-time (5 Days)"'), ('cv_file', 'TEXT'), ('id_file', 'TEXT'), ('contract_file', 'TEXT'), ('additional_leave', 'REAL DEFAULT 0'), ('notes', 'TEXT'), ('workday_hours', 'REAL DEFAULT 7'), ('overtime_pay_treatment', 'TEXT DEFAULT "irregular"'), ('uif_contributor', 'TEXT DEFAULT "Yes"'), ('uif_non_contributor_reason', 'TEXT'), ('uif_termination_code', 'TEXT')],
@@ -12455,12 +12502,20 @@ def api_project_delete():
 
 @app.route('/update_client', methods=['POST'])
 def update_client():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     source_app = data.get('_source_app') or 'Booking & Ops'
     if source_app not in ['Booking & Ops', 'Invoicing & Quotes']:
         source_app = 'Booking & Ops'
-    conn = get_db_connection()
-    action_msg = None
+
+    client_name = str(data.get('name') or '').strip()
+    if not client_name:
+        return jsonify({"status": "error", "message": "First Name is required."}), 400
+    try:
+        client_email = normalise_client_email_field(data.get('email'))
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    client_notes = str(data.get('notes') or '').strip()
+
     address = compose_client_address(
         data.get('building_number'),
         data.get('street_name'),
@@ -12468,34 +12523,45 @@ def update_client():
         data.get('postal_code'),
         data.get('address')
     )
-    client_id = None
-    if data.get('id'):
-        client_id = int(data.get('id') or 0)
-        conn.execute('''UPDATE clients
-                        SET name=?, surname=?, client_type=?, phone=?, email=?, address=?,
-                            building_number=?, street_name=?, suburb=?, postal_code=?, discount_percent=?,
-                            company_name=?, registration_number=?, vat_number=?
-                        WHERE id=? AND company_id=?''',
-                     (data['name'], data.get('surname'), data.get('client_type'), data.get('phone'), data.get('email'), address,
-                      data.get('building_number'), data.get('street_name'), data.get('suburb'), data.get('postal_code'), sanitize_percent(data.get('discount_percent')),
-                      data.get('company_name'), data.get('registration_number'), data.get('vat_number'), client_id, session['company_id']))
-        action_msg = (source_app, 'Updated Client', f"Updated client profile: {data['name']}")
-    else:
-        cur = conn.execute('''INSERT INTO clients
-                        (company_id, name, surname, client_type, phone, email, address,
-                         building_number, street_name, suburb, postal_code, discount_percent,
-                         company_name, registration_number, vat_number)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                     (session['company_id'], data['name'], data.get('surname'), data.get('client_type'), data.get('phone'), data.get('email'), address,
-                      data.get('building_number'), data.get('street_name'), data.get('suburb'), data.get('postal_code'), sanitize_percent(data.get('discount_percent')),
-                      data.get('company_name'), data.get('registration_number'), data.get('vat_number')))
-        client_id = cur.lastrowid
-        action_msg = (source_app, 'Created Client', f"Added new client: {data['name']}")
-    conn.commit()
-    conn.close()
+    conn = get_db_connection()
+    action_msg = None
+    try:
+        client_id = None
+        if data.get('id'):
+            try:
+                client_id = int(data.get('id') or 0)
+            except Exception:
+                return jsonify({"status": "error", "message": "Invalid client ID."}), 400
+            existing = conn.execute('SELECT id FROM clients WHERE id=? AND company_id=?', (client_id, session['company_id'])).fetchone()
+            if not existing:
+                return jsonify({"status": "error", "message": "Client not found for this company."}), 404
+            conn.execute('''UPDATE clients
+                            SET name=?, surname=?, client_type=?, phone=?, email=?, address=?,
+                                building_number=?, street_name=?, suburb=?, postal_code=?, discount_percent=?,
+                                company_name=?, registration_number=?, vat_number=?, notes=?
+                            WHERE id=? AND company_id=?''',
+                         (client_name, data.get('surname'), data.get('client_type'), data.get('phone'), client_email, address,
+                          data.get('building_number'), data.get('street_name'), data.get('suburb'), data.get('postal_code'), sanitize_percent(data.get('discount_percent')),
+                          data.get('company_name'), data.get('registration_number'), data.get('vat_number'), client_notes, client_id, session['company_id']))
+            action_msg = (source_app, 'Updated Client', f"Updated client profile: {client_name}")
+        else:
+            cur = conn.execute('''INSERT INTO clients
+                            (company_id, name, surname, client_type, phone, email, address,
+                             building_number, street_name, suburb, postal_code, discount_percent,
+                             company_name, registration_number, vat_number, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                         (session['company_id'], client_name, data.get('surname'), data.get('client_type'), data.get('phone'), client_email, address,
+                          data.get('building_number'), data.get('street_name'), data.get('suburb'), data.get('postal_code'), sanitize_percent(data.get('discount_percent')),
+                          data.get('company_name'), data.get('registration_number'), data.get('vat_number'), client_notes))
+            client_id = cur.lastrowid
+            action_msg = (source_app, 'Created Client', f"Added new client: {client_name}")
+        conn.commit()
+    finally:
+        conn.close()
 
-    if action_msg: log_action(action_msg[0], action_msg[1], action_msg[2])
-    return jsonify({"status": "success", "client_id": client_id})
+    if action_msg:
+        log_action(action_msg[0], action_msg[1], action_msg[2])
+    return jsonify({"status": "success", "client_id": client_id, "email": client_email})
 
 @app.route('/client_report', methods=['POST'])
 def client_report():
@@ -13459,19 +13525,17 @@ def sync_existing_bookings_google_calendar():
 
 
 def _apply_company_email_headers(msg, settings, to_email):
-    """Apply tenant SMTP From/Reply-To headers consistently.
-
-    The Email & Calendar Settings field stored as ``sender_email`` is labelled
-    "Default Reply-To Sender Email" in the UI.  It must therefore be used
-    as the Reply-To header, not as the SMTP From identity.  SMTP providers
-    commonly require the authenticated mailbox to remain the From address.
-    """
+    """Apply tenant SMTP From/Reply-To headers and validated recipients."""
     smtp_user = str(settings.get('smtp_user') or '').strip()
     reply_to = str(settings.get('sender_email') or '').strip()
+    recipients = parse_recipient_email_addresses(to_email)
     msg['From'] = smtp_user
-    msg['To'] = to_email
+    # RFC message headers use commas even though the client profile stores the
+    # user-friendly semicolon-delimited form requested by Easy Admin users.
+    msg['To'] = ', '.join(recipients)
     if reply_to:
         msg['Reply-To'] = reply_to
+    return recipients
 
 
 @app.route('/email_payslip', methods=['POST'])
@@ -13491,7 +13555,7 @@ def email_payslip():
     try:
         msg = EmailMessage()
         msg['Subject'] = f"Payslip - {date_str}"
-        _apply_company_email_headers(msg, s_dict, emp['email'])
+        recipients = _apply_company_email_headers(msg, s_dict, emp['email'])
         msg.set_content(f"Dear {emp['name']},\n\nPlease find your attached payslip for {date_str}.\n\nKind regards,\n{session.get('company_name')}")
         msg.add_attachment(pdf_file.read(), maintype='application', subtype='pdf', filename=f"Payslip_{emp['name']}_{date_str}.pdf")
         
@@ -13506,8 +13570,10 @@ def email_payslip():
                 server.login(s_dict['smtp_user'], s_dict['smtp_pass'])
                 server.send_message(msg)
             
-        log_action('HR & Payroll', 'Emailed Payslip', f"Successfully sent digital payslip to {emp['name']} for {date_str}")
+        log_action('HR & Payroll', 'Emailed Payslip', f"Successfully sent digital payslip to {emp['name']} for {date_str} ({'; '.join(recipients)})")
         return jsonify({"message": "Email sent successfully!"})
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
     except Exception as e: 
         return jsonify({"message": f"Error sending email: {str(e)}"}), 500
 
@@ -16423,7 +16489,7 @@ def _send_pdf_email(pdf_bytes, filename, email, doc_name, client_name):
     try:
         msg = EmailMessage()
         msg['Subject'] = f"{doc_name.replace('_', ' ')} from {session.get('company_name')}"
-        _apply_company_email_headers(msg, s_dict, email)
+        recipients = _apply_company_email_headers(msg, s_dict, email)
         msg.set_content(f"Dear {client_name},\n\nPlease find attached your {doc_name.replace('_', ' ')}.\n\nThank you for your business.\n\nKind regards,\n{session.get('company_name')}")
         msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename=filename)
         port = int(s_dict.get('smtp_port', 465))
@@ -16436,8 +16502,10 @@ def _send_pdf_email(pdf_bytes, filename, email, doc_name, client_name):
             with smtplib.SMTP_SSL(s_dict['smtp_server'], port, timeout=10) as server:
                 server.login(s_dict['smtp_user'], s_dict['smtp_pass'])
                 server.send_message(msg)
-        log_action('Invoicing', 'Emailed Document', f"Sent {doc_name} to {email}")
-        return {"message": "Email sent successfully!"}, 200
+        log_action('Invoicing', 'Emailed Document', f"Sent {doc_name} to {'; '.join(recipients)}")
+        return {"message": f"Email sent successfully to {len(recipients)} recipient{'s' if len(recipients) != 1 else ''}!"}, 200
+    except ValueError as e:
+        return {"message": str(e)}, 400
     except Exception as e:
         return {"message": f"Error sending email: {str(e)}"}, 500
 
@@ -17068,7 +17136,7 @@ def email_document():
     try:
         msg = EmailMessage()
         msg['Subject'] = f"{doc_name.replace('_', ' ')} from {session.get('company_name')}"
-        _apply_company_email_headers(msg, s_dict, email)
+        recipients = _apply_company_email_headers(msg, s_dict, email)
         msg.set_content(f"Dear {client_name},\n\nPlease find attached your {doc_name.replace('_', ' ')}.\n\nThank you for your business.\n\nKind regards,\n{session.get('company_name')}")
         msg.add_attachment(pdf_file.read(), maintype='application', subtype='pdf', filename=f"{doc_name}.pdf")
         
@@ -17083,8 +17151,10 @@ def email_document():
                 server.login(s_dict['smtp_user'], s_dict['smtp_pass'])
                 server.send_message(msg)
             
-        log_action('Invoicing', 'Emailed Document', f"Sent {doc_name} to {email}")
-        return jsonify({"message": "Email sent successfully!"})
+        log_action('Invoicing', 'Emailed Document', f"Sent {doc_name} to {'; '.join(recipients)}")
+        return jsonify({"message": f"Email sent successfully to {len(recipients)} recipient{'s' if len(recipients) != 1 else ''}!"})
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
     except Exception as e: 
         return jsonify({"message": f"Error sending email: {str(e)}"}), 500
 
