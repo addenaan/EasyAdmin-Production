@@ -7,9 +7,9 @@
     <title>Easy Admin Mobile | {{ session.get('company_name', 'Workspace') }}</title>
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/static/pwa-icon-192.png">
-    <link rel="stylesheet" href="/static/mobile.css?v=20260622">
+    <link rel="stylesheet" href="/static/mobile.css?v=20260821-route-planner-v1">
 </head>
-<body>
+<body data-company-id="{{ session.get('company_id', '') }}" data-username="{{ session.get('username', '')|e }}">
     <div class="app-shell">
         <header class="mobile-header">
             <div class="brand-row">
@@ -41,6 +41,7 @@
 
             <section id="dashboardView" class="view active-view">
                 <div id="dashboardStats" class="stats-grid"></div>
+                <button id="planDailyRouteBtn" class="primary-btn route-plan-launch hidden" type="button">🗺️ Plan Daily Route</button>
                 <div class="section-heading"><h2>Today’s bookings</h2><button class="small-link" data-jump="bookings">View all</button></div>
                 <div id="todayBookings" class="card-list loading-card">Loading bookings...</div>
                 <div class="section-heading"><h2>Upcoming</h2></div>
@@ -101,7 +102,7 @@
         </div>
     </div>
 
-    <script defer src="/static/mobile.js?v=20260622"></script>
+    <script defer src="/static/mobile.js?v=20260821-route-planner-v1"></script>
     <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
     <script defer src="/static/pwa-update.js?v=20260706-update-prompt-password-route-fix"></script>
 </body>

@@ -1163,7 +1163,7 @@
                         </div>
                         <div class="col-md-6">
                             <label class="small fw-bold">Starting Point (e.g., Office Address)</label>
-                            <input type="text" id="routeStart" class="form-control" value="22 Salt River Road, Salt River, 7925">
+                            <input type="text" id="routeStart" class="form-control" placeholder="Enter office or starting address">
                         </div>
                         <div class="col-md-2 d-flex align-items-end">
                             <button class="btn btn-primary w-100" onclick="fetchRouteBookings()">Load</button>
@@ -1178,7 +1178,7 @@
                     </div>
 
                     <div class="form-check mb-3">
-                        <input class="form-check-input" type="checkbox" id="optimizeRoute" checked>
+                        <input class="form-check-input" type="checkbox" id="optimizeRoute">
                         <label class="form-check-label small text-muted" for="optimizeRoute">
                             <strong>Auto-Optimize geographical route</strong> (Uncheck to strictly force Google Maps to follow the chronological time order)
                         </label>
@@ -3281,8 +3281,31 @@
         // ==========================================
         // ROUTE PLANNER LOGIC
         // ==========================================
+        const routePlannerCompanyId = {{ session.get('company_id')|tojson }};
+        const routePlannerUsername = {{ session.get('username')|tojson }};
+        const routePlannerStorageKey = `easyadmin:daily-route-start:${routePlannerCompanyId || 'company'}:${routePlannerUsername || 'user'}`;
+
+        function getRememberedRouteStart() {
+            try {
+                return localStorage.getItem(routePlannerStorageKey) || '';
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function rememberRouteStart() {
+            const input = document.getElementById('routeStart');
+            const value = input ? input.value.trim() : '';
+            if (!value) return;
+            try {
+                localStorage.setItem(routePlannerStorageKey, value);
+            } catch (e) {}
+        }
+
         function openRoutePlannerModal() {
             document.getElementById('routeDate').value = localISODate();
+            document.getElementById('routeStart').value = getRememberedRouteStart();
+            document.getElementById('optimizeRoute').checked = false;
             document.getElementById('routeList').innerHTML = '<li class="list-group-item text-muted small">Click Load to fetch bookings...</li>';
             currentRouteData = [];
             routePlannerModal.show();
@@ -3339,6 +3362,7 @@
             const optimize = document.getElementById('optimizeRoute').checked;
 
             if (!startPoint) return alert("Please enter a starting point.");
+            rememberRouteStart();
             if (currentRouteData.length === 0) return alert("There are no valid bookings left on the route.");
 
             const validStops = currentRouteData.filter(b => b.address !== 'No address on file');
@@ -3358,6 +3382,8 @@
             const mapUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}${waypointsParam}`;
             window.open(mapUrl, '_blank');
         }
+
+        document.getElementById('routeStart').addEventListener('change', rememberRouteStart);
 
     </script>
     <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>

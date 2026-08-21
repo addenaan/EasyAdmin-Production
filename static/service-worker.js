@@ -1,8 +1,8 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v19-session-warning';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v20-route-planner';
 const APP_SHELL = [
   '/mobile/offline',
-  '/static/mobile.css?v=20260622',
-  '/static/mobile.js?v=20260622',
+  '/static/mobile.css?v=20260821-route-planner-v1',
+  '/static/mobile.js?v=20260821-route-planner-v1',
   '/static/easyadmin-formatters.js?v=20260622-format',
   '/static/pwa-update.js?v=20260706-update-prompt-password-route-fix',
   '/static/session-timeout.js?v=20260810-session-warning-v1',

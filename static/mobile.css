@@ -157,3 +157,18 @@ textarea { min-height: 120px; resize: vertical; }
     .brand-logo { width: 48px; height: 48px; }
     .mobile-header h1 { font-size: 1rem; }
 }
+
+/* Mobile daily route planner */
+.route-plan-launch { width: 100%; margin: 2px 0 4px; font-size: 0.98rem; }
+.route-planner-mobile { display: grid; gap: 14px; }
+.route-bookings-box { border: 1px solid var(--border); border-radius: 18px; padding: 12px; background: #fbfdff; }
+.route-stop-list { display: grid; gap: 8px; margin-top: 8px; color: var(--muted); }
+.route-stop-card { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px; border: 1px solid var(--border); border-radius: 16px; background: #fff; }
+.route-stop-main { min-width: 0; flex: 1; }
+.route-stop-card .item-meta { overflow-wrap: anywhere; }
+.route-missing-address { color: var(--danger); font-weight: 800; }
+.route-remove-btn { flex: 0 0 auto; color: var(--danger); border-color: #f3b3bd; background: #fff7f8; }
+.route-checkbox-row { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 16px; background: #fff; color: var(--text); }
+.route-checkbox-row input[type="checkbox"] { width: 20px; height: 20px; min-height: 20px; margin-top: 2px; padding: 0; }
+.route-checkbox-row small { color: var(--muted); font-weight: 600; line-height: 1.35; }
+.route-maps-btn { width: 100%; background: var(--success); }

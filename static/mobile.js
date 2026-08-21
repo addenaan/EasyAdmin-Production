@@ -3,6 +3,7 @@
         dashboard: null,
         currentTab: 'dashboard',
         deferredPrompt: null,
+        routeData: [],
     };
 
     const $ = (id) => document.getElementById(id);
@@ -14,6 +15,25 @@
         if (status === 'In Progress') return 'warning';
         if (status === 'Cancelled') return 'danger';
         return 'dark';
+    };
+    const routeStartStorageKey = () => {
+        const companyId = document.body.dataset.companyId || 'company';
+        const username = document.body.dataset.username || 'user';
+        return `easyadmin:daily-route-start:${companyId}:${username}`;
+    };
+    const getRememberedRouteStart = () => {
+        try {
+            return localStorage.getItem(routeStartStorageKey()) || '';
+        } catch (error) {
+            return '';
+        }
+    };
+    const rememberRouteStart = (value) => {
+        const cleanValue = String(value || '').trim();
+        if (!cleanValue) return;
+        try {
+            localStorage.setItem(routeStartStorageKey(), cleanValue);
+        } catch (error) {}
     };
 
     async function api(url, options) {
@@ -113,7 +133,10 @@
             $('upcomingBookings').innerHTML = data.upcoming_bookings.length ? data.upcoming_bookings.map(bookingCard).join('') : empty('No upcoming bookings in the next two weeks.');
             $('activeProjects').innerHTML = data.active_projects.length ? data.active_projects.map(projectCard).join('') : empty('No active projects found.');
             if (!data.modules.invoicing) document.querySelector('[data-tab="invoices"]').classList.add('hidden');
-            if (!data.modules.booking) {
+            if (data.modules.booking) {
+                $('planDailyRouteBtn').classList.remove('hidden');
+            } else {
+                $('planDailyRouteBtn').classList.add('hidden');
                 document.querySelector('[data-tab="bookings"]').classList.add('hidden');
                 document.querySelector('[data-tab="projects"]').classList.add('hidden');
             }
@@ -182,6 +205,114 @@
     function attachmentList(items) {
         if (!items || !items.length) return empty('No files uploaded yet.');
         return items.map((a) => `<div class="file-row"><span>${safe(a.original_filename)}</span><a href="/download_attachment/${a.id}" target="_blank" rel="noopener">Open</a></div>`).join('');
+    }
+
+    function mobileRouteDateValue() {
+        if (state.dashboard && state.dashboard.today) return state.dashboard.today;
+        const now = new Date();
+        const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+        return local.toISOString().slice(0, 10);
+    }
+
+    function openMobileRoutePlanner() {
+        if (!state.dashboard || !state.dashboard.modules || !state.dashboard.modules.booking) {
+            showToast('Booking & Operations access is required to plan a route.', 'error');
+            return;
+        }
+        state.routeData = [];
+        openSheet('Daily Route Planner', 'Booking & Ops', `<div class="route-planner-mobile">
+            <label>Select Date<input id="mobileRouteDate" type="date" value="${safe(mobileRouteDateValue())}"></label>
+            <label>Starting Point (e.g., Office Address)<input id="mobileRouteStart" type="text" value="${safe(getRememberedRouteStart())}" placeholder="Enter office or starting address"></label>
+            <button class="primary-btn" type="button" data-route-load>Load bookings</button>
+            <div class="route-bookings-box">
+                <div class="detail-label">Bookings on Route</div>
+                <div id="mobileRouteList" class="route-stop-list">Select a date and tap Load bookings.</div>
+            </div>
+            <label class="route-checkbox-row">
+                <input id="mobileOptimizeRoute" type="checkbox">
+                <span><strong>Auto-Optimize geographical route</strong><br><small>Leave unchecked to keep the chronological booking order.</small></span>
+            </label>
+            <button class="primary-btn route-maps-btn" type="button" data-route-open-maps>📍 Open in Google Maps</button>
+        </div>`);
+    }
+
+    async function loadMobileRouteBookings() {
+        const dateEl = $('mobileRouteDate');
+        const list = $('mobileRouteList');
+        const date = dateEl ? dateEl.value : '';
+        if (!date) {
+            showToast('Please select a date.', 'error');
+            return;
+        }
+        if (list) list.innerHTML = '<div class="loading-card">Loading bookings...</div>';
+        try {
+            const data = await api('/daily_route', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ date })
+            });
+            state.routeData = Array.isArray(data.route) ? data.route : [];
+            renderMobileRouteList();
+        } catch (err) {
+            state.routeData = [];
+            if (list) list.innerHTML = empty(err.message);
+        }
+    }
+
+    function renderMobileRouteList() {
+        const list = $('mobileRouteList');
+        if (!list) return;
+        if (!state.routeData.length) {
+            list.innerHTML = empty('No bookings found for this date.');
+            return;
+        }
+        list.innerHTML = state.routeData.map((booking, index) => {
+            const hasAddress = booking.address && booking.address !== 'No address on file';
+            return `<div class="route-stop-card">
+                <div class="route-stop-main">
+                    <div class="item-title">${safe(booking.time || '')} · ${safe(booking.client || 'Client')}</div>
+                    <div class="item-meta ${hasAddress ? '' : 'route-missing-address'}">📍 ${safe(hasAddress ? booking.address : 'Missing address')}</div>
+                </div>
+                <button class="action-btn route-remove-btn" type="button" data-route-remove="${index}">Remove</button>
+            </div>`;
+        }).join('');
+    }
+
+    function removeMobileRouteStop(index) {
+        if (!Number.isInteger(index) || index < 0 || index >= state.routeData.length) return;
+        state.routeData.splice(index, 1);
+        renderMobileRouteList();
+    }
+
+    function openMobileRouteInMaps() {
+        const startEl = $('mobileRouteStart');
+        const optimizeEl = $('mobileOptimizeRoute');
+        const startPoint = startEl ? startEl.value.trim() : '';
+        const optimize = Boolean(optimizeEl && optimizeEl.checked);
+        if (!startPoint) {
+            showToast('Please enter a starting point.', 'error');
+            return;
+        }
+        rememberRouteStart(startPoint);
+        if (!state.routeData.length) {
+            showToast('There are no valid bookings left on the route.', 'error');
+            return;
+        }
+        const validStops = state.routeData.filter((booking) => booking.address && booking.address !== 'No address on file');
+        if (!validStops.length) {
+            showToast('None of the remaining bookings have valid addresses.', 'error');
+            return;
+        }
+        const origin = encodeURIComponent(startPoint);
+        const destination = encodeURIComponent(validStops[validStops.length - 1].address);
+        let waypointsParam = '';
+        if (validStops.length > 1) {
+            const intermediateStops = validStops.slice(0, -1).map((booking) => encodeURIComponent(booking.address));
+            const optimizeFlag = optimize ? 'optimize:true|' : '';
+            waypointsParam = `&waypoints=${optimizeFlag}${intermediateStops.join('|')}`;
+        }
+        const mapUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}${waypointsParam}`;
+        window.open(mapUrl, '_blank', 'noopener');
     }
 
     async function openBooking(id) {
@@ -325,6 +456,7 @@
         $('loadBookingsBtn').addEventListener('click', loadBookings);
         $('loadProjectsBtn').addEventListener('click', loadProjects);
         $('loadInvoicesBtn').addEventListener('click', loadInvoices);
+        $('planDailyRouteBtn').addEventListener('click', openMobileRoutePlanner);
         $('projectSearch').addEventListener('keydown', (event) => { if (event.key === 'Enter') loadProjects(); });
         document.addEventListener('click', (event) => {
             const bookingCardEl = event.target.closest('[data-booking-id]');
@@ -334,6 +466,12 @@
             const notesEl = event.target.closest('[data-save-notes]');
             const bookingUploadEl = event.target.closest('[data-upload-booking]');
             const projectUploadEl = event.target.closest('[data-upload-project]');
+            const routeLoadEl = event.target.closest('[data-route-load]');
+            const routeMapsEl = event.target.closest('[data-route-open-maps]');
+            const routeRemoveEl = event.target.closest('[data-route-remove]');
+            if (routeLoadEl) return loadMobileRouteBookings();
+            if (routeMapsEl) return openMobileRouteInMaps();
+            if (routeRemoveEl) return removeMobileRouteStop(Number(routeRemoveEl.dataset.routeRemove));
             if (statusEl) return updateBookingStatus(statusEl.dataset.bookingStatusId, statusEl.dataset.status);
             if (notesEl) return saveNotes(notesEl.dataset.saveNotes);
             if (bookingUploadEl) return uploadFiles('booking', bookingUploadEl.dataset.uploadBooking, 'bookingFilesInput');
@@ -341,6 +479,9 @@
             if (closeEl) return closeSheet();
             if (bookingCardEl) return openBooking(bookingCardEl.dataset.bookingId);
             if (projectCardEl) return openProject(projectCardEl.dataset.projectId);
+        });
+        document.addEventListener('change', (event) => {
+            if (event.target && event.target.id === 'mobileRouteStart') rememberRouteStart(event.target.value);
         });
         window.addEventListener('online', () => $('offlineNotice').classList.add('hidden'));
         window.addEventListener('offline', () => $('offlineNotice').classList.remove('hidden'));
