@@ -143,7 +143,7 @@
 
         <div id="calendar-view">
             <div class="d-flex justify-content-between mb-3">
-                <h4>Full Month View</h4>
+                <h4>Booking Calendar</h4>
                 <div>
                     <button class="btn btn-success me-2" onclick="openBookingsExportModal()">⬇️ Export {{ booking_label }}s</button>
                     <button class="btn btn-primary me-2" onclick="openNewBookingModal()">+ Add {{ booking_label }}</button>
@@ -1357,9 +1357,32 @@
         document.addEventListener('DOMContentLoaded', function() {
             var calendarEl = document.getElementById('calendar');
             calendar = new FullCalendar.Calendar(calendarEl, {
-                initialView: 'dayGridMonth', events: '/bookings',
-                headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek' },
+                initialView: 'timeGridDay', events: '/bookings',
+                customButtons: {
+                    todayBookings: {
+                        text: 'Today',
+                        hint: "Show today's bookings",
+                        click: function() {
+                            calendar.today();
+                            calendar.changeView('timeGridDay');
+                        }
+                    }
+                },
+                buttonText: { week: 'Week', month: 'Month' },
+                headerToolbar: { left: 'prev,next', center: 'title', right: 'todayBookings,timeGridWeek,dayGridMonth' },
                 height: 700,
+                datesSet: function(info) {
+                    const todayButton = calendarEl.querySelector('.fc-todayBookings-button');
+                    if (!todayButton) return;
+                    const now = new Date();
+                    const currentStart = info.view.currentStart;
+                    const isTodayView = info.view.type === 'timeGridDay'
+                        && currentStart.getFullYear() === now.getFullYear()
+                        && currentStart.getMonth() === now.getMonth()
+                        && currentStart.getDate() === now.getDate();
+                    todayButton.classList.toggle('fc-button-active', isTodayView);
+                    todayButton.setAttribute('aria-pressed', isTodayView ? 'true' : 'false');
+                },
                 eventClick: function(info) {
                     if (info.event.extendedProps.event_type !== 'booking') return;
                     const d = info.event.start;
