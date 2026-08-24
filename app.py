@@ -5327,7 +5327,13 @@ def _reports_invoice_rows(conn, filters, include_all_statuses=False):
         params.append(filters['project_id'])
     rows = conn.execute(f"""
         SELECT i.*, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name,
-               p.project_name, p.project_code
+               p.project_name, p.project_code,
+               (SELECT COALESCE(SUM(ip.amount), 0)
+                  FROM invoice_payments ip
+                 WHERE ip.company_id=i.company_id AND ip.invoice_id=i.id) AS payment_total,
+               (SELECT COALESCE(SUM(icn.amount), 0)
+                  FROM invoice_credit_notes icn
+                 WHERE icn.company_id=i.company_id AND icn.invoice_id=i.id) AS credit_note_total
         FROM invoices i
         LEFT JOIN clients c ON c.id=i.client_id AND c.company_id=i.company_id
         LEFT JOIN projects p ON p.id=i.project_id AND p.company_id=i.company_id
@@ -5339,9 +5345,29 @@ def _reports_invoice_rows(conn, filters, include_all_statuses=False):
     for r in rows:
         d = dict(r)
         total = _report_money(d.get('total'))
-        balance = _report_money(d.get('balance_remaining') if d.get('balance_remaining') is not None else (d.get('amount_due_now') if d.get('amount_due_now') is not None else total))
-        paid = _report_money(total - balance)
-        status = str(d.get('status') or '').strip() or ('Paid' if balance <= 0 else 'Unpaid')
+        paid = _report_money(d.get('payment_total'))
+        credited = _report_money(d.get('credit_note_total'))
+        balance = _report_money(max(total - paid - credited, 0.0))
+        stored_status = str(d.get('status') or '').strip()
+        stored_status_lower = stored_status.lower()
+        if stored_status_lower in {'cancelled', 'canceled', 'void', 'voided'}:
+            status = stored_status
+        elif total <= 0:
+            status = 'Unpaid'
+        elif credited >= total:
+            status = 'Credited'
+        elif balance <= 0.004 and credited > 0:
+            status = 'Settled with Credit'
+        elif balance <= 0.004:
+            status = 'Paid'
+        elif credited > 0.004 and paid > 0.004:
+            status = 'Partially Paid/Credited'
+        elif credited > 0.004:
+            status = 'Partially Credited'
+        elif paid > 0.004:
+            status = 'Partially Paid'
+        else:
+            status = 'Unpaid'
         due_date = d.get('due_date') or d.get('date') or ''
         overdue_days = 0
         try:
@@ -5352,19 +5378,20 @@ def _reports_invoice_rows(conn, filters, include_all_statuses=False):
             'computed_total': total,
             'computed_balance': balance,
             'computed_paid': paid,
+            'computed_credited': credited,
             'computed_status': status,
             'overdue_days': overdue_days,
             'formatted_num': _billing_document_formatted_number(conn, cid, 'invoice', d),
         })
         status_filter = filters.get('invoice_status') or ''
         if not include_all_statuses and status_filter in {'paid', 'unpaid', 'partial', 'overdue'}:
-            if status_filter == 'paid' and balance > 0:
+            if status_filter == 'paid' and balance > 0.004:
                 continue
-            if status_filter == 'unpaid' and not (balance > 0 and paid <= 0):
+            if status_filter == 'unpaid' and not (balance > 0.004 and paid <= 0.004 and credited <= 0.004):
                 continue
-            if status_filter == 'partial' and not (balance > 0 and paid > 0):
+            if status_filter == 'partial' and not (balance > 0.004 and (paid > 0.004 or credited > 0.004)):
                 continue
-            if status_filter == 'overdue' and not (balance > 0 and overdue_days > 0):
+            if status_filter == 'overdue' and not (balance > 0.004 and overdue_days > 0):
                 continue
         result.append(d)
     return result
@@ -6090,6 +6117,96 @@ def _build_reports_payload(report_type, filters):
         conn.close()
 
 
+def _reports_pdf_safe_filename(title, filters):
+    base = re.sub(r'[^A-Za-z0-9_\-]+', '_', str(title or 'Easy_Admin_Report')).strip('_') or 'Easy_Admin_Report'
+    start_date = str((filters or {}).get('start_date') or '').strip()
+    end_date = str((filters or {}).get('end_date') or '').strip()
+    suffix = f'_{start_date}_to_{end_date}' if start_date and end_date else ''
+    return f'{base}{suffix}.pdf'
+
+
+def _reports_pdf_money_column(column_name):
+    name = str(column_name or '').strip().lower()
+    return any(token in name for token in (
+        'price', 'subtotal', 'discount', 'vat', 'total', 'paid', 'balance', 'amount',
+        'value', 'salary', 'cost', 'income', 'expense', 'profit', 'revenue', 'uif',
+        'paye', 'deduction', 'gross', 'net pay', 'earnings'
+    ))
+
+
+def _reports_pdf_numeric_column(column_name):
+    name = str(column_name or '').strip().lower()
+    return _reports_pdf_money_column(name) or any(token in name for token in (
+        'count', 'bookings', 'completed', 'uninvoiced', 'documents', 'days', 'hours',
+        'quantity', 'margin', 'percent', '%'
+    ))
+
+
+def _reports_pdf_cell(value, column_name):
+    if isinstance(value, dict):
+        value = value.get('text') or value.get('url') or ''
+    if value is None:
+        return ''
+    name = str(column_name or '').strip().lower()
+    if _reports_pdf_money_column(name):
+        try:
+            return _money(float(value or 0))
+        except (TypeError, ValueError):
+            return str(value)
+    if 'margin' in name or 'percent' in name or '%' in name:
+        try:
+            return f'{float(value or 0):.2f}%'
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def _build_standard_report_pdf_payload(report_payload, company):
+    columns = report_payload.get('columns') or []
+    pdf_columns = [
+        {
+            'label': str(column),
+            'align': 'right' if _reports_pdf_numeric_column(column) else 'left'
+        }
+        for column in columns
+    ]
+    pdf_rows = []
+    for row in report_payload.get('rows') or []:
+        cells = [
+            _reports_pdf_cell(row[idx] if idx < len(row) else '', columns[idx])
+            for idx in range(len(columns))
+        ]
+        pdf_rows.append({'cells': cells})
+
+    summary = report_payload.get('summary') or {}
+    if columns:
+        summary_parts = [f"Rows: {int(summary.get('row_count') or len(pdf_rows))}"]
+        if int(summary.get('booking_count') or 0) > 0:
+            summary_parts.append(f"Bookings: {int(summary.get('booking_count') or 0)}")
+        if int(summary.get('completed_bookings') or 0) > 0:
+            summary_parts.append(f"Completed: {int(summary.get('completed_bookings') or 0)}")
+        if int(summary.get('uninvoiced_bookings') or 0) > 0:
+            summary_parts.append(f"Uninvoiced: {int(summary.get('uninvoiced_bookings') or 0)}")
+        pdf_rows.append({
+            'cells': [' | '.join(summary_parts)] + [''] * (len(columns) - 1),
+            'bold': True,
+            'shade': True,
+            'total': True
+        })
+
+    filters = report_payload.get('filters') or {}
+    subtitle = f"{filters.get('start_date', '')} to {filters.get('end_date', '')} | Generated {report_payload.get('generated_at', '')}"
+    return {
+        'company': company,
+        'title': report_payload.get('title') or 'Easy Admin Report',
+        'subtitle': subtitle,
+        'framework': '',
+        'orientation': 'landscape' if len(columns) >= 6 else 'portrait',
+        'columns': pdf_columns,
+        'groups': [{'rows': pdf_rows}],
+    }
+
+
 @app.route('/reports')
 def reports_index():
     start_date, end_date = _report_default_dates()
@@ -6157,15 +6274,28 @@ def api_reports_overview():
 
         # Invoice totals are available only to Invoicing or Finance report users.
         if perms.intersection({'invoicing', 'finance'}):
-            invoice_row = conn.execute("""SELECT SUM(COALESCE(total, 0)) AS invoice_total,
-                                                SUM(COALESCE(balance_remaining, COALESCE(amount_due_now, total), 0)) AS balance_total,
-                                                COUNT(*) AS invoice_count
-                                         FROM invoices WHERE company_id=? AND date BETWEEN ? AND ?""", (cid, filters['start_date'], filters['end_date'])).fetchone()
-            invoice_data = dict(invoice_row) if invoice_row else {}
+            invoice_rows = conn.execute("""SELECT i.total,
+                                                   (SELECT COALESCE(SUM(ip.amount), 0)
+                                                      FROM invoice_payments ip
+                                                     WHERE ip.company_id=i.company_id AND ip.invoice_id=i.id) AS payment_total,
+                                                   (SELECT COALESCE(SUM(icn.amount), 0)
+                                                      FROM invoice_credit_notes icn
+                                                     WHERE icn.company_id=i.company_id AND icn.invoice_id=i.id) AS credit_note_total
+                                            FROM invoices i
+                                            WHERE i.company_id=? AND i.date BETWEEN ? AND ?""", (cid, filters['start_date'], filters['end_date'])).fetchall()
+            invoice_total = 0.0
+            balance_total = 0.0
+            for invoice_row in invoice_rows:
+                invoice_data = dict(invoice_row)
+                total = _report_money(invoice_data.get('total'))
+                paid = _report_money(invoice_data.get('payment_total'))
+                credited = _report_money(invoice_data.get('credit_note_total'))
+                invoice_total += total
+                balance_total += max(total - paid - credited, 0.0)
             metrics.update({
-                'invoice_total': _report_money(invoice_data.get('invoice_total')),
-                'outstanding_balance': _report_money(invoice_data.get('balance_total')),
-                'invoice_count': int(invoice_data.get('invoice_count') or 0)
+                'invoice_total': _report_money(invoice_total),
+                'outstanding_balance': _report_money(balance_total),
+                'invoice_count': len(invoice_rows)
             })
 
         # Expense metrics are Finance-only.
@@ -6222,6 +6352,41 @@ def api_reports_run():
         return jsonify({'status': 'error', 'message': str(exc)}), 400
     except Exception as exc:
         return jsonify({'status': 'error', 'message': f'Report could not be generated: {exc}'}), 500
+
+
+@app.route('/export/reports/<report_type>.pdf')
+def export_reports_pdf(report_type):
+    report_type = (report_type or '').strip()
+    denied = _ensure_report_type_allowed(report_type, json_response=False)
+    if denied:
+        return denied
+
+    filters = _report_filters(request.args)
+    try:
+        report_payload = _build_reports_payload(report_type, filters)
+    except PermissionError as exc:
+        return str(exc), 403
+    except ValueError:
+        return 'Invalid report type.', 400
+
+    conn = get_db_connection()
+    try:
+        company = _accounting_company_payload(conn, session['company_id'])
+    finally:
+        conn.close()
+
+    pdf_payload = _build_standard_report_pdf_payload(report_payload, company)
+    pdf_bytes = _draw_accounting_report_pdf(pdf_payload)
+    filename = _reports_pdf_safe_filename(report_payload.get('title'), filters)
+    try:
+        log_action('Reports', 'Downloaded Report PDF', f"{report_payload.get('title')} | {filters.get('start_date')} to {filters.get('end_date')}")
+    except Exception:
+        pass
+    return Response(
+        pdf_bytes,
+        mimetype='application/pdf',
+        headers={'Content-Disposition': f'attachment; filename={filename}'}
+    )
 
 
 @app.route('/export/reports/<report_type>.csv')
@@ -19046,7 +19211,11 @@ def _draw_accounting_report_pdf(payload):
                 text_at(detail_x, cy, 'VAT No: ' + str(company.get('vat_number')), 8, False, grey)
             text_at(page_w - margin, y_top - 10, payload.get('title', 'Accounting Report'), 18, True, blue, 'right')
             text_at(page_w - margin, y_top - 28, payload.get('subtitle', ''), 8.5, False, grey, 'right')
-            text_at(page_w - margin, y_top - 41, 'IFRS for SMEs', 8, True, dark, 'right')
+            framework = payload.get('framework')
+            if framework is None:
+                framework = 'IFRS for SMEs'
+            if framework:
+                text_at(page_w - margin, y_top - 41, framework, 8, True, dark, 'right')
             line(margin, y_top - 70, page_w - margin, y_top - 70, stroke=(0.75,0.80,0.86), width=0.8)
             return y_top - 92
         text_at(margin, y_top - 12, payload.get('title', 'Accounting Report') + ' (continued)', 12, True, blue)
