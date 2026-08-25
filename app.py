@@ -16917,162 +16917,199 @@ def _get_cached_pdf_image(path):
         return None
 
 
-def _draw_pdf_document(payload):
-    page_w, page_h = 595.28, 841.89
-    margin = 36.0
-    blue = (0.05, 0.62, 0.75)
-    dark = (0.12, 0.12, 0.12)
-    grey = (0.45, 0.45, 0.45)
-    light = (0.95, 0.96, 0.97)
-    cmds = []
-    pages = []
-    page_no = 0
+def _billing_pdf_safe_text(value):
+    """Return text that is safe for ReportLab's built-in WinAnsi fonts."""
+    text = str(value or '').replace('\u00a0', ' ')
+    replacements = {
+        '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"',
+        '\u2013': '-', '\u2014': '-', '\u2022': '-', '\u2026': '...',
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text.encode('cp1252', 'replace').decode('cp1252')
 
-    def cmd(line):
-        cmds.append(line)
 
-    def color(c, op='rg'):
-        return f"{c[0]:.3f} {c[1]:.3f} {c[2]:.3f} {op}"
+def _billing_pdf_wrap_text(value, font_name, font_size, max_width):
+    from reportlab.pdfbase.pdfmetrics import stringWidth
 
-    def _text_width(value, size=9, bold=False):
-        value = str(value or '')
-        # Approximate Helvetica/Helvetica-Bold widths closely enough for reliable
-        # right-alignment of totals, dates, document numbers and titles.
-        total = 0.0
-        for ch in value:
-            if ch.isdigit():
-                total += 0.556
-            elif ch in ',.':
-                total += 0.278 if not bold else 0.333
-            elif ch in ' -/:':
-                total += 0.278 if not bold else 0.333
-            elif ch in 'ilI':
-                total += 0.240 if not bold else 0.300
-            elif ch in 'mwMW':
-                total += 0.800 if not bold else 0.900
+    text = _billing_pdf_safe_text(value).replace('\r', ' ').replace('\n', ' ')
+    words = text.split()
+    if not words:
+        return ['']
+    lines = []
+    current = ''
+    for word in words:
+        candidate = word if not current else current + ' ' + word
+        if stringWidth(candidate, font_name, font_size) <= max_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = ''
+        # Split an unusually long unbroken value so it cannot overflow the cell.
+        part = ''
+        for ch in word:
+            candidate = part + ch
+            if part and stringWidth(candidate, font_name, font_size) > max_width:
+                lines.append(part)
+                part = ch
             else:
-                total += 0.520 if not bold else 0.600
-        return total * size
+                part = candidate
+        current = part
+    if current:
+        lines.append(current)
+    return lines or ['']
 
-    def text(x, y, value, size=9, bold=False, c=dark, align='left'):
-        value = str(value or '').replace('\u00a0', ' ')
-        text_w = _text_width(value, size, bold)
-        if align == 'right':
-            x = x - text_w
-        elif align == 'center':
-            x = x - text_w / 2
-        font = 'F2' if bold else 'F1'
-        cmd(f"{color(c)} BT /{font} {size:.2f} Tf {x:.2f} {y:.2f} Td ({_pdf_text_escape(value)}) Tj ET")
 
-    def rect(x, y, w, h, stroke=(0,0,0), fill=None):
-        if fill is not None:
-            cmd(f"{color(fill)} {x:.2f} {y:.2f} {w:.2f} {h:.2f} re f")
-        if stroke is not None:
-            cmd(f"{color(stroke, 'RG')} {x:.2f} {y:.2f} {w:.2f} {h:.2f} re S")
+def _validate_billing_pdf_bytes(pdf_bytes):
+    if not isinstance(pdf_bytes, (bytes, bytearray)):
+        raise ValueError('PDF generation did not return a binary document.')
+    data = bytes(pdf_bytes)
+    if len(data) < 800 or not data.startswith(b'%PDF-') or b'%%EOF' not in data[-64:]:
+        raise ValueError('Generated PDF failed document validation.')
+    return data
 
-    def line(x1, y1, x2, y2, stroke=(0,0,0), width=0.5):
-        cmd(f"{width:.2f} w {color(stroke, 'RG')} {x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S")
+
+def _draw_pdf_document(payload):
+    """Generate invoice/quote PDFs with ReportLab for cross-viewer compatibility."""
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.colors import Color
+    from reportlab.lib.utils import ImageReader
+
+    page_w, page_h = A4
+    margin = 36.0
+    blue = Color(0.05, 0.62, 0.75)
+    dark = Color(0.12, 0.12, 0.12)
+    grey = Color(0.45, 0.45, 0.45)
+    light = Color(0.95, 0.96, 0.97)
+    border = Color(0.80, 0.80, 0.80)
+    soft_border = Color(0.85, 0.85, 0.85)
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(
+        buffer,
+        pagesize=A4,
+        pageCompression=1,
+        pdfVersion=(1, 4),
+    )
+    pdf.setTitle(_billing_pdf_safe_text(f"{payload.get('title', 'Document')} {payload.get('number', '')}"))
+    pdf.setAuthor(_billing_pdf_safe_text((payload.get('company') or {}).get('name') or 'Easy Admin'))
+    pdf.setCreator('Easy Admin')
+    pdf.setSubject(_billing_pdf_safe_text(payload.get('title') or 'Billing Document'))
 
     table_x = margin
     cols = [70, 245, 40, 75, 82]
     col_x = [table_x]
-    for w in cols[:-1]:
-        col_x.append(col_x[-1] + w)
+    for width in cols[:-1]:
+        col_x.append(col_x[-1] + width)
     table_w = sum(cols)
+    page_no = 0
 
-    image_resources = {}
-    logo_resource_name = None
-    logo_info = None
+    def set_fill(color):
+        pdf.setFillColor(color)
+
+    def set_stroke(color):
+        pdf.setStrokeColor(color)
+
+    def text(x, y, value, size=9, bold=False, color=dark, align='left'):
+        value = _billing_pdf_safe_text(value)
+        font_name = 'Helvetica-Bold' if bold else 'Helvetica'
+        pdf.setFont(font_name, size)
+        set_fill(color)
+        if align == 'right':
+            pdf.drawRightString(x, y, value)
+        elif align == 'center':
+            pdf.drawCentredString(x, y, value)
+        else:
+            pdf.drawString(x, y, value)
+
+    def rect(x, y, w, h, stroke=soft_border, fill=None, width=0.5):
+        pdf.setLineWidth(width)
+        if fill is not None:
+            set_fill(fill)
+        if stroke is not None:
+            set_stroke(stroke)
+        pdf.rect(x, y, w, h, stroke=1 if stroke is not None else 0, fill=1 if fill is not None else 0)
+
+    def line(x1, y1, x2, y2, stroke=soft_border, width=0.5):
+        pdf.setLineWidth(width)
+        set_stroke(stroke)
+        pdf.line(x1, y1, x2, y2)
+
+    logo_reader = None
+    logo_width = logo_height = None
     try:
         logo_file = (payload.get('company') or {}).get('logo_file') or ''
         if logo_file:
             logo_path = os.path.join(app.config.get('UPLOAD_FOLDER', 'uploads'), 'logos', os.path.basename(str(logo_file)))
-            logo_info = _get_cached_pdf_image(logo_path) if os.path.exists(logo_path) else None
-            if logo_info:
-                logo_resource_name = 'ImLogo'
-                image_resources[logo_resource_name] = logo_info
+            if os.path.exists(logo_path):
+                logo_reader = ImageReader(logo_path)
+                logo_width, logo_height = logo_reader.getSize()
     except Exception:
-        logo_resource_name = None
-        logo_info = None
-
-    def draw_image(name, x, y, w, h):
-        cmd(f"q {w:.2f} 0 0 {h:.2f} {x:.2f} {y:.2f} cm /{name} Do Q")
+        logo_reader = None
+        logo_width = logo_height = None
 
     def table_header(y):
-        rect(table_x, y - 18, table_w, 18, stroke=(0.75,0.75,0.75), fill=blue)
-        text(col_x[0] + 4, y - 12, 'Date', 8, True, (1,1,1))
-        text(col_x[1] + 4, y - 12, 'Description', 8, True, (1,1,1))
-        text(col_x[2] + cols[2] - 4, y - 12, 'Qty', 8, True, (1,1,1), 'right')
-        text(col_x[3] + cols[3] - 4, y - 12, 'Unit Price', 8, True, (1,1,1), 'right')
-        text(col_x[4] + cols[4] - 4, y - 12, 'Line Total', 8, True, (1,1,1), 'right')
+        rect(table_x, y - 18, table_w, 18, stroke=Color(0.75, 0.75, 0.75), fill=blue, width=0.5)
+        text(col_x[0] + 4, y - 12, 'Date', 8, True, Color(1, 1, 1))
+        text(col_x[1] + 4, y - 12, 'Description', 8, True, Color(1, 1, 1))
+        text(col_x[2] + cols[2] - 4, y - 12, 'Qty', 8, True, Color(1, 1, 1), 'right')
+        text(col_x[3] + cols[3] - 4, y - 12, 'Unit Price', 8, True, Color(1, 1, 1), 'right')
+        text(col_x[4] + cols[4] - 4, y - 12, 'Line Total', 8, True, Color(1, 1, 1), 'right')
         for x in col_x[1:]:
-            line(x, y - 18, x, y, stroke=(0.85,0.85,0.85), width=0.4)
+            line(x, y - 18, x, y, stroke=soft_border, width=0.4)
         return y - 18
 
     def footer():
-        nonlocal page_no
-        line(margin, 30, page_w - margin, 30, stroke=(0.82,0.82,0.82), width=0.4)
-        text(margin, 18, payload['company'].get('name', ''), 7, False, grey)
-        text(page_w - margin, 18, f"Page {page_no}", 7, False, grey, 'right')
-
-    def new_page(first=False):
-        nonlocal cmds, page_no
-        if cmds:
-            footer()
-            pages.append('\n'.join(cmds))
-            cmds = []
-        page_no += 1
-        if first:
-            return draw_first_header()
-        text(page_w - margin - 8, page_h - 50, payload['title'] + ' (continued)', 14, True, blue, 'right')
-        text(page_w - margin - 8, page_h - 66, payload['number'], 9, True, dark, 'right')
-        return table_header(page_h - 92)
+        line(margin, 30, page_w - margin, 30, stroke=Color(0.82, 0.82, 0.82), width=0.4)
+        text(margin, 18, (payload.get('company') or {}).get('name', ''), 7, False, grey)
+        text(page_w - margin, 18, f'Page {page_no}', 7, False, grey, 'right')
 
     def draw_first_header():
-        company = payload['company']
+        company = payload.get('company') or {}
         y_top = page_h - margin
-        # Move the left branding block roughly two text lines higher while keeping
-        # the right document title safely inside the page.
         left_y_top = min(page_h - 18, y_top + 18)
         company_x = margin
         y = left_y_top - 10
-        if logo_resource_name and logo_info:
+        if logo_reader and logo_width and logo_height:
             max_logo_w, max_logo_h = 128.8, 67.2
-            ratio = min(max_logo_w / max(float(logo_info.get('width') or 1), 1), max_logo_h / max(float(logo_info.get('height') or 1), 1))
-            logo_w = max(1.0, float(logo_info.get('width') or 1) * ratio)
-            logo_h = max(1.0, float(logo_info.get('height') or 1) * ratio)
-            logo_y = left_y_top - logo_h - 2
-            draw_image(logo_resource_name, margin, logo_y, logo_w, logo_h)
+            ratio = min(max_logo_w / max(float(logo_width), 1), max_logo_h / max(float(logo_height), 1))
+            draw_w = max(1.0, float(logo_width) * ratio)
+            draw_h = max(1.0, float(logo_height) * ratio)
+            logo_y = left_y_top - draw_h - 2
+            pdf.drawImage(logo_reader, margin, logo_y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask='auto')
             y = logo_y - 12
+
         text(company_x, y, company.get('name', 'Company Name'), 14, True, dark)
         y -= 16
-        for line_text in [
+        company_lines = [
             f"Reg No: {company.get('registration_number')}" if company.get('registration_number') else '',
             company.get('address') or '',
-            f"VAT No: {company.get('vat_number')}" if company.get('vat_number') else ''
-        ]:
+            f"VAT No: {company.get('vat_number')}" if company.get('vat_number') else '',
+        ]
+        for line_text in company_lines:
             if not line_text:
                 continue
             for part in str(line_text).splitlines():
                 text(company_x, y, part, 8, False, grey)
                 y -= 10
+
         title_x = page_w - margin - 18
         title_size = 19 if len(str(payload.get('title') or '')) > 11 else 20
-        text(title_x, y_top - 8, payload['title'], title_size, True, blue, 'right')
-        text(title_x, y_top - 30, 'No: ' + payload['number'], 9, True, dark, 'right')
-        text(title_x, y_top - 44, 'Date: ' + str(payload['date'] or ''), 9, False, dark, 'right')
-        text(title_x, y_top - 58, payload['meta_label'] + ': ' + str(payload['meta_value'] or ''), 9, False, dark, 'right')
+        text(title_x, y_top - 8, payload.get('title', ''), title_size, True, blue, 'right')
+        text(title_x, y_top - 30, 'No: ' + str(payload.get('number') or ''), 9, True, dark, 'right')
+        text(title_x, y_top - 44, 'Date: ' + str(payload.get('date') or ''), 9, False, dark, 'right')
+        text(title_x, y_top - 58, str(payload.get('meta_label') or '') + ': ' + str(payload.get('meta_value') or ''), 9, False, dark, 'right')
         header_line_y = min(y_top - 76, y - 8)
         line(margin, header_line_y, page_w - margin, header_line_y, stroke=blue, width=1.2)
 
-        # Build a dynamic Billed To / Quoted To box. Some clients have company,
-        # registration, VAT and address lines, so the box must expand and push
-        # the table down instead of allowing text to overlap the border.
         client_label = 'QUOTED TO:' if payload.get('kind') == 'quote' else 'BILLED TO:'
-        client_name_lines = _wrap_pdf_text(payload.get('client_name') or '', 62)
+        client_name_lines = _billing_pdf_wrap_text(payload.get('client_name') or '', 'Helvetica-Bold', 10, table_w - 16)
         client_extra_lines = []
-        for cl in payload.get('client_lines', []) or []:
-            client_extra_lines.extend(_wrap_pdf_text(cl, 72) if cl else [''])
+        for client_line in payload.get('client_lines', []) or []:
+            for source_line in str(client_line or '').splitlines() or ['']:
+                client_extra_lines.extend(_billing_pdf_wrap_text(source_line, 'Helvetica', 8, table_w - 16))
         client_extra_lines = [line_text for line_text in client_extra_lines if str(line_text).strip()]
 
         label_h = 13
@@ -17083,7 +17120,7 @@ def _draw_pdf_document(payload):
         box_h = max(52, box_top_pad + label_h + (len(client_name_lines) * name_line_h) + (len(client_extra_lines) * extra_line_h) + box_bottom_pad)
         box_top = header_line_y - 22
         box_y = box_top - box_h
-        rect(margin, box_y, table_w, box_h, stroke=(0.85,0.85,0.85), fill=light)
+        rect(margin, box_y, table_w, box_h, stroke=soft_border, fill=light)
 
         cy = box_top - 15
         text(margin + 8, cy, client_label, 7, True, grey)
@@ -17091,25 +17128,39 @@ def _draw_pdf_document(payload):
         for name_line in client_name_lines:
             text(margin + 8, cy, name_line, 10, True, dark)
             cy -= name_line_h
-        for cl in client_extra_lines:
-            text(margin + 8, cy, cl, 8, False, dark)
+        for client_line in client_extra_lines:
+            text(margin + 8, cy, client_line, 8, False, dark)
             cy -= extra_line_h
         return table_header(box_y - 18)
 
-    y = new_page(first=True)
+    def start_page(first=False):
+        nonlocal page_no
+        page_no += 1
+        if first:
+            return draw_first_header()
+        text(page_w - margin - 8, page_h - 50, str(payload.get('title') or '') + ' (continued)', 14, True, blue, 'right')
+        text(page_w - margin - 8, page_h - 66, payload.get('number', ''), 9, True, dark, 'right')
+        return table_header(page_h - 92)
+
+    def next_page():
+        footer()
+        pdf.showPage()
+        return start_page(first=False)
+
+    y = start_page(first=True)
     bottom = 78
     for item in payload.get('items') or []:
-        desc_lines = _wrap_pdf_text(item.get('description', ''), 46)
+        desc_lines = _billing_pdf_wrap_text(item.get('description', ''), 'Helvetica', 8, cols[1] - 8)
         row_h = max(22, 10 + len(desc_lines) * 10)
         if y - row_h < bottom:
-            y = new_page(first=False)
-        rect(table_x, y - row_h, table_w, row_h, stroke=(0.80,0.80,0.80), fill=None)
+            y = next_page()
+        rect(table_x, y - row_h, table_w, row_h, stroke=border, fill=None, width=0.5)
         for x in col_x[1:]:
-            line(x, y - row_h, x, y, stroke=(0.85,0.85,0.85), width=0.4)
+            line(x, y - row_h, x, y, stroke=soft_border, width=0.4)
         text(col_x[0] + 4, y - 14, item.get('service_date', '') or '', 8, False, dark)
         dy = y - 14
-        for dl in desc_lines:
-            text(col_x[1] + 4, dy, dl, 8, False, dark)
+        for desc_line in desc_lines:
+            text(col_x[1] + 4, dy, desc_line, 8, False, dark)
             dy -= 10
         qty = _qty_text(item.get('quantity', 1))
         amount = float(item.get('amount') or 0)
@@ -17128,16 +17179,14 @@ def _draw_pdf_document(payload):
 
     totals_h = 18 * len(payload.get('totals_rows') or []) + 14
     if y - totals_h < bottom:
-        y = new_page(first=False)
+        y = next_page()
     totals_w = 210
-    # Keep the totals block aligned with the line-item table but nudge it slightly right
-    # so Subtotal / VAT / TOTAL sit neatly inside the table area.
     tx = page_w - margin - totals_w - 12
     y -= 12
     for label, value in payload.get('totals_rows') or []:
-        is_total = 'TOTAL' in label.upper() or 'BALANCE' in label.upper()
+        is_total = 'TOTAL' in str(label).upper() or 'BALANCE' in str(label).upper()
         if is_total:
-            line(tx, y, tx + totals_w, y, stroke=(0.70,0.70,0.70), width=0.8)
+            line(tx, y, tx + totals_w, y, stroke=Color(0.70, 0.70, 0.70), width=0.8)
         text(tx + 4, y - 12, label, 8.5, is_total, dark)
         try:
             val = float(value or 0)
@@ -17147,30 +17196,48 @@ def _draw_pdf_document(payload):
         text(tx + totals_w - 4, y - 12, val_text, 8.5, is_total, dark, 'right')
         y -= 18
 
-    info = (payload.get('additional_info') or '').strip()
+    info = str(payload.get('additional_info') or '').strip()
     if info:
-        lines = []
+        info_lines = []
         for part in info.splitlines():
-            lines.extend(_wrap_pdf_text(part, 90) if part else [''])
-        info_h = min(160, 14 + len(lines) * 9)
+            info_lines.extend(_billing_pdf_wrap_text(part, 'Helvetica', 7.5, table_w - 16) if part else [''])
+        info_h = min(160, 14 + len(info_lines) * 9)
         if y - info_h < bottom:
-            y = new_page(first=False)
-        rect(margin, y - info_h, table_w, info_h, stroke=(0.85,0.85,0.85), fill=light)
+            y = next_page()
+        rect(margin, y - info_h, table_w, info_h, stroke=soft_border, fill=light)
         iy = y - 14
-        for line_text in lines[:16]:
+        for line_text in info_lines[:16]:
             text(margin + 8, iy, line_text, 7.5, False, grey)
             iy -= 9
         y -= info_h
 
     if y - 45 < bottom:
-        y = new_page(first=False)
-    line(margin, y - 15, page_w - margin, y - 15, stroke=(0.85,0.85,0.85), width=0.5)
+        y = next_page()
+    line(margin, y - 15, page_w - margin, y - 15, stroke=soft_border, width=0.5)
     text(page_w / 2, y - 33, 'Thank you for your business!', 8, False, grey, 'center')
-    text(page_w / 2, y - 45, payload['company'].get('name', ''), 8, False, grey, 'center')
+    text(page_w / 2, y - 45, (payload.get('company') or {}).get('name', ''), 8, False, grey, 'center')
     footer()
-    pages.append('\n'.join(cmds))
-    return _build_raw_pdf(pages, page_w, page_h, image_resources)
+    pdf.save()
+    return _validate_billing_pdf_bytes(buffer.getvalue())
 
+
+def _billing_pdf_download_response(pdf_bytes, filename):
+    pdf_bytes = _validate_billing_pdf_bytes(pdf_bytes)
+    safe_name = secure_filename(str(filename or 'document.pdf')) or 'document.pdf'
+    if not safe_name.lower().endswith('.pdf'):
+        safe_name += '.pdf'
+    response = send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=safe_name,
+        max_age=0,
+        conditional=False,
+    )
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
 
 def _build_raw_pdf(page_streams, page_w=595.28, page_h=841.89, image_resources=None):
     objects = []
@@ -17229,9 +17296,14 @@ def download_invoice_pdf(inv_id):
     payload = _build_billing_pdf_payload('invoice', inv_id)
     if not payload:
         return "Invoice not found", 404
-    pdf_bytes = _draw_pdf_document(payload)
+    try:
+        pdf_bytes = _draw_pdf_document(payload)
+        response = _billing_pdf_download_response(pdf_bytes, payload['filename'])
+    except Exception:
+        app.logger.exception('Invoice PDF generation failed invoice_id=%s company_id=%s', inv_id, session.get('company_id'))
+        return 'Unable to generate the invoice PDF. Please try again or contact support.', 500
     log_action('Invoicing', 'Downloaded Invoice PDF', payload['number'])
-    return Response(pdf_bytes, mimetype='application/pdf', headers={'Content-Disposition': f"attachment; filename={payload['filename']}"})
+    return response
 
 
 @app.route('/download/quote/<int:q_id>.pdf')
@@ -17241,9 +17313,14 @@ def download_quote_pdf(q_id):
     payload = _build_billing_pdf_payload('quote', q_id)
     if not payload:
         return "Quote not found", 404
-    pdf_bytes = _draw_pdf_document(payload)
+    try:
+        pdf_bytes = _draw_pdf_document(payload)
+        response = _billing_pdf_download_response(pdf_bytes, payload['filename'])
+    except Exception:
+        app.logger.exception('Quote PDF generation failed quote_id=%s company_id=%s', q_id, session.get('company_id'))
+        return 'Unable to generate the quote PDF. Please try again or contact support.', 500
     log_action('Invoicing', 'Downloaded Quote PDF', payload['number'])
-    return Response(pdf_bytes, mimetype='application/pdf', headers={'Content-Disposition': f"attachment; filename={payload['filename']}"})
+    return response
 
 
 @app.route('/api/email_invoice_pdf/<int:inv_id>', methods=['POST'])
@@ -17257,7 +17334,11 @@ def email_invoice_pdf(inv_id):
     payload = _build_billing_pdf_payload('invoice', inv_id)
     if not payload:
         return jsonify({'message': 'Invoice not found.'}), 404
-    pdf_bytes = _draw_pdf_document(payload)
+    try:
+        pdf_bytes = _validate_billing_pdf_bytes(_draw_pdf_document(payload))
+    except Exception:
+        app.logger.exception('Invoice PDF generation failed before email invoice_id=%s company_id=%s', inv_id, session.get('company_id'))
+        return jsonify({'message': 'Unable to generate the invoice PDF. The email was not sent.'}), 500
     result, status = _send_pdf_email(pdf_bytes, payload['filename'], email, payload['title'] + '_' + payload['number'], payload.get('client_name') or 'Client')
     return jsonify(result), status
 
@@ -17273,7 +17354,11 @@ def email_quote_pdf(q_id):
     payload = _build_billing_pdf_payload('quote', q_id)
     if not payload:
         return jsonify({'message': 'Quote not found.'}), 404
-    pdf_bytes = _draw_pdf_document(payload)
+    try:
+        pdf_bytes = _validate_billing_pdf_bytes(_draw_pdf_document(payload))
+    except Exception:
+        app.logger.exception('Quote PDF generation failed before email quote_id=%s company_id=%s', q_id, session.get('company_id'))
+        return jsonify({'message': 'Unable to generate the quote PDF. The email was not sent.'}), 500
     result, status = _send_pdf_email(pdf_bytes, payload['filename'], email, payload['title'] + '_' + payload['number'], payload.get('client_name') or 'Client')
     return jsonify(result), status
 
