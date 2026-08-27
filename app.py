@@ -2439,7 +2439,7 @@ def init_db():
         'invoices': [('client_id', 'INTEGER')],
         'quotes': [('client_id', 'INTEGER')],
         'employees': [('start_date', 'TEXT'), ('inactive_date', 'TEXT'), ('gross_salary', 'REAL DEFAULT 0'), ('emp_number', 'TEXT'), ('id_passport', 'TEXT'), ('job_title', 'TEXT'), ('status', 'TEXT DEFAULT "Active"'), ('phone', 'TEXT'), ('email', 'TEXT'), ('address', 'TEXT'), ('emergency_contact', 'TEXT'), ('tax_number', 'TEXT'), ('paye_ref', 'TEXT'), ('bank_details', 'TEXT'), ('bank_name', 'TEXT'), ('account_holder', 'TEXT'), ('account_number', 'TEXT'), ('branch_code', 'TEXT'), ('account_type', 'TEXT'), ('payment_reference', 'TEXT'), ('google_event_id', 'TEXT'), ('emp_type', 'TEXT DEFAULT "Full-time (5 Days)"'), ('cv_file', 'TEXT'), ('id_file', 'TEXT'), ('contract_file', 'TEXT'), ('additional_leave', 'REAL DEFAULT 0'), ('notes', 'TEXT'), ('workday_hours', 'REAL DEFAULT 7'), ('overtime_pay_treatment', 'TEXT DEFAULT "irregular"'), ('uif_contributor', 'TEXT DEFAULT "Yes"'), ('uif_non_contributor_reason', 'TEXT'), ('uif_termination_code', 'TEXT')],
-        'payslips': [('transport', 'REAL DEFAULT 0'), ('overtime', 'REAL DEFAULT 0'), ('bonus', 'REAL DEFAULT 0'), ('reimbursable_expenses', 'REAL DEFAULT 0'), ('loan_repayment', 'REAL DEFAULT 0'), ('payslip_type', 'TEXT DEFAULT "regular"'), ('adjustment_of_payslip_id', 'INTEGER'), ('adjustment_reason', 'TEXT'), ('created_at', 'TEXT')],
+        'payslips': [('transport', 'REAL DEFAULT 0'), ('overtime', 'REAL DEFAULT 0'), ('bonus', 'REAL DEFAULT 0'), ('reimbursable_expenses', 'REAL DEFAULT 0'), ('loan_repayment', 'REAL DEFAULT 0'), ('payslip_type', 'TEXT DEFAULT "regular"'), ('adjustment_of_payslip_id', 'INTEGER'), ('adjustment_reason', 'TEXT'), ('created_at', 'TEXT'), ('uif_applicable', 'INTEGER'), ('uif_monthly_hours', 'REAL'), ('uif_booked_days', 'INTEGER'), ('uif_eligibility_reason', 'TEXT')],
         'leave_records': [('leave_type', 'TEXT DEFAULT "Annual Leave"'), ('notes', 'TEXT'), ('document_file', 'TEXT')],
         'expenses': [('invoice_file', 'TEXT')]
     }
@@ -3662,6 +3662,133 @@ def get_bcea_hours_warning(ordinary_hours, overtime_hours, emp_type, total_hours
 def employee_name_matches(booking_employee, employee_name):
     names = [n.strip() for n in (booking_employee or '').split(',') if n.strip()]
     return employee_name in names
+
+
+UIF_MONTHLY_HOURS_THRESHOLD = 24.0
+
+
+def get_employee_month_bookings(conn, company_id, employee_name, target_month, payroll_cutoff):
+    """Return this employee's qualifying bookings for one payroll month.
+
+    The SQL narrows the result set for performance, while ``employee_name_matches``
+    prevents substring collisions (for example, "Jane" matching "Jane Smith").
+    Cancelled booking rows are ignored defensively; normal booking cancellation in
+    Easy Admin deletes the booking row already.
+    """
+    rows = conn.execute("""SELECT * FROM bookings
+                             WHERE company_id=? AND start LIKE ? AND employee LIKE ?
+                               AND substr(start, 1, 10) <= ?""",
+                        (company_id, f"{target_month}%", f"%{employee_name}%", payroll_cutoff.strftime('%Y-%m-%d'))).fetchall()
+    result = []
+    for row in rows:
+        row_dict = dict(row)
+        if not employee_name_matches(row_dict.get('employee'), employee_name):
+            continue
+        mobile_status = str(row_dict.get('mobile_status') or 'Scheduled').strip().lower()
+        if mobile_status in {'cancelled', 'canceled'}:
+            continue
+        result.append(row)
+    return result
+
+
+def calculate_contract_uif_booking_hours(bookings, workday_hours):
+    """Calculate UIF threshold hours from unique booked working dates.
+
+    Contract <25 Hrs employees are no-work-no-pay employees. Multiple client
+    bookings on the same calendar date represent one working day for this monthly
+    UIF threshold, so the date is counted once and multiplied by the employee's
+    configured Working Hours per Day.
+    """
+    unique_dates = set()
+    for booking in bookings or []:
+        try:
+            start_value = dict(booking).get('start') or ''
+        except Exception:
+            try:
+                start_value = booking['start'] or ''
+            except Exception:
+                start_value = ''
+        date_part = str(start_value)[:10]
+        if date_part:
+            unique_dates.add(date_part)
+    booked_days = len(unique_dates)
+    hours_per_day = max(0.0, float(workday_hours or 0.0))
+    monthly_hours = booked_days * hours_per_day
+    return booked_days, round(monthly_hours, 2)
+
+
+def determine_uif_eligibility(employee, bookings, workday_hours):
+    """Return the monthly UIF eligibility decision for a payroll calculation.
+
+    Full-time employees and Contract >25 Hrs employees do not use booking volume
+    as a UIF eligibility test. Contract <25 Hrs employees are assessed each month
+    from unique booked days x Working Hours per Day; UIF applies at 24 hours or
+    more. Explicit non-hours statutory exclusions (for example commission-only)
+    remain respected.
+    """
+    emp = dict(employee)
+    emp_type = str(emp.get('emp_type') or '').strip()
+    contributor = str(emp.get('uif_contributor') or 'Yes').strip().lower()
+    non_contributor_reason = str(emp.get('uif_non_contributor_reason') or '').strip()
+    booked_days, monthly_hours = calculate_contract_uif_booking_hours(bookings, workday_hours)
+
+    # Reasons 2 and 3 are explicit non-hours exclusions in the existing employee
+    # profile. Preserve those exclusions rather than overriding them with bookings.
+    explicit_non_hours_exclusion = contributor == 'no' and non_contributor_reason in {'2', '3'}
+    if explicit_non_hours_exclusion:
+        labels = {
+            '2': 'UIF not applicable: employee is marked Commission only.',
+            '3': 'UIF not applicable: employee is marked No income paid for period.'
+        }
+        return {
+            'applicable': False,
+            'booked_days': booked_days,
+            'monthly_hours': monthly_hours,
+            'reason': labels.get(non_contributor_reason, 'UIF not applicable: employee is marked as a non-contributor.')
+        }
+
+    if emp_type == 'Contract <25 Hrs':
+        applicable = monthly_hours >= UIF_MONTHLY_HOURS_THRESHOLD
+        if applicable:
+            reason = (
+                f'UIF applicable: Contract <25 Hrs employee has {monthly_hours:.2f} booked hours '
+                f'for the month (threshold: {UIF_MONTHLY_HOURS_THRESHOLD:.0f} hours).'
+            )
+        else:
+            reason = (
+                f'UIF exempt this month: Contract <25 Hrs employee has {monthly_hours:.2f} booked hours '
+                f'for the month, which is less than {UIF_MONTHLY_HOURS_THRESHOLD:.0f} hours.'
+            )
+        return {
+            'applicable': applicable,
+            'booked_days': booked_days,
+            'monthly_hours': monthly_hours,
+            'reason': reason
+        }
+
+    # For full-time employees, Contract >25 Hrs employees, Shift Workers and any
+    # other normal payroll employee, bookings do not determine UIF eligibility.
+    # Preserve an explicit profile-level non-contributor setting for these types.
+    if contributor == 'no':
+        return {
+            'applicable': False,
+            'booked_days': booked_days,
+            'monthly_hours': monthly_hours,
+            'reason': 'UIF not applicable: employee profile is marked as a UIF non-contributor.'
+        }
+
+    if emp_type in {'Full-time (5 Days)', 'Full-time (6 Days)'}:
+        reason = f'UIF applicable: {emp_type} is assessed independently of Easy Admin booking volume.'
+    elif emp_type == 'Contract >25 Hrs':
+        reason = 'UIF applicable: Contract >25 Hrs is treated as a UIF-contributing contract irrespective of monthly booking count.'
+    else:
+        reason = 'UIF applicable according to the employee UIF contributor setting; booking volume is not used as the eligibility test.'
+    return {
+        'applicable': True,
+        'booked_days': booked_days,
+        'monthly_hours': monthly_hours,
+        'reason': reason
+    }
 
 def as_date(value):
     if isinstance(value, datetime):
@@ -14182,8 +14309,11 @@ def delete_leave():
 
 @app.route('/api/save_payslip', methods=['POST'])
 def save_payslip():
-    if not session.get('can_payroll') and not session.get('is_superadmin'): return "Forbidden", 403
-    data = request.json
+    if not session.get('can_payroll') and not session.get('is_superadmin'):
+        return "Forbidden", 403
+    data = request.json or {}
+    if not data.get('employee_id') or not data.get('date'):
+        return jsonify({"message": "Employee and payroll date are required."}), 400
     target_month = data['date'][:7]
     try:
         ensure_tax_tables_configured(get_sars_tax_year(data['date']))
@@ -14191,34 +14321,64 @@ def save_payslip():
         return jsonify({"message": str(e)}), 400
 
     conn = get_db_connection()
-    employee = conn.execute("SELECT * FROM employees WHERE id=? AND company_id=?", (data['employee_id'], session['company_id'])).fetchone()
-    if not employee:
-        conn.close()
-        return jsonify({"message": "Employee not found."}), 404
-    _month_start, _month_end, _inactive_date, payroll_cutoff = get_employee_payroll_cutoff(employee, data['date'])
-    if payroll_cutoff is None:
-        conn.close()
-        return jsonify({"message": "Employee inactive before this payroll month. Payroll cannot be saved beyond the inactive date."}), 400
+    try:
+        employee = conn.execute("SELECT * FROM employees WHERE id=? AND company_id=?", (data['employee_id'], session['company_id'])).fetchone()
+        if not employee:
+            return jsonify({"message": "Employee not found."}), 404
+        _month_start, _month_end, _inactive_date, payroll_cutoff = get_employee_payroll_cutoff(employee, data['date'])
+        if payroll_cutoff is None:
+            return jsonify({"message": "Employee inactive before this payroll month. Payroll cannot be saved beyond the inactive date."}), 400
 
-    existing_rows = conn.execute("SELECT id FROM payslips WHERE company_id=? AND employee_id=? AND date LIKE ? AND COALESCE(payslip_type, 'regular')='regular' ORDER BY id DESC", (session['company_id'], data['employee_id'], f"{target_month}%")).fetchall()
-    exists = existing_rows[0] if existing_rows else None
-    
-    if exists:
-        conn.execute('''UPDATE payslips SET date=?, gross_salary=?, overtime=?, transport=?, bonus=?, reimbursable_expenses=?, loan_repayment=?, uif=?, paye=?, net_salary=? WHERE id=? AND company_id=?''',
-                     (data['date'], data['gross'], data['overtime'], data.get('transport', 0), data.get('bonus', 0), data.get('reimbursable_expenses', 0), data.get('loan_repayment', 0), data['uif'], data['paye'], data['net'], exists['id'], session['company_id']))
-        # Defensive duplicate cleanup: keep the newest ledger row for this employee/month only.
-        if len(existing_rows) > 1:
-            duplicate_ids = [row['id'] for row in existing_rows[1:]]
-            conn.executemany('DELETE FROM payslips WHERE id=? AND company_id=?', [(dup_id, session['company_id']) for dup_id in duplicate_ids])
-    else:
-        conn.execute('''INSERT INTO payslips (company_id, employee_id, date, gross_salary, overtime, transport, bonus, reimbursable_expenses, loan_repayment, uif, paye, net_salary, payslip_type, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'regular', ?)''',
-                     (session['company_id'], data['employee_id'], data['date'], data['gross'], data['overtime'], data.get('transport', 0), data.get('bonus', 0), data.get('reimbursable_expenses', 0), data.get('loan_repayment', 0), data['uif'], data['paye'], data['net'], datetime.now().isoformat(timespec='seconds')))
-                     
-    conn.commit()
-    conn.close()
-    log_action('HR & Payroll', 'Saved Payslip', f"Saved payslip ledger for Employee ID {data['employee_id']} for {target_month}")
-    return jsonify({"status": "success"})
+        # A finalized regular payslip is immutable through the normal Save to Ledger
+        # workflow. This protects historical payroll from later booking/status changes.
+        existing_rows = conn.execute("SELECT id FROM payslips WHERE company_id=? AND employee_id=? AND date LIKE ? AND COALESCE(payslip_type, 'regular')='regular' ORDER BY id DESC", (session['company_id'], data['employee_id'], f"{target_month}%")).fetchall()
+        if existing_rows:
+            return jsonify({
+                "status": "success",
+                "already_finalized": True,
+                "message": "Payslip already finalized; the existing ledger record was retained unchanged."
+            })
+
+        bookings = get_employee_month_bookings(
+            conn, session['company_id'], employee['name'], target_month, payroll_cutoff
+        )
+        workday_hours = get_employee_workday_hours(employee)
+        uif_eligibility = determine_uif_eligibility(employee, bookings, workday_hours)
+
+        gross = safe_money(data.get('gross'))
+        overtime = safe_money(data.get('overtime'))
+        transport = safe_money(data.get('transport'))
+        bonus = safe_money(data.get('bonus'))
+        reimbursable = safe_money(data.get('reimbursable_expenses'))
+        loan_repayment = safe_money(data.get('loan_repayment'))
+        paye = safe_money(data.get('paye'))
+        total_taxable = gross + overtime + bonus
+        uif = calculate_uif(total_taxable) if uif_eligibility['applicable'] else 0.0
+        net = total_taxable - uif - paye + transport + reimbursable - loan_repayment
+
+        conn.execute('''INSERT INTO payslips (
+                            company_id, employee_id, date, gross_salary, overtime, transport, bonus,
+                            reimbursable_expenses, loan_repayment, uif, paye, net_salary, payslip_type,
+                            created_at, uif_applicable, uif_monthly_hours, uif_booked_days, uif_eligibility_reason
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'regular', ?, ?, ?, ?, ?)''',
+                     (session['company_id'], data['employee_id'], data['date'], gross, overtime, transport, bonus,
+                      reimbursable, loan_repayment, uif, paye, net, datetime.now().isoformat(timespec='seconds'),
+                      1 if uif_eligibility['applicable'] else 0, uif_eligibility['monthly_hours'],
+                      uif_eligibility['booked_days'], uif_eligibility['reason']))
+        conn.commit()
+    finally:
+        conn.close()
+
+    log_action('HR & Payroll', 'Saved Payslip', f"Saved payslip ledger for Employee ID {data['employee_id']} for {target_month}; {uif_eligibility['reason']}")
+    return jsonify({
+        "status": "success",
+        "uif": uif,
+        "net": net,
+        "uif_applicable": bool(uif_eligibility['applicable']),
+        "uif_monthly_hours": uif_eligibility['monthly_hours'],
+        "uif_booked_days": uif_eligibility['booked_days'],
+        "uif_eligibility_reason": uif_eligibility['reason']
+    })
 
 @app.route('/generate_payslip', methods=['POST'])
 def generate_payslip():
@@ -14259,10 +14419,9 @@ def generate_payslip():
         conn.close()
         return jsonify({"message": "Employee inactive before this payroll month. Payroll cannot be generated beyond the inactive date."}), 400
 
-    bookings = conn.execute("""SELECT * FROM bookings
-                            WHERE company_id=? AND start LIKE ? AND employee LIKE ?
-                            AND substr(start, 1, 10) <= ?""",
-                            (session['company_id'], f"{target_month}%", f"%{emp['name']}%", payroll_cutoff.strftime('%Y-%m-%d'))).fetchall()
+    bookings = get_employee_month_bookings(
+        conn, session['company_id'], emp['name'], target_month, payroll_cutoff
+    )
     
     days_worked = len(bookings)
     base_salary = float(emp['gross_salary'] or 0)
@@ -14352,7 +14511,8 @@ def generate_payslip():
         irregular_taxable = overtime_amount + bonus_amount
 
     total_taxable = gross + overtime_amount + bonus_amount
-    uif = calculate_uif(total_taxable)
+    uif_eligibility = determine_uif_eligibility(emp, bookings, workday_hours)
+    uif = calculate_uif(total_taxable) if uif_eligibility['applicable'] else 0.0
     paye = calculate_paye_with_regular_irregular(regular_taxable, irregular_taxable, date_str, emp['date_of_birth'])
     net = total_taxable - uif - paye + transport_amount + reimbursable_amount - loan_repayment_amount
     
@@ -14387,6 +14547,11 @@ def generate_payslip():
             "transport": f"R {transport_amount:.2f}", 
             "uif_emp": f"R {uif:.2f}", 
             "uif_er": f"R {uif:.2f}", 
+            "uif_eligibility": "Applicable" if uif_eligibility['applicable'] else "Not Applicable",
+            "uif_eligibility_detail": uif_eligibility['reason'],
+            "uif_booked_days": uif_eligibility['booked_days'],
+            "uif_monthly_hours": uif_eligibility['monthly_hours'],
+            "contract_type": emp_type,
             "paye": f"R {paye:.2f}", 
             "net": f"R {net:.2f}", 
             "leave": leave, 
@@ -14417,6 +14582,10 @@ def generate_payslip():
             "reimbursable_expenses": reimbursable_amount,
             "loan_repayment": loan_repayment_amount,
             "uif": uif,
+            "uif_applicable": 1 if uif_eligibility['applicable'] else 0,
+            "uif_monthly_hours": uif_eligibility['monthly_hours'],
+            "uif_booked_days": uif_eligibility['booked_days'],
+            "uif_eligibility_reason": uif_eligibility['reason'],
             "paye": paye,
             "net": net
         }
@@ -14504,6 +14673,10 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
     uif = float(ledger_row['uif'] or 0)
     paye = float(ledger_row['paye'] or 0)
     net = float(ledger_row['net_salary'] or 0)
+    uif_applicable_snapshot = ledger_row.get('uif_applicable')
+    uif_monthly_hours_snapshot = ledger_row.get('uif_monthly_hours')
+    uif_booked_days_snapshot = ledger_row.get('uif_booked_days')
+    uif_reason_snapshot = ledger_row.get('uif_eligibility_reason') or ''
     benefit_ref_date = date_str or datetime.now().strftime('%Y-%m-%d')
     try:
         leave = calculate_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'], benefit_ref_date)
@@ -14527,6 +14700,11 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
             "transport": f"R {transport_amount:.2f}",
             "uif_emp": f"R {uif:.2f}",
             "uif_er": f"R {uif:.2f}",
+            "uif_eligibility": ("Applicable" if int(uif_applicable_snapshot) else "Not Applicable") if uif_applicable_snapshot is not None else "",
+            "uif_eligibility_detail": uif_reason_snapshot,
+            "uif_booked_days": int(uif_booked_days_snapshot or 0) if uif_applicable_snapshot is not None else None,
+            "uif_monthly_hours": float(uif_monthly_hours_snapshot or 0) if uif_applicable_snapshot is not None else None,
+            "contract_type": emp['emp_type'] or '',
             "paye": f"R {paye:.2f}",
             "net": f"R {net:.2f}",
             "leave": leave,
@@ -14556,6 +14734,10 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
             "reimbursable_expenses": reimbursable_amount,
             "loan_repayment": loan_repayment_amount,
             "uif": uif,
+            "uif_applicable": uif_applicable_snapshot,
+            "uif_monthly_hours": uif_monthly_hours_snapshot,
+            "uif_booked_days": uif_booked_days_snapshot,
+            "uif_eligibility_reason": uif_reason_snapshot,
             "paye": paye,
             "net": net
         }
@@ -14830,7 +15012,9 @@ def build_ui19_data(conn, company_id, month_str, employee_ids=None):
         start_dt = parse_date_safe(emp_dict.get('start_date'))
         inactive_dt = parse_date_safe(emp_dict.get('inactive_date'))
         ledger = conn.execute("""SELECT SUM(COALESCE(gross_salary,0) + COALESCE(overtime,0) + COALESCE(bonus,0)) AS gross,
-                                        COUNT(*) AS payslip_count
+                                        COUNT(*) AS payslip_count,
+                                        MAX(uif_applicable) AS uif_applicable,
+                                        MAX(uif_monthly_hours) AS uif_monthly_hours
                                  FROM payslips
                                  WHERE company_id=? AND employee_id=? AND date LIKE ?""",
                               (company_id, emp['id'], f'{month_str}%')).fetchone()
@@ -14839,6 +15023,18 @@ def build_ui19_data(conn, company_id, month_str, employee_ids=None):
         if contributor.lower() not in ['yes', 'no']:
             contributor = 'Yes'
         non_contributor_reason = (emp_dict.get('uif_non_contributor_reason') or '').strip()
+
+        # Contract <25 Hrs is a month-by-month UIF decision. For payrolls finalized
+        # after this update, use the saved payslip eligibility snapshot so UI-19
+        # reflects the actual UIF treatment for that month rather than a static
+        # employee-profile flag.
+        if (emp_dict.get('emp_type') or '').strip() == 'Contract <25 Hrs' and ledger['uif_applicable'] is not None:
+            if int(ledger['uif_applicable'] or 0):
+                contributor = 'Yes'
+                non_contributor_reason = ''
+            else:
+                contributor = 'No'
+                non_contributor_reason = '1'
 
         # UI-19 inclusion rule:
         # Include only employees with UIF activity for the selected month:

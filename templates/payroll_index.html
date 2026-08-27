@@ -489,7 +489,7 @@
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Full Name</label><input type="text" class="form-control" id="empName" name="name" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Job Title</label><input type="text" class="form-control" id="empJobTitle" name="job_title" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Status</label><select class="form-select" id="empStatus" name="status" required><option>Active</option><option>On Leave</option><option>Resigned</option><option>Terminated</option></select></div>
-                            <div class="col-md-3 mb-3"><label class="small fw-bold">Contract Type</label><select class="form-select" id="empType" name="emp_type" required><option>Full-time (5 Days)</option><option>Full-time (6 Days)</option><option>Shift Worker</option><option>Contract >25 Hrs</option><option>Contract <25 Hrs</option></select></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Contract Type</label><select class="form-select" id="empType" name="emp_type" required><option>Full-time (5 Days)</option><option>Full-time (6 Days)</option><option>Shift Worker</option><option>Contract >25 Hrs</option><option>Contract <25 Hrs</option></select><div class="form-text small">Contract &lt;25 Hrs UIF is assessed monthly from unique booked days × Working Hours per Day. UIF applies from 24 hours.</div></div>
                             
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Start Date</label><input type="date" class="form-control" id="empStartDate" name="start_date" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Inactive Date / Last Working Day</label><input type="date" class="form-control" id="empInactiveDate" name="inactive_date"><div class="form-text small">Leave blank while active.</div></div>
@@ -688,6 +688,17 @@
                             <button class="btn btn-dark fw-bold shadow-sm" id="btnViewPayslip" onclick="downloadSinglePayslip()">⬇️ Download PDF</button>
                         </div>
                         
+                        <div id="bpUifEligibilityAudit" class="alert alert-light border mb-3" style="display:none;">
+                            <div class="d-flex flex-wrap gap-3 align-items-center">
+                                <strong>UIF Eligibility Review</strong>
+                                <span>Contract: <strong id="bpUifContractType"></strong></span>
+                                <span>Booked Days: <strong id="bpUifBookedDays"></strong></span>
+                                <span>Calculated Hours: <strong id="bpUifMonthlyHours"></strong></span>
+                                <span>Status: <strong id="bpUifEligibilityStatus"></strong></span>
+                            </div>
+                            <div class="small text-muted mt-1" id="bpUifEligibilityDetail"></div>
+                        </div>
+
                         <div id="bulkPayslipContent" class="payslip-container shadow-sm border border-secondary rounded">
                             <div class="row border-bottom pb-3 mb-4">
                                 <div class="col-7">
@@ -1390,6 +1401,7 @@
                 document.getElementById('bpPaye').innerText = p.paye;
                 document.getElementById('bpUif').innerText = p.uif_emp;
                 document.getElementById('bpUifEr').innerText = p.uif_er;
+                setUifEligibilityAudit(p);
                 document.getElementById('bpNet').innerText = p.net;
                 document.getElementById('bpLeave').innerText = p.leave;
                 document.getElementById('bpSickLeave').innerText = p.sick_leave;
@@ -1646,6 +1658,28 @@
             }
         }
 
+        function setUifEligibilityAudit(p) {
+            const box = document.getElementById('bpUifEligibilityAudit');
+            if (!box) return;
+            const detail = (p && p.uif_eligibility_detail) ? String(p.uif_eligibility_detail) : '';
+            const status = (p && p.uif_eligibility) ? String(p.uif_eligibility) : '';
+            if (!detail && !status) {
+                box.style.display = 'none';
+                return;
+            }
+            const setAuditText = (id, value) => {
+                const el = document.getElementById(id);
+                if (el) el.innerText = value == null ? '' : value;
+            };
+            setAuditText('bpUifContractType', p.contract_type || '');
+            setAuditText('bpUifBookedDays', p.uif_booked_days == null ? 'N/A' : p.uif_booked_days);
+            setAuditText('bpUifMonthlyHours', p.uif_monthly_hours == null ? 'N/A' : `${Number(p.uif_monthly_hours).toFixed(2)} hrs`);
+            setAuditText('bpUifEligibilityStatus', status);
+            setAuditText('bpUifEligibilityDetail', detail);
+            box.className = status === 'Applicable' ? 'alert alert-success border mb-3' : 'alert alert-info border mb-3';
+            box.style.display = '';
+        }
+
         function employeeStatusBadgeHtml(status) {
             const s = (status || 'Active').trim();
             if (s === 'Active') return '<span class="badge bg-success">Active</span>';
@@ -1662,6 +1696,8 @@
             document.getElementById('psEmpStatusBadge').innerHTML = employeeStatusBadgeHtml(status);
             
             document.getElementById('payslipPreviewArea').style.display = 'none';
+            const uifAuditBox = document.getElementById('bpUifEligibilityAudit');
+            if(uifAuditBox) uifAuditBox.style.display = 'none';
             document.getElementById('psReimbursableExpenses').value = 0;
             document.getElementById('psBonus').value = 0;
             document.getElementById('psLoanRepayment').value = 0;
@@ -1750,6 +1786,7 @@
             setText('bpPaye', p.paye);
             setText('bpUif', p.uif_emp);
             setText('bpUifEr', p.uif_er);
+            setUifEligibilityAudit(p);
             setText('bpNet', p.net);
             setText('bpLeave', p.leave);
             setText('bpSickLeave', p.sick_leave);
@@ -1907,6 +1944,7 @@
                 document.getElementById('bpPaye').innerText = p.paye;
                 document.getElementById('bpUif').innerText = p.uif_emp;
                 document.getElementById('bpUifEr').innerText = p.uif_er;
+                setUifEligibilityAudit(p);
                 document.getElementById('bpNet').innerText = p.net;
                 
                 document.getElementById('bpLeave').innerText = p.leave;
