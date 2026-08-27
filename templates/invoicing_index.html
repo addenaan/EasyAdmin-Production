@@ -701,6 +701,12 @@
                                     {% if company.get('address') %}
                                         {{ company.get('address') | replace('\n', '<br>') | safe }}<br>
                                     {% endif %}
+                                    {% if company.get('contact_email') %}
+                                        <strong>Email:</strong> {{ company.get('contact_email') }}<br>
+                                    {% endif %}
+                                    {% if company.get('contact_number') %}
+                                        <strong>Tel:</strong> {{ company.get('contact_number') }}<br>
+                                    {% endif %}
                                     {% if company.get('vat_number') %}
                                         <strong>VAT No:</strong> {{ company.get('vat_number') }}<br>
                                     {% endif %}
@@ -794,6 +800,12 @@
                                     {% endif %}
                                     {% if company.get('address') %}
                                         {{ company.get('address') | replace('\n', '<br>') | safe }}<br>
+                                    {% endif %}
+                                    {% if company.get('contact_email') %}
+                                        <strong>Email:</strong> {{ company.get('contact_email') }}<br>
+                                    {% endif %}
+                                    {% if company.get('contact_number') %}
+                                        <strong>Tel:</strong> {{ company.get('contact_number') }}<br>
                                     {% endif %}
                                     {% if company.get('vat_number') %}
                                         <strong>VAT No:</strong> {{ company.get('vat_number') }}<br>

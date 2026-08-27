@@ -679,6 +679,16 @@
                             <input type="text" id="companyVatNo" class="form-control" placeholder="e.g. 4123456789">
                         </div>
                         <div class="col-md-6 mb-3">
+                            <label class="form-label fw-bold small">Contact Email Address</label>
+                            <input type="email" id="companyContactEmail" class="form-control" placeholder="e.g. info@company.co.za">
+                            <div class="form-text small">Displayed on invoices, quotes and payslips.</div>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-bold small">Contact Number</label>
+                            <input type="text" id="companyContactNumber" class="form-control" placeholder="e.g. +27 21 555 0123">
+                            <div class="form-text small">Displayed on invoices, quotes and payslips.</div>
+                        </div>
+                        <div class="col-md-6 mb-3">
                             <label class="form-label fw-bold small">Industry Template</label>
                             <select id="companyIndustryTemplate" class="form-select" onchange="showIndustryTemplateHint(this.value)">
                                 <option value="Cleaning">Cleaning</option>
@@ -1584,6 +1594,8 @@
             document.getElementById('companyName').value = company ? company.name : "";
             document.getElementById('companyRegNo').value = company && company.registration_number ? company.registration_number : "";
             document.getElementById('companyVatNo').value = company && company.vat_number ? company.vat_number : "";
+            document.getElementById('companyContactEmail').value = company && company.contact_email ? company.contact_email : "";
+            document.getElementById('companyContactNumber').value = company && company.contact_number ? company.contact_number : "";
             document.getElementById('companyAddress').value = company && company.address ? company.address : "";
             document.getElementById('companyTransport').value = company ? normaliseTransportPolicy(company.transport_policy) : "yes";
             document.getElementById('companyTransportAmountPerLift').value = company && company.transport_amount_per_lift !== undefined && company.transport_amount_per_lift !== null ? company.transport_amount_per_lift : 25;
@@ -1649,6 +1661,8 @@
             fd.append('name', document.getElementById('companyName').value);
             fd.append('registration_number', document.getElementById('companyRegNo').value);
             fd.append('vat_number', document.getElementById('companyVatNo').value);
+            fd.append('contact_email', document.getElementById('companyContactEmail').value);
+            fd.append('contact_number', document.getElementById('companyContactNumber').value);
             fd.append('address', document.getElementById('companyAddress').value);
             fd.append('transport_policy', document.getElementById('companyTransport').value);
             fd.append('transport_amount_per_lift', document.getElementById('companyTransportAmountPerLift').value || 25);

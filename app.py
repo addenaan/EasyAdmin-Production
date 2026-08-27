@@ -1814,6 +1814,10 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE companies ADD COLUMN address TEXT')
     except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE companies ADD COLUMN contact_email TEXT')
+    except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE companies ADD COLUMN contact_number TEXT')
+    except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE companies ADD COLUMN registration_number TEXT')
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE companies ADD COLUMN vat_number TEXT')
@@ -7599,6 +7603,8 @@ def _build_staff_payslip_pdf(row, employee, company):
     company_name = comp.get('name') or session.get('company_name') or 'Company'
     company_addr = comp.get('address') or ''
     company_reg = comp.get('registration_number') or ''
+    company_contact_email = comp.get('contact_email') or ''
+    company_contact_number = comp.get('contact_number') or ''
     period = (format_display_date(r.get('date') or '') or str(r.get('date') or ''))[:7]
     payslip_type = (r.get('payslip_type') or 'regular').strip().lower()
     doc_title = 'ADJUSTMENT PAYSLIP' if payslip_type == 'adjustment' else 'PAYSLIP'
@@ -7634,6 +7640,12 @@ def _build_staff_payslip_pdf(row, employee, company):
         y -= 14
     if company_addr:
         y = draw_wrapped(company_addr, content_x, y, 38, 11, muted, 16, 4)
+    if company_contact_email:
+        text(content_x, y, f"Email: {company_contact_email}", 10, False, muted)
+        y -= 14
+    if company_contact_number:
+        text(content_x, y, f"Tel: {company_contact_number}", 10, False, muted)
+        y -= 14
 
     text(page_w - content_x, page_h - 83, doc_title, 24, True, green, 'right')
     info_y = page_h - 142
@@ -9946,9 +9958,13 @@ def save_company():
     except (TypeError, ValueError):
         c_transport_per_lift = 25.0
     c_industry = get_valid_industry_template_name(request.form.get('industry_template', 'Cleaning'))
-    c_address = request.form.get('address', '')
-    c_reg_no = request.form.get('registration_number', '')
-    c_vat_no = request.form.get('vat_number', '')
+    c_address = (request.form.get('address') or '').strip()
+    c_contact_email = (request.form.get('contact_email') or '').strip()
+    c_contact_number = (request.form.get('contact_number') or '').strip()
+    c_reg_no = (request.form.get('registration_number') or '').strip()
+    c_vat_no = (request.form.get('vat_number') or '').strip()
+    if c_contact_email and not valid_email_address(c_contact_email):
+        return jsonify({"status": "error", "message": "Please enter a valid company contact email address."}), 400
 
     logo = request.files.get('logo')
     filename = None
@@ -9970,11 +9986,11 @@ def save_company():
     try:
         if c_id:
             if filename:
-                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
             else:
-                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
         else:
-            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports, google_calendar_sync, address, registration_number, vat_number, industry_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_reg_no, c_vat_no, c_industry))
+            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports, google_calendar_sync, address, contact_email, contact_number, registration_number, vat_number, industry_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry))
             target_company_id = getattr(cur, 'lastrowid', None)
             if not target_company_id:
                 row = conn.execute('SELECT id FROM companies WHERE name=? ORDER BY id DESC LIMIT 1', (c_name,)).fetchone()
@@ -14380,6 +14396,8 @@ def generate_payslip():
             "company_logo": dict(company).get('logo_file', '') if company else '',
             "company_address": dict(company).get('address', '') if company else '',
             "company_reg": dict(company).get('registration_number', '') if company else '',
+            "company_contact_email": dict(company).get('contact_email', '') if company else '',
+            "company_contact_number": dict(company).get('contact_number', '') if company else '',
             "workday_hours": workday_hours,
             "inactive_date": emp['inactive_date'] or '',
             "payroll_cutoff": payroll_cutoff.strftime('%Y-%m-%d'),
@@ -14518,6 +14536,8 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
             "company_logo": dict(company).get('logo_file', '') if company else '',
             "company_address": dict(company).get('address', '') if company else '',
             "company_reg": dict(company).get('registration_number', '') if company else '',
+            "company_contact_email": dict(company).get('contact_email', '') if company else '',
+            "company_contact_number": dict(company).get('contact_number', '') if company else '',
             "payslip_status": "Final Payslip",
             "is_finalized": True,
             "source": "Saved Payslip Ledger",
@@ -17086,6 +17106,8 @@ def _draw_pdf_document(payload):
         company_lines = [
             f"Reg No: {company.get('registration_number')}" if company.get('registration_number') else '',
             company.get('address') or '',
+            f"Email: {company.get('contact_email')}" if company.get('contact_email') else '',
+            f"Tel: {company.get('contact_number')}" if company.get('contact_number') else '',
             f"VAT No: {company.get('vat_number')}" if company.get('vat_number') else '',
         ]
         for line_text in company_lines:

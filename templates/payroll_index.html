@@ -695,6 +695,8 @@
                                     <h3 class="fw-bold mb-1" id="bpCompName"></h3>
                                     <small class="text-muted d-block" id="bpCompReg"></small>
                                     <small class="text-muted d-block" id="bpCompAddr"></small>
+                                    <small class="text-muted d-block" id="bpCompEmail"></small>
+                                    <small class="text-muted d-block" id="bpCompContact"></small>
                                 </div>
                                 <div class="col-5 text-end">
                                     <h3 id="bpDocTitle" class="text-danger fw-bold">DRAFT PAYSLIP</h3>
@@ -1362,6 +1364,8 @@
                 }
                 document.getElementById('bpCompReg').innerText = p.company_reg ? 'Reg No: ' + p.company_reg : '';
                 document.getElementById('bpCompAddr').innerText = p.company_address;
+                document.getElementById('bpCompEmail').innerText = p.company_contact_email ? 'Email: ' + p.company_contact_email : '';
+                document.getElementById('bpCompContact').innerText = p.company_contact_number ? 'Tel: ' + p.company_contact_number : '';
 
                 if(item.finalized) {
                     document.getElementById('bpDocTitle').innerText = 'PAYSLIP';
@@ -1721,6 +1725,8 @@
             }
             setText('bpCompReg', p.company_reg ? 'Reg No: ' + p.company_reg : '');
             setText('bpCompAddr', p.company_address);
+            setText('bpCompEmail', p.company_contact_email ? 'Email: ' + p.company_contact_email : '');
+            setText('bpCompContact', p.company_contact_number ? 'Tel: ' + p.company_contact_number : '');
 
             const isFinalized = !!p.is_finalized;
             const titleEl = document.getElementById('bpDocTitle');
@@ -1876,6 +1882,8 @@
                 }
                 document.getElementById('bpCompReg').innerText = p.company_reg ? 'Reg No: ' + p.company_reg : '';
                 document.getElementById('bpCompAddr').innerText = p.company_address;
+                document.getElementById('bpCompEmail').innerText = p.company_contact_email ? 'Email: ' + p.company_contact_email : '';
+                document.getElementById('bpCompContact').innerText = p.company_contact_number ? 'Tel: ' + p.company_contact_number : '';
                 
                 // Set document status from backend: finalised ledger payslip or draft calculation
                 const isFinalized = !!p.is_finalized;
