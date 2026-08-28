@@ -1065,13 +1065,10 @@ def validate_import_row(import_type, row, line_no, conn, company_id, seen_values
                 f"Line {line_no}, field 'emp_type': '{emp_type}' is invalid. "
                 f"Allowed values: {', '.join(sorted(IMPORT_EMPLOYEE_TYPES))}."
             )
-        overtime_treatment = (cleaned.get('overtime_pay_treatment') or 'irregular').lower()
-        cleaned['overtime_pay_treatment'] = overtime_treatment
-        if overtime_treatment not in IMPORT_OVERTIME_TREATMENTS:
-            errors.append(
-                f"Line {line_no}, field 'overtime_pay_treatment': '{overtime_treatment}' is invalid. "
-                "Use regular or irregular."
-            )
+        # Legacy import column retained for backwards-compatible templates only.
+        # SARS requires overtime to be taxed with remuneration for the pay period,
+        # so Easy Admin no longer allows a separate overtime PAYE treatment.
+        cleaned['overtime_pay_treatment'] = 'regular'
         gross_salary = cleaned.get('gross_salary')
         if isinstance(gross_salary, (int, float)) and float(gross_salary) < 0:
             errors.append(f"Line {line_no}, field 'gross_salary': value cannot be negative.")
@@ -1825,6 +1822,8 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE companies ADD COLUMN setup_complete INTEGER DEFAULT 0')
     except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE companies ADD COLUMN sdl_applicable INTEGER DEFAULT 0')
+    except sqlite3.OperationalError: pass
 
     conn.execute("""CREATE TABLE IF NOT EXISTS industry_template_uploads (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2222,18 +2221,18 @@ def init_db():
 
     if conn.execute('SELECT COUNT(*) FROM tax_brackets').fetchone()[0] == 0:
         brackets = [
-            (2026, 0, 245100, 0, 0.18),
-            (2026, 245101, 383100, 44118, 0.26),
-            (2026, 383101, 530200, 79998, 0.31),
-            (2026, 530201, 695800, 125599, 0.36),
-            (2026, 695801, 887000, 185215, 0.39),
-            (2026, 887001, 1878600, 259783, 0.41),
-            (2026, 1878601, 999999999, 666339, 0.45)
+            (2026, 0, 237100, 0, 0.18),
+            (2026, 237101, 370500, 42678, 0.26),
+            (2026, 370501, 512800, 77362, 0.31),
+            (2026, 512801, 673000, 121475, 0.36),
+            (2026, 673001, 857900, 179147, 0.39),
+            (2026, 857901, 1817000, 251258, 0.41),
+            (2026, 1817001, 999999999, 644489, 0.45)
         ]
         for b in brackets:
             conn.execute('INSERT INTO tax_brackets (tax_year, min_income, max_income, base_tax, rate) VALUES (?, ?, ?, ?, ?)', b)
         conn.execute('''INSERT INTO tax_rebates (tax_year, primary_rebate, secondary_rebate, tertiary_rebate, threshold_under_65, threshold_65_to_74, threshold_75_plus)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)''', (2026, 17820, 9765, 3249, 99000, 153250, 171300))
+                        VALUES (?, ?, ?, ?, ?, ?, ?)''', (2026, 17235, 9444, 3145, 95750, 148217, 165689))
 
     tables = {
         'bookings': 'CREATE TABLE IF NOT EXISTS bookings (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, start TEXT, employee TEXT)',
@@ -2438,7 +2437,7 @@ def init_db():
         'invoices': [('client_id', 'INTEGER')],
         'quotes': [('client_id', 'INTEGER')],
         'employees': [('start_date', 'TEXT'), ('inactive_date', 'TEXT'), ('gross_salary', 'REAL DEFAULT 0'), ('emp_number', 'TEXT'), ('id_passport', 'TEXT'), ('job_title', 'TEXT'), ('status', 'TEXT DEFAULT "Active"'), ('phone', 'TEXT'), ('email', 'TEXT'), ('address', 'TEXT'), ('emergency_contact', 'TEXT'), ('tax_number', 'TEXT'), ('paye_ref', 'TEXT'), ('bank_details', 'TEXT'), ('bank_name', 'TEXT'), ('account_holder', 'TEXT'), ('account_number', 'TEXT'), ('branch_code', 'TEXT'), ('account_type', 'TEXT'), ('payment_reference', 'TEXT'), ('google_event_id', 'TEXT'), ('emp_type', 'TEXT DEFAULT "Full-time (5 Days)"'), ('cv_file', 'TEXT'), ('id_file', 'TEXT'), ('contract_file', 'TEXT'), ('additional_leave', 'REAL DEFAULT 0'), ('notes', 'TEXT'), ('workday_hours', 'REAL DEFAULT 7'), ('overtime_pay_treatment', 'TEXT DEFAULT "irregular"'), ('uif_contributor', 'TEXT DEFAULT "Yes"'), ('uif_non_contributor_reason', 'TEXT'), ('uif_termination_code', 'TEXT')],
-        'payslips': [('transport', 'REAL DEFAULT 0'), ('overtime', 'REAL DEFAULT 0'), ('bonus', 'REAL DEFAULT 0'), ('reimbursable_expenses', 'REAL DEFAULT 0'), ('loan_repayment', 'REAL DEFAULT 0'), ('payslip_type', 'TEXT DEFAULT "regular"'), ('adjustment_of_payslip_id', 'INTEGER'), ('adjustment_reason', 'TEXT'), ('created_at', 'TEXT'), ('uif_applicable', 'INTEGER'), ('uif_monthly_hours', 'REAL'), ('uif_booked_days', 'INTEGER'), ('uif_eligibility_reason', 'TEXT')],
+        'payslips': [('transport', 'REAL DEFAULT 0'), ('overtime', 'REAL DEFAULT 0'), ('bonus', 'REAL DEFAULT 0'), ('bonus_tax_treatment', 'TEXT DEFAULT "annual"'), ('reimbursable_expenses', 'REAL DEFAULT 0'), ('loan_repayment', 'REAL DEFAULT 0'), ('payslip_type', 'TEXT DEFAULT "regular"'), ('adjustment_of_payslip_id', 'INTEGER'), ('adjustment_reason', 'TEXT'), ('created_at', 'TEXT'), ('uif_applicable', 'INTEGER'), ('uif_monthly_hours', 'REAL'), ('uif_booked_days', 'INTEGER'), ('uif_eligibility_reason', 'TEXT'), ('sdl', 'REAL DEFAULT 0'), ('sdl_applicable', 'INTEGER')],
         'leave_records': [('leave_type', 'TEXT DEFAULT "Annual Leave"'), ('notes', 'TEXT'), ('document_file', 'TEXT')],
         'expenses': [('invoice_file', 'TEXT')]
     }
@@ -2622,24 +2621,74 @@ def init_db():
     except Exception:
         pass
 
-    # Seed the SARS 2027 tax year if it has not yet been configured.
-    if conn.execute('SELECT COUNT(*) FROM tax_brackets WHERE tax_year=?', (2027,)).fetchone()[0] == 0:
-        brackets_2027 = [
-            (2027, 0, 245100, 0, 0.18),
-            (2027, 245101, 383100, 44118, 0.26),
-            (2027, 383101, 530200, 79998, 0.31),
-            (2027, 530201, 695800, 125599, 0.36),
-            (2027, 695801, 887000, 185215, 0.39),
-            (2027, 887001, 1878600, 259783, 0.41),
-            (2027, 1878601, 999999999, 666339, 0.45)
+    # Authoritative SARS PAYE tables for the supported 2026 and 2027 tax years.
+    # Earlier Easy Admin builds accidentally seeded the 2027 values under tax year 2026.
+    # Repair both years deterministically so existing databases receive the statutory values.
+    official_sars_tax = {
+        2026: {
+            'brackets': [
+                (0, 237100, 0, 0.18),
+                (237101, 370500, 42678, 0.26),
+                (370501, 512800, 77362, 0.31),
+                (512801, 673000, 121475, 0.36),
+                (673001, 857900, 179147, 0.39),
+                (857901, 1817000, 251258, 0.41),
+                (1817001, 999999999, 644489, 0.45),
+            ],
+            'rebates': (17235, 9444, 3145, 95750, 148217, 165689),
+        },
+        2027: {
+            'brackets': [
+                (0, 245100, 0, 0.18),
+                (245101, 383100, 44118, 0.26),
+                (383101, 530200, 79998, 0.31),
+                (530201, 695800, 125599, 0.36),
+                (695801, 887000, 185215, 0.39),
+                (887001, 1878600, 259783, 0.41),
+                (1878601, 999999999, 666339, 0.45),
+            ],
+            'rebates': (17820, 9765, 3249, 99000, 153250, 171300),
+        },
+    }
+    for official_year, official_cfg in official_sars_tax.items():
+        expected = [
+            (float(min_i), float(max_i), float(base), float(rate))
+            for min_i, max_i, base, rate in official_cfg['brackets']
         ]
-        for b in brackets_2027:
-            conn.execute('INSERT INTO tax_brackets (tax_year, min_income, max_income, base_tax, rate) VALUES (?, ?, ?, ?, ?)', b)
+        current_rows = conn.execute(
+            'SELECT min_income, max_income, base_tax, rate FROM tax_brackets WHERE tax_year=? ORDER BY min_income ASC',
+            (official_year,)
+        ).fetchall()
+        current = [
+            (float(r['min_income'] or 0), float(r['max_income'] or 0), float(r['base_tax'] or 0), float(r['rate'] or 0))
+            for r in current_rows
+        ]
+        if current != expected:
+            conn.execute('DELETE FROM tax_brackets WHERE tax_year=?', (official_year,))
+            for min_i, max_i, base, rate in official_cfg['brackets']:
+                conn.execute(
+                    'INSERT INTO tax_brackets (tax_year, min_income, max_income, base_tax, rate) VALUES (?, ?, ?, ?, ?)',
+                    (official_year, min_i, max_i, base, rate)
+                )
 
-    rebate_2027_exists = conn.execute('SELECT 1 FROM tax_rebates WHERE tax_year=?', (2027,)).fetchone()
-    if not rebate_2027_exists:
-        conn.execute('''INSERT INTO tax_rebates (tax_year, primary_rebate, secondary_rebate, tertiary_rebate, threshold_under_65, threshold_65_to_74, threshold_75_plus)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)''', (2027, 17820, 9765, 3249, 99000, 153250, 171300))
+        primary, secondary, tertiary, under65, age65_74, age75 = official_cfg['rebates']
+        rebate_row = conn.execute('SELECT 1 FROM tax_rebates WHERE tax_year=?', (official_year,)).fetchone()
+        if rebate_row:
+            conn.execute(
+                '''UPDATE tax_rebates
+                   SET primary_rebate=?, secondary_rebate=?, tertiary_rebate=?,
+                       threshold_under_65=?, threshold_65_to_74=?, threshold_75_plus=?
+                   WHERE tax_year=?''',
+                (primary, secondary, tertiary, under65, age65_74, age75, official_year)
+            )
+        else:
+            conn.execute(
+                '''INSERT INTO tax_rebates
+                   (tax_year, primary_rebate, secondary_rebate, tertiary_rebate,
+                    threshold_under_65, threshold_65_to_74, threshold_75_plus)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (official_year, primary, secondary, tertiary, under65, age65_74, age75)
+            )
 
     # Mobile PWA booking status fields. These keep mobile workflow updates
     # tenant-safe while preserving the existing desktop booking records.
@@ -3324,7 +3373,13 @@ def calculate_annual_tax(annual_income, check_date_str=None, date_of_birth=None)
         conn.close()
         return 0.0
 
-    bracket = conn.execute('SELECT * FROM tax_brackets WHERE tax_year=? AND ? BETWEEN min_income AND max_income', (tax_year, annual)).fetchone()
+    # Select by upper bound rather than BETWEEN min/max. SARS tables are expressed
+    # in whole-rand bands (e.g. 245 101 and above); payroll values can contain cents,
+    # so BETWEEN would leave decimal gaps such as 245100.01 to 245100.99.
+    bracket = conn.execute(
+        'SELECT * FROM tax_brackets WHERE tax_year=? AND max_income>=? ORDER BY min_income ASC LIMIT 1',
+        (tax_year, annual)
+    ).fetchone()
     if not bracket:
         conn.close()
         raise TaxTableNotSetError('Tax Tables not set')
@@ -3346,9 +3401,11 @@ def calculate_paye(monthly_gross, check_date_str=None, date_of_birth=None):
 
 
 def calculate_paye_with_regular_irregular(regular_monthly_income, irregular_onceoff_income=0, check_date_str=None, date_of_birth=None):
-    """Calculate monthly PAYE by annualising regular remuneration and adding once-off irregular remuneration once.
+    """Calculate monthly PAYE for monthly remuneration plus a SARS annual payment.
 
-    This supports payroll treatment choices such as regular recurring overtime vs irregular/once-off overtime.
+    Overtime and production/current-period bonuses must be included in
+    regular_monthly_income. Only an annual/once-off bonus that qualifies as an
+    annual payment is passed as irregular_onceoff_income.
     """
     regular_monthly_income = float(regular_monthly_income or 0)
     irregular_onceoff_income = float(irregular_onceoff_income or 0)
@@ -3361,8 +3418,76 @@ def calculate_paye_with_regular_irregular(regular_monthly_income, irregular_once
         return round(normal_monthly_paye, 2)
 
     annual_tax_with_irregular = calculate_annual_tax(annual_regular + irregular_onceoff_income, check_date_str, date_of_birth)
-    irregular_tax = max(0.0, annual_tax_with_irregular - regular_annual_tax)
-    return round(normal_monthly_paye + irregular_tax, 2)
+    annual_payment_tax = max(0.0, annual_tax_with_irregular - regular_annual_tax)
+    return round(normal_monthly_paye + annual_payment_tax, 2)
+
+
+def normalise_bonus_tax_treatment(value, bonus_amount=0):
+    """Return the supported PAYE treatment for a bonus.
+
+    period: production/current-period bonus; taxed with that month's remuneration.
+    annual: qualifying annual/once-off payment; taxed using the annual-payment method.
+    """
+    treatment = str(value or '').strip().lower()
+    aliases = {
+        'production': 'period',
+        'current': 'period',
+        'current_period': 'period',
+        'current-period': 'period',
+        'period': 'period',
+        'monthly': 'period',
+        'annual': 'annual',
+        'onceoff': 'annual',
+        'once-off': 'annual',
+        'annual_onceoff': 'annual',
+        'annual/once-off': 'annual',
+    }
+    treatment = aliases.get(treatment, treatment)
+    if not treatment:
+        # New payroll defaults to current-period treatment. A user can explicitly
+        # select annual/once-off when the payment meets that SARS definition.
+        treatment = 'period'
+    if treatment not in {'period', 'annual'}:
+        raise ValueError('Bonus PAYE Treatment must be Current-period / Production Bonus or Annual / Once-off Bonus.')
+    return treatment
+
+
+def calculate_supported_paye(gross_salary, overtime, bonus, bonus_tax_treatment, check_date_str=None, date_of_birth=None):
+    """Calculate PAYE for Easy Admin's currently supported payroll remuneration inputs."""
+    gross_salary = float(gross_salary or 0)
+    overtime = float(overtime or 0)
+    bonus = float(bonus or 0)
+    treatment = normalise_bonus_tax_treatment(bonus_tax_treatment, bonus)
+
+    # SARS: overtime is added to salary for the specific pay period.
+    regular_monthly_income = gross_salary + overtime
+    annual_payment = 0.0
+    if treatment == 'period':
+        regular_monthly_income += bonus
+    else:
+        annual_payment = bonus
+
+    return calculate_paye_with_regular_irregular(
+        regular_monthly_income,
+        annual_payment,
+        check_date_str,
+        date_of_birth
+    )
+
+
+def company_sdl_is_applicable(company):
+    try:
+        return bool(int(dict(company).get('sdl_applicable') or 0))
+    except Exception:
+        return False
+
+
+def calculate_sdl(leviable_remuneration, applicable):
+    """Employer SDL contribution for supported remuneration components."""
+    if not applicable:
+        return 0.0
+    amount = max(0.0, float(leviable_remuneration or 0))
+    return round(amount * 0.01, 2)
 
 def add_months(sourcedate, months):
     month = sourcedate.month - 1 + months
@@ -9868,6 +9993,7 @@ def save_company():
     c_ca = 1 if request.form.get('can_accounting') == 'true' else 0
     c_cfr = 1 if request.form.get('can_franchise_reports') == 'true' else 0
     c_gcal = 1 if request.form.get('google_calendar_sync') == 'true' else 0
+    c_sdl_applicable = 1 if request.form.get('sdl_applicable') == 'true' else 0
     website_integration_field_present = 'website_integration_enabled' in request.form
     c_website_integration = request.form.get('website_integration_enabled') == 'true'
     website_module = _ensure_website_integrations_schema() if website_integration_field_present else None
@@ -9904,11 +10030,11 @@ def save_company():
     try:
         if c_id:
             if filename:
-                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=?, sdl_applicable=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_sdl_applicable, c_id))
             else:
-                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=?, sdl_applicable=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_sdl_applicable, c_id))
         else:
-            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports, google_calendar_sync, address, contact_email, contact_number, registration_number, vat_number, industry_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry))
+            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports, google_calendar_sync, address, contact_email, contact_number, registration_number, vat_number, industry_template, sdl_applicable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_sdl_applicable))
             target_company_id = getattr(cur, 'lastrowid', None)
             if not target_company_id:
                 row = conn.execute('SELECT id FROM companies WHERE name=? ORDER BY id DESC LIMIT 1', (c_name,)).fetchone()
@@ -13912,8 +14038,7 @@ def update_employee():
         'start_date': 'Start Date',
         'phone': 'Phone Number',
         'emergency_contact': 'Emergency Contact',
-        'address': 'Physical Address',
-        'overtime_pay_treatment': 'Overtime PAYE Treatment'
+        'address': 'Physical Address'
     }
     missing_fields = [label for key, label in required_fields.items() if not str(data.get(key) or '').strip()]
     if missing_fields:
@@ -13924,9 +14049,9 @@ def update_employee():
             raise ValueError()
     except Exception:
         return jsonify({"status": "error", "message": "Working Hours per Day must be greater than 0."}), 400
-    overtime_pay_treatment = (data.get('overtime_pay_treatment') or '').strip().lower()
-    if overtime_pay_treatment not in ['regular', 'irregular']:
-        return jsonify({"status": "error", "message": "Overtime PAYE Treatment must be Regular recurring or Irregular/once-off."}), 400
+    # Retain the legacy database field for compatibility, but always store
+    # 'regular': overtime is taxable remuneration for the specific pay period.
+    overtime_pay_treatment = 'regular'
     start_dt = parse_supported_date(data.get('start_date'))
     if not start_dt:
         return jsonify({"status": "error", "message": "Start Date must be a valid date in YYYY-MM-DD format."}), 400
@@ -14241,6 +14366,7 @@ def save_payslip():
         employee = conn.execute("SELECT * FROM employees WHERE id=? AND company_id=?", (data['employee_id'], session['company_id'])).fetchone()
         if not employee:
             return jsonify({"message": "Employee not found."}), 404
+        company = conn.execute("SELECT * FROM companies WHERE id=?", (session['company_id'],)).fetchone()
         _month_start, _month_end, _inactive_date, payroll_cutoff = get_employee_payroll_cutoff(employee, data['date'])
         if payroll_cutoff is None:
             return jsonify({"message": "Employee inactive before this payroll month. Payroll cannot be saved beyond the inactive date."}), 400
@@ -14267,20 +14393,34 @@ def save_payslip():
         bonus = safe_money(data.get('bonus'))
         reimbursable = safe_money(data.get('reimbursable_expenses'))
         loan_repayment = safe_money(data.get('loan_repayment'))
-        paye = safe_money(data.get('paye'))
+        try:
+            bonus_tax_treatment = normalise_bonus_tax_treatment(data.get('bonus_tax_treatment'), bonus)
+        except ValueError as exc:
+            return jsonify({"message": str(exc)}), 400
+
         total_taxable = gross + overtime + bonus
         uif = calculate_uif(total_taxable) if uif_eligibility['applicable'] else 0.0
+        # Never trust a browser-submitted PAYE value when finalising payroll.
+        # Recalculate PAYE server-side using the same statutory engine as preview.
+        paye = calculate_supported_paye(
+            gross, overtime, bonus, bonus_tax_treatment, data['date'], employee['date_of_birth']
+        )
+        sdl_applicable = company_sdl_is_applicable(company)
+        sdl = calculate_sdl(total_taxable, sdl_applicable)
         net = total_taxable - uif - paye + transport + reimbursable - loan_repayment
 
         conn.execute('''INSERT INTO payslips (
                             company_id, employee_id, date, gross_salary, overtime, transport, bonus,
-                            reimbursable_expenses, loan_repayment, uif, paye, net_salary, payslip_type,
-                            created_at, uif_applicable, uif_monthly_hours, uif_booked_days, uif_eligibility_reason
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'regular', ?, ?, ?, ?, ?)''',
+                            bonus_tax_treatment, reimbursable_expenses, loan_repayment, uif, paye, sdl,
+                            net_salary, payslip_type, created_at, uif_applicable, uif_monthly_hours,
+                            uif_booked_days, uif_eligibility_reason, sdl_applicable
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'regular', ?, ?, ?, ?, ?, ?)''',
                      (session['company_id'], data['employee_id'], data['date'], gross, overtime, transport, bonus,
-                      reimbursable, loan_repayment, uif, paye, net, datetime.now().isoformat(timespec='seconds'),
+                      bonus_tax_treatment, reimbursable, loan_repayment, uif, paye, sdl, net,
+                      datetime.now().isoformat(timespec='seconds'),
                       1 if uif_eligibility['applicable'] else 0, uif_eligibility['monthly_hours'],
-                      uif_eligibility['booked_days'], uif_eligibility['reason']))
+                      uif_eligibility['booked_days'], uif_eligibility['reason'],
+                      1 if sdl_applicable else 0))
         conn.commit()
     finally:
         conn.close()
@@ -14293,14 +14433,22 @@ def save_payslip():
         "uif_applicable": bool(uif_eligibility['applicable']),
         "uif_monthly_hours": uif_eligibility['monthly_hours'],
         "uif_booked_days": uif_eligibility['booked_days'],
-        "uif_eligibility_reason": uif_eligibility['reason']
+        "uif_eligibility_reason": uif_eligibility['reason'],
+        "bonus_tax_treatment": bonus_tax_treatment,
+        "paye": paye,
+        "sdl": sdl,
+        "sdl_applicable": bool(sdl_applicable)
     })
 
 @app.route('/generate_payslip', methods=['POST'])
 def generate_payslip():
-    data = request.get_json()
+    data = request.get_json() or {}
     emp_id, date_str = data.get('employee_id'), data.get('date')
     bonus_amount = safe_money(data.get('bonus'))
+    try:
+        bonus_tax_treatment = normalise_bonus_tax_treatment(data.get('bonus_tax_treatment'), bonus_amount)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
     reimbursable_amount = safe_money(data.get('reimbursable_expenses'))
     loan_repayment_amount = safe_money(data.get('loan_repayment'))
     target_month = date_str[:7] 
@@ -14417,19 +14565,19 @@ def generate_payslip():
             if 'Drop Off' in t_val: company_lifts += 1
             transport_amount += max(0, (2 - company_lifts) * transport_amount_per_lift)
 
-    overtime_pay_treatment = (emp['overtime_pay_treatment'] if 'overtime_pay_treatment' in emp.keys() else 'irregular') or 'irregular'
-    overtime_pay_treatment = overtime_pay_treatment.lower()
-    if overtime_pay_treatment == 'regular':
-        regular_taxable = gross + overtime_amount
-        irregular_taxable = bonus_amount
-    else:
-        regular_taxable = gross
-        irregular_taxable = overtime_amount + bonus_amount
-
     total_taxable = gross + overtime_amount + bonus_amount
     uif_eligibility = determine_uif_eligibility(emp, bookings, workday_hours)
     uif = calculate_uif(total_taxable) if uif_eligibility['applicable'] else 0.0
-    paye = calculate_paye_with_regular_irregular(regular_taxable, irregular_taxable, date_str, emp['date_of_birth'])
+
+    # SARS PAYE treatment:
+    # - overtime is always added to remuneration for the current pay period;
+    # - production/current-period bonuses are taxed with current remuneration;
+    # - qualifying annual/once-off bonuses use the annual-payment method.
+    paye = calculate_supported_paye(
+        gross, overtime_amount, bonus_amount, bonus_tax_treatment, date_str, emp['date_of_birth']
+    )
+    sdl_applicable = company_sdl_is_applicable(company)
+    sdl = calculate_sdl(total_taxable, sdl_applicable)
     net = total_taxable - uif - paye + transport_amount + reimbursable_amount - loan_repayment_amount
     
     benefit_ref_date = payroll_cutoff.strftime('%Y-%m-%d')
@@ -14483,7 +14631,10 @@ def generate_payslip():
             "inactive_date": emp['inactive_date'] or '',
             "payroll_cutoff": payroll_cutoff.strftime('%Y-%m-%d'),
             "bcea_warning": bcea_warning,
-            "overtime_pay_treatment": "Regular recurring" if overtime_pay_treatment == "regular" else "Irregular / once-off",
+            "bonus_tax_treatment": bonus_tax_treatment,
+            "bonus_tax_treatment_label": "Annual / Once-off Bonus" if bonus_tax_treatment == "annual" else "Current-period / Production Bonus",
+            "sdl_applicable": sdl_applicable,
+            "sdl": f"R {sdl:.2f}",
             "payslip_status": "Draft Payslip",
             "is_finalized": False,
             "source": "Draft calculation - not saved to ledger"
@@ -14495,6 +14646,7 @@ def generate_payslip():
             "overtime": overtime_amount,
             "transport": transport_amount,
             "bonus": bonus_amount,
+            "bonus_tax_treatment": bonus_tax_treatment,
             "reimbursable_expenses": reimbursable_amount,
             "loan_repayment": loan_repayment_amount,
             "uif": uif,
@@ -14503,6 +14655,8 @@ def generate_payslip():
             "uif_booked_days": uif_eligibility['booked_days'],
             "uif_eligibility_reason": uif_eligibility['reason'],
             "paye": paye,
+            "sdl": sdl,
+            "sdl_applicable": 1 if sdl_applicable else 0,
             "net": net
         }
     })
@@ -14541,6 +14695,7 @@ def _payslip_row_with_historical_adjustments(conn, ledger_row, company_id):
                COALESCE(SUM(loan_repayment),0) AS loan_repayment,
                COALESCE(SUM(uif),0) AS uif,
                COALESCE(SUM(paye),0) AS paye,
+               COALESCE(SUM(sdl),0) AS sdl,
                COALESCE(SUM(net_salary),0) AS net_salary
         FROM payslips
         WHERE {adjustment_filter}
@@ -14550,7 +14705,7 @@ def _payslip_row_with_historical_adjustments(conn, ledger_row, company_id):
         row['adjustment_count'] = int(row.get('adjustment_count') or 0)
         row['adjustment_net_total'] = float(row.get('adjustment_net_total') or 0)
         return row
-    for field in ['gross_salary', 'overtime', 'transport', 'bonus', 'reimbursable_expenses', 'loan_repayment', 'uif', 'paye', 'net_salary']:
+    for field in ['gross_salary', 'overtime', 'transport', 'bonus', 'reimbursable_expenses', 'loan_repayment', 'uif', 'paye', 'sdl', 'net_salary']:
         row[field] = float(row.get(field) or 0) + float(sums[field] or 0)
     row['adjustment_count'] = adjustment_count
     row['adjustment_net_total'] = float(sums['net_salary'] or 0)
@@ -14588,6 +14743,9 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
     loan_repayment_amount = float(ledger_row['loan_repayment'] or 0)
     uif = float(ledger_row['uif'] or 0)
     paye = float(ledger_row['paye'] or 0)
+    sdl = float(ledger_row.get('sdl') or 0)
+    sdl_applicable_snapshot = ledger_row.get('sdl_applicable')
+    bonus_tax_treatment = normalise_bonus_tax_treatment(ledger_row.get('bonus_tax_treatment'), bonus_amount)
     net = float(ledger_row['net_salary'] or 0)
     uif_applicable_snapshot = ledger_row.get('uif_applicable')
     uif_monthly_hours_snapshot = ledger_row.get('uif_monthly_hours')
@@ -14611,6 +14769,8 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
             "overtime": f"R {overtime_amount:.2f}",
             "sundays_display": "",
             "bonus": f"R {bonus_amount:.2f}",
+            "bonus_tax_treatment": bonus_tax_treatment,
+            "bonus_tax_treatment_label": "Annual / Once-off Bonus" if bonus_tax_treatment == "annual" else "Current-period / Production Bonus",
             "reimbursable_expenses": f"R {reimbursable_amount:.2f}",
             "loan_repayment": f"R {loan_repayment_amount:.2f}",
             "transport": f"R {transport_amount:.2f}",
@@ -14622,6 +14782,8 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
             "uif_monthly_hours": float(uif_monthly_hours_snapshot or 0) if uif_applicable_snapshot is not None else None,
             "contract_type": emp['emp_type'] or '',
             "paye": f"R {paye:.2f}",
+            "sdl": f"R {sdl:.2f}",
+            "sdl_applicable": bool(int(sdl_applicable_snapshot)) if sdl_applicable_snapshot is not None else False,
             "net": f"R {net:.2f}",
             "leave": leave,
             "sick_leave": sick,
@@ -14647,6 +14809,7 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
             "overtime": overtime_amount,
             "transport": transport_amount,
             "bonus": bonus_amount,
+            "bonus_tax_treatment": bonus_tax_treatment,
             "reimbursable_expenses": reimbursable_amount,
             "loan_repayment": loan_repayment_amount,
             "uif": uif,
@@ -14655,6 +14818,8 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
             "uif_booked_days": uif_booked_days_snapshot,
             "uif_eligibility_reason": uif_reason_snapshot,
             "paye": paye,
+            "sdl": sdl,
+            "sdl_applicable": sdl_applicable_snapshot,
             "net": net
         }
     }
@@ -14730,6 +14895,10 @@ def save_adjustment_payslip():
             if not regular:
                 return jsonify({"status": "error", "message": "A finalised regular payslip must exist before an adjustment can be applied."}), 400
 
+            company = conn.execute('SELECT * FROM companies WHERE id=?', (session['company_id'],)).fetchone()
+            sdl_applicable = company_sdl_is_applicable(company)
+            sdl_adjustment = round((gross + overtime + bonus) * 0.01, 2) if sdl_applicable else 0.0
+
             new_gross = float(regular['gross_salary'] or 0) + gross
             new_overtime = float(regular['overtime'] or 0) + overtime
             new_transport = float(regular['transport'] or 0) + transport
@@ -14738,6 +14907,7 @@ def save_adjustment_payslip():
             new_loan = float(regular['loan_repayment'] or 0) + loan_repayment
             new_uif = float(regular['uif'] or 0) + uif
             new_paye = float(regular['paye'] or 0) + paye
+            new_sdl = float(regular.get('sdl') or 0) + sdl_adjustment
             new_net = new_gross + new_overtime + new_bonus + new_transport + new_reimbursable - new_uif - new_paye - new_loan
 
             try:
@@ -14749,17 +14919,20 @@ def save_adjustment_payslip():
                 reason,
                 [
                     ('Gross', gross), ('Overtime', overtime), ('Bonus', bonus), ('Transport', transport),
-                    ('Reimbursable', reimbursable), ('Loan repayment', loan_repayment), ('PAYE', paye), ('UIF', uif)
+                    ('Reimbursable', reimbursable), ('Loan repayment', loan_repayment), ('PAYE', paye), ('UIF', uif),
+                    ('Employer SDL', sdl_adjustment)
                 ],
                 net
             )
 
             conn.execute("""UPDATE payslips
                             SET gross_salary=?, overtime=?, transport=?, bonus=?, reimbursable_expenses=?,
-                                loan_repayment=?, uif=?, paye=?, net_salary=?, adjustment_reason=?
+                                loan_repayment=?, uif=?, paye=?, sdl=?, sdl_applicable=?,
+                                net_salary=?, adjustment_reason=?
                             WHERE id=? AND company_id=?""",
                          (new_gross, new_overtime, new_transport, new_bonus, new_reimbursable,
-                          new_loan, new_uif, new_paye, new_net, adjustment_note, regular['id'], session['company_id']))
+                          new_loan, new_uif, new_paye, new_sdl, 1 if sdl_applicable else 0,
+                          new_net, adjustment_note, regular['id'], session['company_id']))
             conn.commit()
 
             response = {
@@ -14773,7 +14946,6 @@ def save_adjustment_payslip():
 
             # Build the refreshed payslip payload where possible, but do not fail the adjustment if this refresh helper errors.
             try:
-                company = conn.execute('SELECT * FROM companies WHERE id=?', (session['company_id'],)).fetchone()
                 updated_regular = conn.execute('SELECT * FROM payslips WHERE id=? AND company_id=?', (regular['id'], session['company_id'])).fetchone()
                 payload = build_saved_payslip_payload(conn, emp, company, updated_regular) if updated_regular else {}
                 if payload.get('payslip'):
@@ -15322,18 +15494,22 @@ def generate_emp201():
     cid = session['company_id']
     # EMP201 is based strictly on payslips saved to the payroll ledger.
     # Unsaved payslip previews/calculations are not included.
-    ledger = conn.execute('''SELECT SUM(gross_salary + overtime + COALESCE(bonus,0)) as total_taxable,
-                                    SUM(paye) as total_paye,
-                                    SUM(uif) as total_uif_emp,
-                                    COUNT(*) as payslip_count
+    ledger = conn.execute('''SELECT SUM(COALESCE(gross_salary,0) + COALESCE(overtime,0) + COALESCE(bonus,0)) as total_taxable,
+                                    SUM(COALESCE(paye,0)) as total_paye,
+                                    SUM(COALESCE(uif,0)) as total_uif_emp,
+                                    SUM(COALESCE(sdl,0)) as total_sdl,
+                                    COUNT(*) as payslip_count,
+                                    SUM(CASE WHEN sdl_applicable IS NULL THEN 1 ELSE 0 END) AS legacy_sdl_rows
                              FROM payslips
                              WHERE company_id=? AND date LIKE ?''', (cid, f"{month_str}%")).fetchone()
 
     total_taxable = float(ledger['total_taxable'] or 0)
     total_paye = float(ledger['total_paye'] or 0)
     uif_emp = float(ledger['total_uif_emp'] or 0)
-    total_uif = uif_emp * 2.0
+    total_uif = round(uif_emp * 2.0, 2)
+    total_sdl = float(ledger['total_sdl'] or 0)
     payslip_count = int(ledger['payslip_count'] or 0)
+    legacy_sdl_rows = int(ledger['legacy_sdl_rows'] or 0)
 
     conn.close()
     log_action('HR & Payroll', 'Generated Document', f"Generated Internal Use EMP201 report for {month_str}")
@@ -15344,9 +15520,12 @@ def generate_emp201():
         "gross": round(total_taxable, 2),
         "paye": round(total_paye, 2),
         "uif": round(total_uif, 2),
-        "total": round(total_paye + total_uif, 2),
+        "sdl": round(total_sdl, 2),
+        "total": round(total_paye + total_uif + total_sdl, 2),
         "source": "Saved Payslip Ledger Only",
-        "payslip_count": payslip_count
+        "payslip_count": payslip_count,
+        "legacy_sdl_rows": legacy_sdl_rows,
+        "warning": "Some historical payslips pre-date the SDL snapshot field and were not retroactively changed." if legacy_sdl_rows else ""
     })
 
 def _build_irp5_data(emp_id, tax_year):
@@ -15358,17 +15537,52 @@ def _build_irp5_data(emp_id, tax_year):
         emp = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (emp_id, session['company_id'])).fetchone()
         if not emp:
             raise ValueError('Employee not found.')
-        ledger = conn.execute('''SELECT SUM(gross_salary) as gross, SUM(overtime) as ot, SUM(transport) as travel, SUM(COALESCE(bonus,0)) as bonus, SUM(COALESCE(reimbursable_expenses,0)) as reimbursable_expenses, SUM(paye) as paye, SUM(uif) as uif, COUNT(*) as payslip_count FROM payslips WHERE company_id=? AND employee_id=? AND date>=? AND date<=?''', (session['company_id'], emp_id, start_date, end_date)).fetchone()
-        gross = float(ledger['gross'] or 0); ot = float(ledger['ot'] or 0); travel = float(ledger['travel'] or 0); bonus = float(ledger['bonus'] or 0)
-        paye = float(ledger['paye'] or 0); uif = float(ledger['uif'] or 0); payslip_count = int(ledger['payslip_count'] or 0)
-        taxable_regular_income = gross + bonus
-        total_gross = taxable_regular_income + ot + travel
+        ledger = conn.execute('''SELECT
+                                     SUM(COALESCE(gross_salary,0)) as gross,
+                                     SUM(COALESCE(overtime,0)) as ot,
+                                     SUM(COALESCE(transport,0)) as travel,
+                                     SUM(CASE WHEN COALESCE(bonus_tax_treatment,'annual')='annual' THEN COALESCE(bonus,0) ELSE 0 END) as annual_bonus,
+                                     SUM(CASE WHEN COALESCE(bonus_tax_treatment,'annual')<>'annual' THEN COALESCE(bonus,0) ELSE 0 END) as period_bonus,
+                                     SUM(COALESCE(paye,0)) as paye,
+                                     SUM(COALESCE(uif,0)) as uif_emp,
+                                     SUM(COALESCE(sdl,0)) as sdl,
+                                     COUNT(*) as payslip_count
+                                 FROM payslips
+                                 WHERE company_id=? AND employee_id=? AND date>=? AND date<=?''',
+                              (session['company_id'], emp_id, start_date, end_date)).fetchone()
+
+        gross = float(ledger['gross'] or 0)
+        ot = float(ledger['ot'] or 0)
+        travel = float(ledger['travel'] or 0)
+        annual_bonus = float(ledger['annual_bonus'] or 0)
+        period_bonus = float(ledger['period_bonus'] or 0)
+        paye = float(ledger['paye'] or 0)
+        uif_combined = round(float(ledger['uif_emp'] or 0) * 2.0, 2)
+        sdl = float(ledger['sdl'] or 0)
+        payslip_count = int(ledger['payslip_count'] or 0)
+
+        income_3601 = gross + period_bonus
+        total_gross = income_3601 + annual_bonus + ot + travel
+        total_statutory = paye + uif_combined + sdl
         return {
-            'internal_use':'Internal Use', 'tax_year':tax_year, 'period':f"01 Mar {tax_year-1} - 28 Feb {tax_year}",
-            'name':emp['name'], 'emp_num':emp['emp_number'] or 'N/A', 'id_num':emp['id_passport'] or 'N/A',
-            'tax_number':emp['tax_number'] or 'N/A', 'code_3601':f"{taxable_regular_income:.2f}", 'code_3605':f"{ot:.2f}",
-            'code_3702':f"{travel:.2f}", 'code_3699':f"{total_gross:.2f}", 'code_4102':f"{paye:.2f}", 'code_4141':f"{uif:.2f}",
-            'source':'Saved Payslip Ledger Only', 'payslip_count':payslip_count
+            'internal_use':'Internal Use',
+            'tax_year':tax_year,
+            'period':f"01 Mar {tax_year-1} - 28 Feb {tax_year}",
+            'name':emp['name'],
+            'emp_num':emp['emp_number'] or 'N/A',
+            'id_num':emp['id_passport'] or 'N/A',
+            'tax_number':emp['tax_number'] or 'N/A',
+            'code_3601':f"{income_3601:.2f}",
+            'code_3605':f"{annual_bonus:.2f}",
+            'code_3607':f"{ot:.2f}",
+            'code_3702':f"{travel:.2f}",
+            'code_3699':f"{total_gross:.2f}",
+            'code_4102':f"{paye:.2f}",
+            'code_4141':f"{uif_combined:.2f}",
+            'code_4142':f"{sdl:.2f}",
+            'code_4149':f"{total_statutory:.2f}",
+            'source':'Saved Payslip Ledger Only',
+            'payslip_count':payslip_count
         }
     finally:
         conn.close()
@@ -15413,44 +15627,66 @@ def export_emp501(year):
     tax_year = int(year)
     start_date = f"{tax_year-1}-03-01"
     end_date = f"{tax_year}-02-28"
-    
+
     conn = get_db_connection()
     employees = conn.execute("SELECT * FROM employees WHERE company_id=?", (session['company_id'],)).fetchall()
-    
+
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(['Internal Use', 'Emp Number', 'Name', 'ID/Passport', 'Tax Number', 'PAYE Ref', 'Code 3601 (Income)', 'Code 3605 (Overtime)', 'Code 3702 (Travel)', 'Code 3699 (Gross)', 'Code 4102 (PAYE)', 'Code 4141 (UIF)'])
-    
+    cw.writerow([
+        'Internal Use', 'Emp Number', 'Name', 'ID/Passport', 'Tax Number', 'PAYE Ref',
+        'Code 3601 (Income)', 'Code 3605 (Annual Payment)', 'Code 3607 (Overtime)',
+        'Code 3702 (Travel)', 'Code 3699 (Gross)', 'Code 4102 (PAYE)',
+        'Code 4141 (Employee + Employer UIF)', 'Code 4142 (Employer SDL)',
+        'Code 4149 (Total Tax/SDL/UIF)'
+    ])
+
     for emp in employees:
         # EMP501 is based strictly on saved payslip ledger records.
-        # Unsaved payslip previews/calculations are not included.
-        ledger = conn.execute('''SELECT SUM(gross_salary) as gross, SUM(overtime) as ot, SUM(transport) as travel, SUM(COALESCE(bonus,0)) as bonus, SUM(COALESCE(reimbursable_expenses,0)) as reimbursable_expenses, 
-                                        SUM(paye) as paye, SUM(uif) as uif, COUNT(*) as payslip_count 
-                                 FROM payslips 
-                                 WHERE company_id=? AND employee_id=? AND date >= ? AND date <= ?''', 
+        ledger = conn.execute('''SELECT
+                                        SUM(COALESCE(gross_salary,0)) as gross,
+                                        SUM(COALESCE(overtime,0)) as ot,
+                                        SUM(COALESCE(transport,0)) as travel,
+                                        SUM(CASE WHEN COALESCE(bonus_tax_treatment,'annual')='annual' THEN COALESCE(bonus,0) ELSE 0 END) as annual_bonus,
+                                        SUM(CASE WHEN COALESCE(bonus_tax_treatment,'annual')<>'annual' THEN COALESCE(bonus,0) ELSE 0 END) as period_bonus,
+                                        SUM(COALESCE(paye,0)) as paye,
+                                        SUM(COALESCE(uif,0)) as uif_emp,
+                                        SUM(COALESCE(sdl,0)) as sdl,
+                                        COUNT(*) as payslip_count
+                                 FROM payslips
+                                 WHERE company_id=? AND employee_id=? AND date >= ? AND date <= ?''',
                               (session['company_id'], emp['id'], start_date, end_date)).fetchone()
-                              
+
         gross = float(ledger['gross'] or 0)
         ot = float(ledger['ot'] or 0)
         travel = float(ledger['travel'] or 0)
-        bonus = float(ledger['bonus'] or 0)
+        annual_bonus = float(ledger['annual_bonus'] or 0)
+        period_bonus = float(ledger['period_bonus'] or 0)
         paye = float(ledger['paye'] or 0)
-        uif = float(ledger['uif'] or 0)
+        uif_combined = round(float(ledger['uif_emp'] or 0) * 2.0, 2)
+        sdl = float(ledger['sdl'] or 0)
         payslip_count = int(ledger['payslip_count'] or 0)
-        taxable_regular_income = gross + bonus
-        total_gross = taxable_regular_income + ot + travel
-        
+
+        income_3601 = gross + period_bonus
+        total_gross = income_3601 + annual_bonus + ot + travel
+        total_statutory = paye + uif_combined + sdl
+
         if payslip_count > 0 and total_gross > 0:
-            cw.writerow(['Internal Use', emp['emp_number'], emp['name'], emp['id_passport'], emp['tax_number'], emp['paye_ref'], f"{taxable_regular_income:.2f}", f"{ot:.2f}", f"{travel:.2f}", f"{total_gross:.2f}", f"{paye:.2f}", f"{uif:.2f}"])
-            
+            cw.writerow([
+                'Internal Use', emp['emp_number'], emp['name'], emp['id_passport'],
+                emp['tax_number'], emp['paye_ref'], f"{income_3601:.2f}",
+                f"{annual_bonus:.2f}", f"{ot:.2f}", f"{travel:.2f}",
+                f"{total_gross:.2f}", f"{paye:.2f}", f"{uif_combined:.2f}",
+                f"{sdl:.2f}", f"{total_statutory:.2f}"
+            ])
+
     conn.close()
-    
+
     log_action('HR & Payroll', 'Exported Document', f"Exported Ledger-backed EMP501 summary for {year}")
-    
+
     output = Response(si.getvalue(), mimetype='text/csv')
     output.headers["Content-Disposition"] = f"attachment; filename=EMP501_Summary_{year}.csv"
     return output
-
 
 
 @app.route('/export_payroll_bank_file')
