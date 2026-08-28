@@ -354,7 +354,6 @@
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="branch_code"> <label class="form-check-label small">Branch Code</label></div>
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="gross_salary"> <label class="form-check-label small">Base Salary (R)</label></div>
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="workday_hours"> <label class="form-check-label small">Working Hours per Day</label></div>
-                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="overtime_pay_treatment"> <label class="form-check-label small">Overtime PAYE Treatment</label></div>
                         </div>
                     </div>
                 </div>
@@ -496,7 +495,6 @@
                             <div class="col-md-3 mb-3"><label class="small fw-bold">ID / Passport Number</label><input type="text" class="form-control" id="empIdPassport" name="id_passport" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold text-success">Monthly Base Salary / Rate (R)</label><input type="number" class="form-control border-success" id="empGross" name="gross_salary" step="0.01" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold text-success">Working Hours per Day</label><input type="number" class="form-control border-success" id="empWorkdayHours" name="workday_hours" step="0.25" min="0.25" value="7" required><div class="form-text small">Excludes statutory breaks.</div></div>
-                            <div class="col-md-3 mb-3"><label class="small fw-bold text-success">Overtime PAYE Treatment</label><select class="form-select border-success" id="empOvertimePayTreatment" name="overtime_pay_treatment" required><option value="">Select...</option><option value="regular">Regular recurring overtime</option><option value="irregular">Irregular / once-off overtime</option></select><div class="form-text small">Used only for PAYE calculation.</div></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Phone Number</label><input type="text" class="form-control" id="empPhone" name="phone" required></div>
                             
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Email Address</label><input type="email" class="form-control" id="empEmail" name="email"></div>
@@ -666,10 +664,18 @@
                             <input type="number" step="0.01" min="0" class="form-control" id="psReimbursableExpenses" value="0" onchange="if(document.getElementById('psDate').value) runPayslipEngine()">
                             <small class="text-muted">Not Included in PAYE and UIF calculation.</small>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-md-3">
                             <label class="small fw-bold text-muted">Bonus for this Month</label>
                             <input type="number" step="0.01" min="0" class="form-control" id="psBonus" value="0" onchange="if(document.getElementById('psDate').value) runPayslipEngine()">
-                            <small class="text-muted">Included in PAYE and UIF calculation.</small>
+                            <small class="text-muted">Included in UIF and supported taxable remuneration.</small>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="small fw-bold text-success">Bonus PAYE Treatment</label>
+                            <select class="form-select border-success" id="psBonusTaxTreatment" onchange="if(document.getElementById('psDate').value) runPayslipEngine()">
+                                <option value="current_period" selected>Current-period / Production Bonus</option>
+                                <option value="annual">Annual / Once-off Bonus</option>
+                            </select>
+                            <small class="text-muted">Production bonuses earned in this period are taxed with this period; annual payments use the annual-payment method.</small>
                         </div>
                         <div class="col-md-6">
                             <label class="small fw-bold text-muted">Loan Repayment</label>
@@ -719,14 +725,15 @@
                                 <thead><tr class="bg-light"><th>Description</th><th class="amount">Earnings</th><th class="amount">Deductions</th></tr></thead>
                                 <tbody>
                                     <tr><td>Calculated Gross <span id="bpDaysWorked" class="small text-muted fst-italic"></span> <span class="sars-code">Code: 3601</span></td><td class="amount" id="bpGross"></td><td></td></tr>
-                                    <tr><td>Overtime / Premium Pay <span id="bpSundaysWorked" class="small text-muted fst-italic"></span> <span class="sars-code">Code: 3605</span></td><td class="amount" id="bpOvertime"></td><td></td></tr>
+                                    <tr><td>Overtime / Premium Pay <span id="bpSundaysWorked" class="small text-muted fst-italic"></span> <span class="sars-code">Code: 3607</span></td><td class="amount" id="bpOvertime"></td><td></td></tr>
                                     <tr id="bpReimbursableExpensesRow" style="display:none;"><td>Reimbursable Expenses (Non-taxable)</td><td class="amount text-success" id="bpReimbursableExpenses"></td><td></td></tr>
-                                    <tr id="bpBonusRow" style="display:none;"><td>Bonus <span class="sars-code">Code: 3605/3601 as applicable</span></td><td class="amount" id="bpBonus"></td><td></td></tr>
+                                    <tr id="bpBonusRow" style="display:none;"><td>Bonus <span id="bpBonusTaxTreatment" class="small text-muted fst-italic"></span> <span class="sars-code" id="bpBonusCode"></span></td><td class="amount" id="bpBonus"></td><td></td></tr>
                                     <tr id="bpTransportRow" style="display:none;"><td>Transport Reimbursement (Tax Free) <span class="sars-code">Code: 3702</span></td><td class="amount text-success" id="bpTransport"></td><td></td></tr>
                                     <tr><td>PAYE Tax <span class="sars-code">Code: 4102</span></td><td></td><td class="amount" id="bpPaye"></td></tr>
                                     <tr><td>UIF (Employee 1%) <span class="sars-code">Code: 4141</span></td><td></td><td class="amount" id="bpUif"></td></tr>
                                     <tr id="bpLoanRepaymentRow" style="display:none;"><td>Loan Repayment</td><td></td><td class="amount" id="bpLoanRepayment"></td></tr>
                                     <tr class="text-muted" style="font-style: italic;"><td>UIF (Employer 1%)</td><td class="amount" id="bpUifEr"></td><td></td></tr>
+                                    <tr id="bpSdlRow" class="text-muted" style="display:none; font-style: italic;"><td>SDL (Employer 1%) <span class="sars-code">Code: 4142</span></td><td class="amount" id="bpSdl"></td><td></td></tr>
                                     <tr class="totals-row border-dark"><td>NET PAY</td><td colspan="2" class="text-end text-success fs-5" id="bpNet"></td></tr>
                                 </tbody>
                             </table>
@@ -903,8 +910,10 @@
                             <tr><td class="text-muted">Total Gross Remuneration:</td><td class="text-end" id="e201Gross"></td></tr>
                             <tr><td class="text-muted">PAYE Withheld:</td><td class="text-end text-danger" id="e201Paye"></td></tr>
                             <tr><td class="text-muted">UIF Total (Emp + Er):</td><td class="text-end text-danger" id="e201Uif"></td></tr>
+                            <tr><td class="text-muted">SDL (Employer):</td><td class="text-end text-danger" id="e201Sdl"></td></tr>
                             <tr class="border-top border-dark fs-5 text-dark"><td class="pt-2">TOTAL PAYABLE TO SARS:</td><td class="text-end pt-2" id="e201Total"></td></tr>
                         </table>
+                        <div id="e201Warning" class="alert alert-warning small py-2 mb-0" style="display:none;"></div>
                     </div>
                 </div>
             </div>
@@ -992,16 +1001,20 @@
             <table class="table table-sm table-bordered">
                 <thead class="table-light"><tr><th>SARS Code</th><th>Description</th><th class="amount">Amount (R)</th></tr></thead>
                 <tbody>
-                    <tr><td><strong>3601</strong></td><td>Income (Basic Salary)</td><td class="amount" id="bi3601"></td></tr>
-                    <tr><td><strong>3605</strong></td><td>Overtime</td><td class="amount" id="bi3605"></td></tr>
+                    <tr><td><strong>3601</strong></td><td>Salary / Wages + Current-period Bonus</td><td class="amount" id="bi3601"></td></tr>
+                    <tr><td><strong>3605</strong></td><td>Annual Payment</td><td class="amount" id="bi3605"></td></tr>
+                    <tr><td><strong>3607</strong></td><td>Overtime</td><td class="amount" id="bi3607"></td></tr>
                     <tr><td><strong>3702</strong></td><td>Reimbursive Travel Allowance</td><td class="amount" id="bi3702"></td></tr>
-                    <tr class="table-secondary"><td><strong>3699</strong></td><td><strong>Gross Remuneration</strong></td><td class="amount fw-bold" id="bi3699"></td></tr>
+                    <tr class="table-secondary"><td><strong>3699</strong></td><td><strong>Gross Employment Income</strong></td><td class="amount fw-bold" id="bi3699"></td></tr>
                     <tr><td colspan="3"></td></tr>
                     <tr><td><strong>4102</strong></td><td>PAYE</td><td class="amount" id="bi4102"></td></tr>
-                    <tr><td><strong>4141</strong></td><td>UIF Contribution</td><td class="amount" id="bi4141"></td></tr>
+                    <tr><td><strong>4141</strong></td><td>Employee + Employer UIF Contribution</td><td class="amount" id="bi4141"></td></tr>
+                    <tr><td><strong>4142</strong></td><td>Employer SDL Contribution</td><td class="amount" id="bi4142"></td></tr>
+                    <tr class="table-secondary"><td><strong>4149</strong></td><td><strong>Total Tax / SDL / UIF</strong></td><td class="amount fw-bold" id="bi4149"></td></tr>
                 </tbody>
             </table>
-            <p class="small text-muted mt-3 text-center">This summary is generated for eFiling input and personal records.</p>
+            <div id="biWarning" class="alert alert-warning small py-2" style="display:none;"></div>
+            <p class="small text-muted mt-3 text-center">Internal-use summary based on the saved Easy Admin payslip ledger.</p>
         </div>
     </div>
 
@@ -1397,6 +1410,7 @@
                 document.getElementById('bpSundaysWorked').innerText = p.sundays_display || '';
                 setOptionalPayslipLine('bpReimbursableExpensesRow', 'bpReimbursableExpenses', p.reimbursable_expenses);
                 setOptionalPayslipLine('bpBonusRow', 'bpBonus', p.bonus);
+                setPayrollComplianceDisplay(p);
                 setOptionalPayslipLine('bpLoanRepaymentRow', 'bpLoanRepayment', p.loan_repayment);
                 setOptionalPayslipLine('bpTransportRow', 'bpTransport', p.transport);
                 document.getElementById('bpPaye').innerText = p.paye;
@@ -1466,10 +1480,15 @@
                 document.getElementById('biEmpNum').innerText = p.emp_num;
                 document.getElementById('bi3601').innerText = p.code_3601;
                 document.getElementById('bi3605').innerText = p.code_3605;
+                document.getElementById('bi3607').innerText = p.code_3607;
                 document.getElementById('bi3702').innerText = p.code_3702;
                 document.getElementById('bi3699').innerText = p.code_3699;
                 document.getElementById('bi4102').innerText = p.code_4102;
                 document.getElementById('bi4141').innerText = p.code_4141;
+                document.getElementById('bi4142').innerText = p.code_4142;
+                document.getElementById('bi4149').innerText = p.code_4149;
+                const irp5Warning = document.getElementById('biWarning');
+                if(irp5Warning) { irp5Warning.innerText = p.warning || ''; irp5Warning.style.display = p.warning ? 'block' : 'none'; }
                 
                 const a = document.createElement('a');
                 a.href = `/download/irp5/${encodeURIComponent(id)}/${encodeURIComponent(year)}.pdf`;
@@ -1515,7 +1534,6 @@
             document.getElementById('empIdPassport').value = emp ? emp.id_passport : '';
             document.getElementById('empGross').value = emp ? emp.gross_salary : '';
             document.getElementById('empWorkdayHours').value = emp ? (emp.workday_hours || 7) : 7;
-            document.getElementById('empOvertimePayTreatment').value = emp ? (emp.overtime_pay_treatment || 'irregular') : 'irregular';
             document.getElementById('empPhone').value = emp ? emp.phone : '';
             document.getElementById('empEmail').value = emp ? emp.email : '';
             document.getElementById('empEmergency').value = emp ? emp.emergency_contact : '';
@@ -1656,6 +1674,29 @@
             }
         }
 
+        function setPayrollComplianceDisplay(p) {
+            const treatmentCode = (p && p.bonus_tax_treatment_code) ? String(p.bonus_tax_treatment_code) : ((p && p.bonus_tax_treatment) ? String(p.bonus_tax_treatment).toLowerCase() : 'annual');
+            const isAnnual = treatmentCode === 'annual' || treatmentCode.includes('annual');
+            const treatmentEl = document.getElementById('bpBonusTaxTreatment');
+            const codeEl = document.getElementById('bpBonusCode');
+            if(treatmentEl) treatmentEl.innerText = isAnnual ? '(Annual / Once-off)' : '(Current-period / Production)';
+            if(codeEl) codeEl.innerText = isAnnual ? 'Code: 3605' : 'Included in Code: 3601';
+
+            const sdlRow = document.getElementById('bpSdlRow');
+            const sdlCell = document.getElementById('bpSdl');
+            const sdlAmount = parseCurrencyAmount(p && p.sdl);
+            const sdlSnapshot = p ? p.sdl_applicable : null;
+            if(sdlRow && sdlCell) {
+                if(sdlSnapshot === true || sdlSnapshot === 1 || sdlAmount > 0) {
+                    sdlRow.style.display = '';
+                    sdlCell.innerText = (p && p.sdl) || `R ${sdlAmount.toFixed(2)}`;
+                } else {
+                    sdlRow.style.display = 'none';
+                    sdlCell.innerText = '';
+                }
+            }
+        }
+
         function setUifEligibilityAudit(p) {
             const box = document.getElementById('bpUifEligibilityAudit');
             if (!box) return;
@@ -1698,8 +1739,9 @@
             if(uifAuditBox) uifAuditBox.style.display = 'none';
             document.getElementById('psReimbursableExpenses').value = 0;
             document.getElementById('psBonus').value = 0;
+            document.getElementById('psBonusTaxTreatment').value = 'current_period';
             document.getElementById('psLoanRepayment').value = 0;
-            ['psReimbursableExpenses','psBonus','psLoanRepayment'].forEach(fieldId => { const el = document.getElementById(fieldId); if(el) el.disabled = false; });
+            ['psReimbursableExpenses','psBonus','psBonusTaxTreatment','psLoanRepayment'].forEach(fieldId => { const el = document.getElementById(fieldId); if(el) el.disabled = false; });
             document.getElementById('btnRunEngine').innerText = '⚙️ Calculate Statutory Taxes & Deductions';
             document.getElementById('btnRunEngine').disabled = false;
             
@@ -1779,6 +1821,7 @@
             setText('bpSundaysWorked', p.sundays_display);
             setOptionalPayslipLine('bpReimbursableExpensesRow', 'bpReimbursableExpenses', p.reimbursable_expenses);
             setOptionalPayslipLine('bpBonusRow', 'bpBonus', p.bonus);
+                setPayrollComplianceDisplay(p);
             setOptionalPayslipLine('bpLoanRepaymentRow', 'bpLoanRepayment', p.loan_repayment);
             setOptionalPayslipLine('bpTransportRow', 'bpTransport', p.transport);
             setText('bpPaye', p.paye);
@@ -1794,7 +1837,7 @@
 
             const preview = document.getElementById('payslipPreviewArea');
             if(preview) preview.style.display = 'block';
-            ['psReimbursableExpenses','psBonus','psLoanRepayment'].forEach(id => {
+            ['psReimbursableExpenses','psBonus','psBonusTaxTreatment','psLoanRepayment'].forEach(id => {
                 const el = document.getElementById(id);
                 if(el) el.disabled = isFinalized;
             });
@@ -1893,6 +1936,7 @@
                 date: document.getElementById('psDate').value,
                 reimbursable_expenses: parseFloat(document.getElementById('psReimbursableExpenses').value || 0),
                 bonus: parseFloat(document.getElementById('psBonus').value || 0),
+                bonus_tax_treatment: document.getElementById('psBonusTaxTreatment').value || 'current_period',
                 loan_repayment: parseFloat(document.getElementById('psLoanRepayment').value || 0)
             };
             
@@ -1936,6 +1980,7 @@
                 document.getElementById('bpSundaysWorked').innerText = p.sundays_display;
                 setOptionalPayslipLine('bpReimbursableExpensesRow', 'bpReimbursableExpenses', p.reimbursable_expenses);
                 setOptionalPayslipLine('bpBonusRow', 'bpBonus', p.bonus);
+                setPayrollComplianceDisplay(p);
                 setOptionalPayslipLine('bpLoanRepaymentRow', 'bpLoanRepayment', p.loan_repayment);
                 setOptionalPayslipLine('bpTransportRow', 'bpTransport', p.transport);
                 
@@ -1955,7 +2000,7 @@
                 
                 // Show the UI and configure buttons
                 document.getElementById('payslipPreviewArea').style.display = 'block';
-                ['psReimbursableExpenses','psBonus','psLoanRepayment'].forEach(id => {
+                ['psReimbursableExpenses','psBonus','psBonusTaxTreatment','psLoanRepayment'].forEach(id => {
                     const el = document.getElementById(id);
                     if(el) el.disabled = !!p.is_finalized;
                 });
@@ -1985,18 +2030,21 @@
                     btn.disabled = false;
                     return;
                 }
-                // Mark Official
-                document.getElementById('bpDocTitle').innerText = 'PAYSLIP';
-                document.getElementById('bpDocTitle').className = 'text-success fw-bold';
-                document.getElementById('btnEmailSingle').innerText = '📧 Email Payslip';
-                
-                // Hide the save button to signify it is locked and enable adjustments
+                const savedEmployeeId = currentPayslipData.raw.employee_id;
+                const savedPayrollDate = currentPayslipData.raw.date;
+
+                // Finalisation recalculates statutory values server-side. Refresh from
+                // the locked ledger row immediately so the displayed final payslip is
+                // guaranteed to match the values actually saved by the server.
                 btn.style.display = 'none';
                 document.getElementById('btnAdjustmentPayslip').style.display = 'inline-block';
-                if(currentPayslipData && currentPayslipData.payslip) currentPayslipData.payslip.is_finalized = true;
-                ['psReimbursableExpenses','psBonus','psLoanRepayment'].forEach(id => { const el = document.getElementById(id); if(el) el.disabled = true; });
-                updateCurrentMonthPayrollCell(currentPayslipData.raw.employee_id, currentPayslipData.raw.date);
-                showPayrollNotification('Payslip finalized successfully and saved to ledger.', 'success');
+                ['psReimbursableExpenses','psBonus','psBonusTaxTreatment','psLoanRepayment'].forEach(id => { const el = document.getElementById(id); if(el) el.disabled = true; });
+                refreshFinalizedPayslipPreview(savedEmployeeId, savedPayrollDate)
+                    .then(() => showPayrollNotification('Payslip finalized successfully and saved to ledger.', 'success'))
+                    .catch(refreshErr => {
+                        updateCurrentMonthPayrollCell(savedEmployeeId, savedPayrollDate);
+                        showPayrollNotification('Payslip was finalized, but the locked preview could not refresh automatically: ' + (refreshErr.message || refreshErr), 'warning');
+                    });
             }).catch(err => {
                 showPayrollNotification(err.message || 'Unable to save payslip.', 'error');
                 btn.innerText = '💾 Save to Ledger & Lock';
@@ -2200,7 +2248,10 @@
                 document.getElementById('e201Gross').innerText = `R ${res.gross.toFixed(2)}`;
                 document.getElementById('e201Paye').innerText = `R ${res.paye.toFixed(2)}`;
                 document.getElementById('e201Uif').innerText = `R ${res.uif.toFixed(2)}`;
+                document.getElementById('e201Sdl').innerText = `R ${(res.sdl || 0).toFixed(2)}`;
                 document.getElementById('e201Total').innerText = `R ${res.total.toFixed(2)}`;
+                const warning = document.getElementById('e201Warning');
+                if(warning) { warning.innerText = res.warning || ''; warning.style.display = res.warning ? 'block' : 'none'; }
                 document.getElementById('emp201Result').style.display = 'block';
             });
         }
@@ -2225,10 +2276,15 @@
                 document.getElementById('biEmpNum').innerText = p.emp_num;
                 document.getElementById('bi3601').innerText = p.code_3601;
                 document.getElementById('bi3605').innerText = p.code_3605;
+                document.getElementById('bi3607').innerText = p.code_3607;
                 document.getElementById('bi3702').innerText = p.code_3702;
                 document.getElementById('bi3699').innerText = p.code_3699;
                 document.getElementById('bi4102').innerText = p.code_4102;
                 document.getElementById('bi4141').innerText = p.code_4141;
+                document.getElementById('bi4142').innerText = p.code_4142;
+                document.getElementById('bi4149').innerText = p.code_4149;
+                const irp5Warning = document.getElementById('biWarning');
+                if(irp5Warning) { irp5Warning.innerText = p.warning || ''; irp5Warning.style.display = p.warning ? 'block' : 'none'; }
                 
                 window.location.href = `/download/irp5/${encodeURIComponent(document.getElementById('irp5EmpId').value)}/${encodeURIComponent(year)}.pdf`;
             });

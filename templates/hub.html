@@ -715,6 +715,14 @@
                             <input type="number" id="companyTransportAmountPerLift" class="form-control" min="0" step="0.01" value="25">
                             <div class="form-text small">No Transport Required pays double this amount.</div>
                         </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-bold small d-block">Skills Development Levy (SDL)</label>
+                            <div class="form-check form-switch mt-2">
+                                <input class="form-check-input border-success" type="checkbox" id="companySdlApplicable">
+                                <label class="form-check-label fw-bold" for="companySdlApplicable">SDL Applicable / Registered</label>
+                            </div>
+                            <div class="form-text small">When enabled, Easy Admin calculates employer SDL at 1% of supported leviable remuneration. Enable only where the employer is liable/registered; employers whose projected leviable remuneration over 12 months does not exceed R500,000 are generally exempt, subject to the statutory rules.</div>
+                        </div>
                     </div>
 
                                         <h6 class="fw-bold text-success border-bottom pb-2">Assign Application Licenses</h6>
@@ -1599,6 +1607,7 @@
             document.getElementById('companyAddress').value = company && company.address ? company.address : "";
             document.getElementById('companyTransport').value = company ? normaliseTransportPolicy(company.transport_policy) : "yes";
             document.getElementById('companyTransportAmountPerLift').value = company && company.transport_amount_per_lift !== undefined && company.transport_amount_per_lift !== null ? company.transport_amount_per_lift : 25;
+            document.getElementById('companySdlApplicable').checked = company ? !!company.sdl_applicable : false;
             toggleTransportAmountField();
             const selectedIndustry = company && company.industry_template ? company.industry_template : "Cleaning";
             loadIndustryTemplateOptions(selectedIndustry).then(() => {
@@ -1666,6 +1675,7 @@
             fd.append('address', document.getElementById('companyAddress').value);
             fd.append('transport_policy', document.getElementById('companyTransport').value);
             fd.append('transport_amount_per_lift', document.getElementById('companyTransportAmountPerLift').value || 25);
+            fd.append('sdl_applicable', document.getElementById('companySdlApplicable').checked);
             fd.append('industry_template', document.getElementById('companyIndustryTemplate').value);
             
             fd.append('can_booking', document.getElementById('compAppBooking').checked);

@@ -257,6 +257,7 @@ def build_payslip_pdf(payslip, employee, company, logo_path=None, leave_balances
         ('UIF (Employee)','Deduction',f('uif', p.get('uif_emp',0))),
         ('Loan Repayment','Deduction',f('loan_repayment')),
         ('UIF (Employer)','Employer Contribution',f('uif', p.get('uif_er',0))),
+        ('SDL (Employer)','Employer Contribution',f('sdl')),
     ]
     body = [[_paragraph('Description', st['body_bold']), _paragraph('Type', st['body_bold']), _paragraph('Amount', st['body_bold'])]]
     for label, typ, val in rows:
@@ -296,13 +297,18 @@ def build_irp5_pdf(irp5, company=None, logo_path=None):
                 {'cells':['Tax Number', i.get('tax_number') or '']},
             ]},
             {'title':'Tax Certificate Codes','rows':[
-                {'cells':['3601 - Income', i.get('code_3601') or '0.00']},
-                {'cells':['3605 - Overtime / Other', i.get('code_3605') or '0.00']},
+                {'cells':['3601 - Salary / Wages + Current-period Bonus', i.get('code_3601') or '0.00']},
+                {'cells':['3605 - Annual Payment', i.get('code_3605') or '0.00']},
+                {'cells':['3607 - Overtime', i.get('code_3607') or '0.00']},
                 {'cells':['3702 - Travel', i.get('code_3702') or '0.00']},
-                {'cells':['3699 - Gross Remuneration', i.get('code_3699') or '0.00'], 'bold':True, 'shade':True, 'total':True},
+                {'cells':['3699 - Gross Employment Income', i.get('code_3699') or '0.00'], 'bold':True, 'shade':True, 'total':True},
                 {'cells':['4102 - PAYE', i.get('code_4102') or '0.00']},
-                {'cells':['4141 - UIF', i.get('code_4141') or '0.00']},
+                {'cells':['4141 - Employee + Employer UIF', i.get('code_4141') or '0.00']},
+                {'cells':['4142 - Employer SDL', i.get('code_4142') or '0.00']},
+                {'cells':['4149 - Total Tax / SDL / UIF', i.get('code_4149') or '0.00'], 'bold':True, 'shade':True, 'total':True},
             ]},
         ]
     }
+    if i.get('warning'):
+        payload['groups'].append({'title':'Compliance Note','rows':[{'cells':['Historical payroll', i.get('warning')]}]})
     return build_table_report_pdf(payload, logo_path)
