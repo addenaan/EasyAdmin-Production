@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <title>{{ session.get('company_name') }} | HR & Payroll</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <style>
         body { background-color: #f8f9fa; padding-top: 30px; font-family: sans-serif;}
         .payslip-container { padding: 40px; background: white; width: 100%; max-width: 800px; margin: auto; }
@@ -1120,16 +1119,18 @@
             if(!cell) return;
             cell.innerHTML = '<span class="badge bg-success">Finalized</span>' + (dateText ? `<div class="small text-muted">${escapeHtml(dateText)}</div>` : '');
         }
-
-        // --- HIGH QUALITY PDF SETTINGS ---
-        function getPdfOptions(docName) {
-            return {
-                margin: 0.5, 
-                filename: docName + '.pdf', 
-                image: { type: 'jpeg', quality: 1.0 },
-                html2canvas: { scale: 4, useCORS: true }, 
-                jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' } 
-            };
+        // --- SERVER-SIDE PDF DOWNLOAD HELPER ---
+        async function downloadServerPdfPost(url, payload) {
+            const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+            if(!res.ok) throw new Error(await res.text() || 'Unable to generate PDF.');
+            const blob = await res.blob();
+            const disposition = res.headers.get('Content-Disposition') || '';
+            const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+            const filename = match ? decodeURIComponent(match[1].replace(/\"/g,'')) : 'Easy_Admin_Document.pdf';
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob); a.download = filename;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 1500);
         }
 
         function getLocalDateString(dateObj) {
@@ -1411,15 +1412,14 @@
 
                 if(sendEmail) {
                     status.innerText = `Emailing ${i+1} of ${preparedPayslips.length}: ${p.name || 'Employee'}...`;
-                    const element = document.getElementById('bulkPayslipContent');
-                    const nameStr = (p.name || `Employee_${id}`).replace(/\s+/g, '_');
-                    const pdfNamePrefix = item.finalized ? 'Payslip' : 'Draft_Payslip';
-                    const pdfBlob = await html2pdf().set(getPdfOptions(`${pdfNamePrefix}_${nameStr}_${date}`)).from(element).output('blob');
-                    const fd = new FormData();
-                    fd.append('pdf', pdfBlob, `${pdfNamePrefix}_${nameStr}_${date}.pdf`);
-                    fd.append('employee_id', id);
-                    fd.append('date', date);
-                    await fetch('/email_payslip', { method: 'POST', body: fd });
+                    const emailRes = await fetch('/api/email_payslip_pdf', {
+                        method:'POST', headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({employee_id:id, payslip:p, date:date, draft:!item.finalized})
+                    });
+                    if(!emailRes.ok) {
+                        const err = await emailRes.json().catch(() => ({message:'Unable to email payslip.'}));
+                        throw new Error(err.message || 'Unable to email payslip.');
+                    }
                 }
             }
 
@@ -1471,13 +1471,11 @@
                 document.getElementById('bi4102').innerText = p.code_4102;
                 document.getElementById('bi4141').innerText = p.code_4141;
                 
-                const nameStr = p.name.replace(/\s+/g, '_');
-                const element = document.getElementById('bulkIrp5Content');
-                
-                await html2pdf().set(getPdfOptions(`IRP5_${nameStr}_${p.tax_year}`)).from(element).save();
-                
-                // 1-second delay to allow browser to trigger the physical download prompt smoothly
-                await new Promise(r => setTimeout(r, 1000));
+                const a = document.createElement('a');
+                a.href = `/download/irp5/${encodeURIComponent(id)}/${encodeURIComponent(year)}.pdf`;
+                a.style.display = 'none';
+                document.body.appendChild(a); a.click(); a.remove();
+                await new Promise(r => setTimeout(r, 750));
             }
             
             status.innerText = "✅ All IRP5s generated and downloaded!";
@@ -2006,10 +2004,16 @@
             });
         }
 
-        function downloadSinglePayslip() {
-            const name = document.getElementById('bpName').innerText.replace(/\s+/g, '_');
-            const date = document.getElementById('bpDate').innerText;
-            html2pdf().set(getPdfOptions(`Payslip_${name}_${date}`)).from(document.getElementById('bulkPayslipContent')).save();
+        async function downloadSinglePayslip() {
+            if(!currentPayslipData) return;
+            try {
+                await downloadServerPdfPost('/api/pdf/payslip', {
+                    employee_id: currentPayslipData.raw.employee_id,
+                    payslip: currentPayslipData.payslip,
+                    date: currentPayslipData.raw.date,
+                    draft: !currentPayslipData.payslip.is_finalized
+                });
+            } catch(err) { alert(err.message || 'Unable to generate payslip PDF.'); }
         }
 
         function emailSinglePayslip() {
@@ -2017,24 +2021,15 @@
             const btn = document.getElementById('btnEmailSingle');
             const originalText = btn.innerText;
             btn.innerText = "Generating & Sending..."; btn.disabled = true;
-            
-            const name = document.getElementById('bpName').innerText.replace(/\s+/g, '_');
-            const date = document.getElementById('bpDate').innerText;
-            const element = document.getElementById('bulkPayslipContent');
-            
-            html2pdf().set(getPdfOptions(`Payslip_${name}_${date}`)).from(element).output('blob').then(function(pdfBlob) {
-                const fd = new FormData();
-                fd.append('pdf', pdfBlob, `Payslip_${name}_${date}.pdf`);
-                fd.append('employee_id', currentPayslipData.raw.employee_id);
-                fd.append('date', date);
-                
-                fetch('/email_payslip', { method: 'POST', body: fd }).then(res => res.json()).then(data => {
-                    alert(data.message);
-                    btn.innerText = originalText; btn.disabled = false;
-                }).catch(err => {
-                    alert("A server error occurred while sending the email.");
-                    btn.innerText = originalText; btn.disabled = false;
-                });
+            fetch('/api/email_payslip_pdf', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({employee_id:currentPayslipData.raw.employee_id, payslip:currentPayslipData.payslip, date:currentPayslipData.raw.date, draft:!currentPayslipData.payslip.is_finalized})
+            }).then(res => res.json().then(data => ({ok:res.ok,data}))).then(({ok,data}) => {
+                alert(data.message || (ok ? 'Email sent successfully.' : 'Unable to send email.'));
+                btn.innerText = originalText; btn.disabled = false;
+            }).catch(() => {
+                alert("A server error occurred while sending the email.");
+                btn.innerText = originalText; btn.disabled = false;
             });
         }
 
@@ -2235,8 +2230,7 @@
                 document.getElementById('bi4102').innerText = p.code_4102;
                 document.getElementById('bi4141').innerText = p.code_4141;
                 
-                const nameStr = p.name.replace(/\s+/g, '_');
-                html2pdf().set(getPdfOptions(`IRP5_${nameStr}_${p.tax_year}`)).from(document.getElementById('bulkIrp5Content')).save();
+                window.location.href = `/download/irp5/${encodeURIComponent(document.getElementById('irp5EmpId').value)}/${encodeURIComponent(year)}.pdf`;
             });
         }
 
@@ -2348,9 +2342,13 @@
             document.body.removeChild(link); 
         }
         
-        function exportEmpPDF() { 
-            const el = document.getElementById('reportPrintArea'); 
-            html2pdf().set({ margin: 0.5, filename: `Activity_Report_${document.getElementById('reportEmpNameDisplay').innerText}.pdf`, jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' } }).from(el).save(); 
+        function exportEmpPDF() {
+            const employeeId = document.getElementById('reportEmpId').value;
+            const start = document.getElementById('reportStart').value;
+            const end = document.getElementById('reportEnd').value;
+            if(!employeeId || !start || !end) return alert('Generate the report first.');
+            const q = new URLSearchParams({start_date:start, end_date:end});
+            window.location.href = `/download/employee_activity/${encodeURIComponent(employeeId)}.pdf?${q.toString()}`;
         }
         
         function openEditLeave(id, date, days, type, encodedNotes='', encodedAttachmentUrl='') { 

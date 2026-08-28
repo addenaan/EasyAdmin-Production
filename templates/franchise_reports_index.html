@@ -91,7 +91,7 @@
                 <div class="col-md-3 d-flex gap-2">
                     <button class="btn btn-primary fw-bold flex-fill" onclick="runFranchiseReport()">Run Report</button>
                     <button class="btn btn-outline-success fw-bold" onclick="exportFranchiseCsv()">CSV</button>
-                    <button class="btn btn-outline-dark fw-bold" onclick="window.print()">Print/PDF</button>
+                    <button class="btn btn-outline-dark fw-bold" onclick="exportFranchisePdf()">Save PDF</button>
                 </div>
             </div>
         </div>
@@ -188,6 +188,13 @@ function exportFranchiseCsv() {
     delete f.report_type;
     const q = new URLSearchParams(f).toString();
     window.location.href = `/export/franchise_reports/${encodeURIComponent(reportType)}.csv?${q}`;
+}
+function exportFranchisePdf() {
+    const f = collectFilters();
+    const reportType = f.report_type;
+    delete f.report_type;
+    const q = new URLSearchParams(f).toString();
+    window.location.href = `/export/franchise_reports/${encodeURIComponent(reportType)}.pdf?${q}`;
 }
 document.addEventListener('DOMContentLoaded', () => {
     loadOverview();

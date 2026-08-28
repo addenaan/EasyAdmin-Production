@@ -31,6 +31,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from app_modules.pagination import get_page_args, like_filter, pagination_meta
 from app_modules.jobs import job_manager
 from app_modules.db_compat import connect_database, is_postgres_enabled, table_exists as compat_table_exists, table_columns as compat_table_columns
+from app_modules.pdf_standard import validate_pdf_bytes as _standard_validate_pdf_bytes, build_table_report_pdf as _standard_table_pdf, build_payslip_pdf as _standard_payslip_pdf, build_irp5_pdf as _standard_irp5_pdf
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -1262,10 +1263,8 @@ def _safe_logo_url(filename):
 
 
 def _clear_pdf_logo_cache():
-    try:
-        _PDF_IMAGE_CACHE.clear()
-    except Exception:
-        pass
+    """Compatibility hook retained for callers; ReportLab reads current logo files directly."""
+    return None
 
 # --- Google Calendar Configuration ---
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
@@ -4537,6 +4536,7 @@ RATE_LIMIT_RULES = {
     'email_payslip': (30, 300),
     'email_invoice_pdf': (30, 300),
     'email_quote_pdf': (30, 300),
+    'email_receipt_pdf': (30, 300),
     'email_document': (30, 300),
     'api_franchise_reports_run': (60, 300),
     'export_franchise_reports_csv': (60, 300),
@@ -4897,11 +4897,11 @@ def restrict_access():
     if path in ['/save_interview', '/delete_interview']:
         if not _session_has_hiring_access():
             return _access_denied("Access Denied: Full Interviews & Hiring access is required for this action.")
-    payroll_read_paths = ['/generate_report', '/api/ui19_data', '/export_ui19', '/generate_emp201', '/generate_irp5']
-    if path in payroll_read_paths or path.startswith('/export_emp501') or path.startswith('/export_payroll_bank_file') or path == '/api/paged/payroll_employees' or (path == '/api/ui19_settings' and request.method == 'GET'):
+    payroll_read_paths = ['/generate_report', '/api/ui19_data', '/export_ui19', '/generate_emp201', '/generate_irp5', '/api/pdf/payslip']
+    if path in payroll_read_paths or path.startswith('/download/irp5/') or path.startswith('/download/employee_activity/') or path.startswith('/export_emp501') or path.startswith('/export_payroll_bank_file') or path == '/api/paged/payroll_employees' or (path == '/api/ui19_settings' and request.method == 'GET'):
         if not _session_has_payroll_read_access():
             return _access_denied("Access Denied: You do not have permissions to access Employee Administration or Payroll & Leave.")
-    payroll_write_paths = ['/update_employee', '/generate_payslip', '/api/save_payslip', '/api/save_adjustment_payslip', '/email_payslip', '/record_leave', '/update_leave', '/delete_leave']
+    payroll_write_paths = ['/update_employee', '/generate_payslip', '/api/save_payslip', '/api/save_adjustment_payslip', '/email_payslip', '/api/email_payslip_pdf', '/record_leave', '/update_leave', '/delete_leave']
     if path == '/api/ui19_settings' and request.method != 'GET':
         if not _session_has_payroll_admin_access():
             return _access_denied("Access Denied: Full Employee Administration or Payroll & Leave access is required for this action.")
@@ -4912,11 +4912,11 @@ def restrict_access():
         if not _session_has_hr_module_read_access():
             return _access_denied("Access Denied: You do not have permissions to access HR documents.")
 
-    invoicing_read_prefixes = ['/api/uninvoiced', '/api/client_statement', '/download/invoice', '/download/quote']
+    invoicing_read_prefixes = ['/api/uninvoiced', '/api/client_statement', '/api/receipt', '/download/invoice', '/download/quote', '/download/receipt', '/download/credit_note', '/download/client_statement.pdf']
     if path == '/invoicing' or any(path.startswith(prefix) for prefix in invoicing_read_prefixes) or ((path.startswith('/api/invoice') or path.startswith('/api/quote') or path.startswith('/api/credit_note')) and request.method == 'GET'):
         if not _session_has_app_read('invoicing'):
             return _access_denied("Access Denied: You do not have permissions to access Invoicing & Quotes.")
-    invoicing_write_prefixes = ['/api/save_invoice', '/api/save_quote', '/api/email_invoice_pdf', '/api/email_quote_pdf']
+    invoicing_write_prefixes = ['/api/save_invoice', '/api/save_quote', '/api/email_invoice_pdf', '/api/email_quote_pdf', '/api/email_receipt_pdf', '/api/email_credit_note_pdf', '/api/email_client_statement_pdf']
     if any(path.startswith(prefix) for prefix in invoicing_write_prefixes) or path == '/api/save_invoice_settings' or path == '/api/email_document' or ((path.startswith('/api/invoice') or path.startswith('/api/quote') or path.startswith('/api/credit_note')) and request.method != 'GET'):
         if not _session_has_app_full('invoicing'):
             return _access_denied("Access Denied: Full Invoicing & Quotes access is required for this action.")
@@ -6513,11 +6513,7 @@ def export_reports_pdf(report_type):
         log_action('Reports', 'Downloaded Report PDF', f"{report_payload.get('title')} | {filters.get('start_date')} to {filters.get('end_date')}")
     except Exception:
         pass
-    return Response(
-        pdf_bytes,
-        mimetype='application/pdf',
-        headers={'Content-Disposition': f'attachment; filename={filename}'}
-    )
+    return _billing_pdf_download_response(pdf_bytes, filename)
 
 
 @app.route('/export/reports/<report_type>.csv')
@@ -7204,6 +7200,34 @@ def api_franchise_reports_run():
         conn.close()
 
 
+@app.route('/export/franchise_reports/<report_type>.pdf')
+def export_franchise_reports_pdf(report_type):
+    conn = get_db_connection()
+    try:
+        group_id = int(request.args.get('franchise_group_id') or _franchise_user_group_id() or 0) if session.get('is_superadmin') else _franchise_user_group_id()
+        allowed_companies, group = _franchise_allowed_companies(conn, group_id)
+        allowed_ids = [c['id'] for c in allowed_companies]
+        filters = _franchise_report_filters(request.args, allowed_ids)
+        if session.get('is_superadmin'):
+            filters['franchise_group_id'] = group_id
+        payload = _build_franchise_report_payload((report_type or '').strip(), filters, allowed_companies, group)
+    except PermissionError as exc:
+        conn.close(); return str(exc), 403
+    except ValueError as exc:
+        conn.close(); return str(exc), 400
+    finally:
+        try: conn.close()
+        except Exception: pass
+    company = {'name':(group or {}).get('name') or 'Franchise Reports','address':'','registration_number':'','vat_number':'','logo_file':''}
+    columns = [{'label':c, 'align':'right' if any(k in str(c).lower() for k in ('amount','revenue','balance','price','total')) else 'left'} for c in payload.get('columns') or []]
+    rows = [{'cells':row} for row in payload.get('rows') or []]
+    pdf_payload = {'title':payload.get('title') or 'Franchise Report','subtitle':f"{filters['start_date']} to {filters['end_date']}",'framework':'','company':company,'columns':columns,'groups':[{'rows':rows}],'orientation':'landscape' if len(columns)>6 else 'portrait'}
+    pdf_bytes = _draw_accounting_report_pdf(pdf_payload)
+    filename = f"Easy_Admin_Franchise_{secure_filename(str(report_type))}_{filters['start_date']}_to_{filters['end_date']}.pdf"
+    log_action('Franchise Reports','Downloaded Report PDF',f"{payload.get('title')} | {(group or {}).get('name') or ''}")
+    return _billing_pdf_download_response(pdf_bytes, filename)
+
+
 @app.route('/export/franchise_reports/<report_type>.csv')
 def export_franchise_reports_csv(report_type):
     conn = get_db_connection()
@@ -7637,259 +7661,26 @@ def _staff_payslip_pdf_money(value):
 
 
 def _build_staff_payslip_pdf(row, employee, company):
-    """Create a staff downloadable payslip PDF matching the HR & Payroll payslip layout."""
+    """Generate staff payslips with the shared ReportLab compatibility renderer."""
     r = dict(row)
     emp = dict(employee)
     comp = dict(company) if company else {}
-
-    page_w, page_h = 595.28, 841.89
-    margin = 34.0
-    content_x = 46.0
-    dark = (0.12, 0.13, 0.16)
-    muted = (0.42, 0.45, 0.48)
-    line_col = (0.84, 0.85, 0.86)
-    light = (0.965, 0.975, 0.985)
-    green = (0.04, 0.52, 0.31)
-    blue = (0.05, 0.43, 0.88)
-    white = (1, 1, 1)
-
-    cmds = []
-    image_resources = {}
-
-    def cmd(line):
-        cmds.append(line)
-
-    def color(c, op='rg'):
-        return f"{c[0]:.3f} {c[1]:.3f} {c[2]:.3f} {op}"
-
-    def text_width(value, size=9, bold=False):
-        value = str(value or '')
-        total = 0.0
-        for ch in value:
-            if ch.isdigit():
-                total += 0.556
-            elif ch in ',.':
-                total += 0.278 if not bold else 0.333
-            elif ch in ' -/:()':
-                total += 0.278 if not bold else 0.333
-            elif ch in 'ilI|!':
-                total += 0.240 if not bold else 0.300
-            elif ch in 'mwMW':
-                total += 0.800 if not bold else 0.900
-            else:
-                total += 0.520 if not bold else 0.600
-        return total * float(size)
-
-    def text(x, y, value, size=9, bold=False, c=dark, align='left', italic=False):
-        value = str(value or '').replace('\u00a0', ' ')
-        tw = text_width(value, size, bold)
-        if align == 'right':
-            x -= tw
-        elif align == 'center':
-            x -= tw / 2
-        # Base PDF fonts do not include Helvetica-Oblique in this lightweight writer.
-        font = 'F2' if bold else 'F1'
-        cmd(f"{color(c)} BT /{font} {float(size):.2f} Tf {float(x):.2f} {float(y):.2f} Td ({_pdf_text_escape(value)}) Tj ET")
-
-    def rect(x, y, w, h, stroke=None, fill=None, width=0.55):
-        if fill is not None:
-            cmd(f"{color(fill)} {float(x):.2f} {float(y):.2f} {float(w):.2f} {float(h):.2f} re f")
-        if stroke is not None:
-            cmd(f"{float(width):.2f} w {color(stroke, 'RG')} {float(x):.2f} {float(y):.2f} {float(w):.2f} {float(h):.2f} re S")
-
-    def line(x1, y1, x2, y2, stroke=line_col, width=0.55):
-        cmd(f"{float(width):.2f} w {color(stroke, 'RG')} {float(x1):.2f} {float(y1):.2f} m {float(x2):.2f} {float(y2):.2f} l S")
-
-    def draw_wrapped(value, x, y, max_chars=42, size=10, c=muted, leading=14, max_lines=4, bold=False):
-        value = str(value or '').replace('\r', ' ').replace('\n', ' ')
-        words = value.split()
-        lines = []
-        current = ''
-        for word in words:
-            trial = (current + ' ' + word).strip()
-            if len(trial) <= max_chars:
-                current = trial
-            else:
-                if current:
-                    lines.append(current)
-                current = word
-                if len(lines) >= max_lines:
-                    break
-        if current and len(lines) < max_lines:
-            lines.append(current)
-        for i, ln in enumerate(lines[:max_lines]):
-            text(x, y - i * leading, ln, size, bold, c)
-        return y - len(lines[:max_lines]) * leading
-
-    def draw_image(name, x, y, w, h):
-        cmd(f"q {float(w):.2f} 0 0 {float(h):.2f} {float(x):.2f} {float(y):.2f} cm /{name} Do Q")
-
-    # Outer document frame similar to the HR & Payroll payslip download.
-    rect(12, 18, page_w - 24, page_h - 36, stroke=(0.20, 0.23, 0.27), fill=None, width=0.8)
-
-    company_name = comp.get('name') or session.get('company_name') or 'Company'
-    company_addr = comp.get('address') or ''
-    company_reg = comp.get('registration_number') or ''
-    company_contact_email = comp.get('contact_email') or ''
-    company_contact_number = comp.get('contact_number') or ''
-    period = (format_display_date(r.get('date') or '') or str(r.get('date') or ''))[:7]
-    payslip_type = (r.get('payslip_type') or 'regular').strip().lower()
-    doc_title = 'ADJUSTMENT PAYSLIP' if payslip_type == 'adjustment' else 'PAYSLIP'
-
-    logo_resource_name = None
-    try:
-        logo_file = comp.get('logo_file') or ''
-        if logo_file:
-            logo_path = os.path.join(app.config.get('UPLOAD_FOLDER', 'uploads'), 'logos', os.path.basename(str(logo_file)))
-            logo_info = _get_cached_pdf_image(logo_path) if os.path.exists(logo_path) else None
-            if logo_info:
-                logo_resource_name = 'ImLogo'
-                image_resources[logo_resource_name] = logo_info
-    except Exception:
-        logo_resource_name = None
-
-    top_y = page_h - 72
-    if logo_resource_name:
-        logo = image_resources[logo_resource_name]
-        max_w, max_h = 120.0, 56.0
-        ratio = min(max_w / max(1, float(logo.get('width', 1))), max_h / max(1, float(logo.get('height', 1))))
-        logo_w = float(logo.get('width', 1)) * ratio
-        logo_h = float(logo.get('height', 1)) * ratio
-        draw_image(logo_resource_name, content_x, top_y - logo_h + 4, logo_w, logo_h)
-        company_y = top_y - logo_h - 22
-    else:
-        company_y = top_y
-
-    text(content_x, company_y, company_name, 22, True, dark)
-    y = company_y - 22
-    if company_reg:
-        text(content_x, y, f"Reg No: {company_reg}", 10, False, muted)
-        y -= 14
-    if company_addr:
-        y = draw_wrapped(company_addr, content_x, y, 38, 11, muted, 16, 4)
-    if company_contact_email:
-        text(content_x, y, f"Email: {company_contact_email}", 10, False, muted)
-        y -= 14
-    if company_contact_number:
-        text(content_x, y, f"Tel: {company_contact_number}", 10, False, muted)
-        y -= 14
-
-    text(page_w - content_x, page_h - 83, doc_title, 24, True, green, 'right')
-    info_y = page_h - 142
-    text(page_w - content_x - 85, info_y, 'Date:', 12, True, dark, 'right')
-    text(page_w - content_x, info_y, period, 12, False, dark, 'right')
-    info_y -= 18
-    text(page_w - content_x - 113, info_y, 'Employee:', 12, True, dark, 'right')
-    text(page_w - content_x, info_y, emp.get('name') or '', 12, False, dark, 'right')
-    info_y -= 17
-    if emp.get('emp_number'):
-        text(page_w - content_x, info_y, f"({emp.get('emp_number')})", 12, False, dark, 'right')
-        info_y -= 17
-    text(page_w - content_x - 70, info_y, 'ID:', 12, True, dark, 'right')
-    text(page_w - content_x, info_y, emp.get('id_passport') or '', 12, False, dark, 'right')
-
-    line(content_x - 10, page_h - 238, page_w - content_x + 10, page_h - 238, line_col, 0.7)
-
-    table_x = content_x
-    table_y_top = page_h - 268
-    row_h = 34.0
-    table_w = page_w - (content_x * 2)
-    desc_w = table_w * 0.66
-    earn_w = table_w * 0.155
-    ded_w = table_w - desc_w - earn_w
-    x_desc = table_x
-    x_earn = table_x + desc_w
-    x_ded = x_earn + earn_w
-
-    # Header and table frame.
-    rect(table_x, table_y_top - row_h, table_w, row_h, stroke=None, fill=white)
-    text(table_x + 7, table_y_top - 24, 'Description', 13, True, dark)
-    text(x_earn + earn_w - 8, table_y_top - 24, 'Earnings', 13, True, dark, 'right')
-    text(x_ded + ded_w - 8, table_y_top - 24, 'Deductions', 13, True, dark, 'right')
-    line(x_earn, table_y_top, x_earn, table_y_top - row_h * 8, line_col, 0.9)
-    line(x_ded, table_y_top, x_ded, table_y_top - row_h * 8, line_col, 0.9)
-    line(table_x, table_y_top - row_h, table_x + table_w, table_y_top - row_h, (0.90,0.91,0.92), 0.4)
-
-    def money_amount(value):
-        return _staff_payslip_pdf_money(value)
-
-    table_rows = [
-        {'label': 'Calculated Gross', 'code': 'Code: 3601', 'earn': r.get('gross_salary') or 0, 'ded': None, 'show': True, 'muted': ''},
-        {'label': 'Overtime / Premium Pay', 'code': 'Code: 3605', 'earn': r.get('overtime') or 0, 'ded': None, 'show': abs(float(r.get('overtime') or 0)) > 0.004, 'muted': ''},
-        {'label': 'Reimbursable Expenses (Non-taxable)', 'code': '', 'earn': r.get('reimbursable_expenses') or 0, 'ded': None, 'show': abs(float(r.get('reimbursable_expenses') or 0)) > 0.004, 'green': True},
-        {'label': 'Bonus', 'code': 'Code: 3605/3601', 'earn': r.get('bonus') or 0, 'ded': None, 'show': abs(float(r.get('bonus') or 0)) > 0.004},
-        {'label': 'Transport Reimbursement (Tax Free)', 'code': 'Code: 3702', 'earn': r.get('transport') or 0, 'ded': None, 'show': abs(float(r.get('transport') or 0)) > 0.004, 'green': True},
-        {'label': 'PAYE Tax', 'code': 'Code: 4102', 'earn': None, 'ded': r.get('paye') or 0, 'show': True},
-        {'label': 'UIF (Employee 1%)', 'code': 'Code: 4141', 'earn': None, 'ded': r.get('uif') or 0, 'show': True},
-        {'label': 'Loan Repayment', 'code': '', 'earn': None, 'ded': r.get('loan_repayment') or 0, 'show': abs(float(r.get('loan_repayment') or 0)) > 0.004},
-        {'label': 'UIF (Employer 1%)', 'code': '', 'earn': r.get('uif') or 0, 'ded': None, 'show': True, 'italic': True},
-    ]
-    visible_rows = [rr for rr in table_rows if rr.get('show')]
-    y = table_y_top - row_h
-    for rr in visible_rows:
-        rect(table_x, y - row_h, table_w, row_h, stroke=(0.94,0.94,0.94), fill=white, width=0.35)
-        line(x_earn, y, x_earn, y - row_h, line_col, 0.65)
-        line(x_ded, y, x_ded, y - row_h, line_col, 0.65)
-        label_col = muted if rr.get('italic') else dark
-        text(table_x + 7, y - 22, rr['label'], 12, False, label_col)
-        if rr.get('code'):
-            text(x_earn - 22, y - 22, rr['code'], 9, False, muted, 'right')
-        amount_col = green if rr.get('green') else dark
-        if rr.get('earn') is not None:
-            text(x_earn + earn_w - 8, y - 22, money_amount(rr.get('earn')), 12, False, amount_col, 'right')
-        if rr.get('ded') is not None:
-            text(x_ded + ded_w - 8, y - 22, money_amount(rr.get('ded')), 12, False, dark, 'right')
-        y -= row_h
-
-    # Net pay row.
-    net_h = 39.0
-    line(table_x, y, table_x + table_w, y, (0.10,0.10,0.10), 1.0)
-    rect(table_x, y - net_h, table_w, net_h, stroke=(0.10,0.10,0.10), fill=white, width=0.8)
-    line(x_earn, y, x_earn, y - net_h, (0.10,0.10,0.10), 1.0)
-    text(table_x + 7, y - 25, 'NET PAY', 13, True, dark)
-    text(x_ded + ded_w - 8, y - 25, money_amount(r.get('net_salary') or 0), 16, True, green, 'right')
-    y -= net_h + 38
-
-    if r.get('adjustment_reason'):
-        rect(content_x, y - 46, table_w, 46, stroke=line_col, fill=light, width=0.5)
-        text(content_x + 8, y - 16, 'Adjustment reason', 10, True, dark)
-        draw_wrapped(r.get('adjustment_reason'), content_x + 8, y - 31, 84, 9, muted, 11, 2)
-        y -= 62
-
-    # Leave balances panel.
-    panel_h = 112
-    rect(content_x, y - panel_h, table_w, panel_h, stroke=(0.86,0.88,0.91), fill=light, width=0.55)
-    text(content_x + 13, y - 23, 'Statutory Leave Balances', 13, False, blue)
-    line(content_x + 13, y - 34, content_x + table_w - 13, y - 34, (0.82,0.84,0.87), 0.5)
     try:
         leave_ref = r.get('date') or datetime.now().strftime('%Y-%m-%d')
-        annual = calculate_leave_balance(emp.get('id'), emp.get('start_date') or datetime.now().strftime('%Y-%m-%d'), emp.get('emp_type') or 'Full-time (5 Days)', emp.get('name') or '', leave_ref)
-        sick = calculate_sick_leave_balance(emp.get('id'), emp.get('start_date') or datetime.now().strftime('%Y-%m-%d'), emp.get('emp_type') or 'Full-time (5 Days)', emp.get('name') or '', leave_ref)
-        family = calculate_family_leave_balance(emp.get('id'), emp.get('start_date') or datetime.now().strftime('%Y-%m-%d'), emp.get('emp_type') or 'Full-time (5 Days)', emp.get('name') or '', leave_ref)
+        balances = {
+            'annual': f"{float(calculate_leave_balance(emp.get('id'), emp.get('start_date') or datetime.now().strftime('%Y-%m-%d'), emp.get('emp_type') or 'Full-time (5 Days)', emp.get('name') or '', leave_ref)):g} Days",
+            'sick': f"{float(calculate_sick_leave_balance(emp.get('id'), emp.get('start_date') or datetime.now().strftime('%Y-%m-%d'), emp.get('emp_type') or 'Full-time (5 Days)', emp.get('name') or '', leave_ref)):g} Days left in 36-month cycle",
+            'family': f"{float(calculate_family_leave_balance(emp.get('id'), emp.get('start_date') or datetime.now().strftime('%Y-%m-%d'), emp.get('emp_type') or 'Full-time (5 Days)', emp.get('name') or '', leave_ref)):g} Days left in annual cycle",
+        }
     except Exception:
-        annual, sick, family = 'N/A', 'N/A', 'N/A'
-
-    def leave_val(v):
-        try:
-            f = float(v)
-            return f"{f:g}"
-        except Exception:
-            return str(v)
-
-    line_y = y - 55
-    text(content_x + 13, line_y, 'Annual Leave Balance:', 10, False, dark)
-    text(content_x + 133, line_y, f"{leave_val(annual)} Days", 10, True, dark)
-    line_y -= 18
-    text(content_x + 13, line_y, 'Sick Leave Balance:', 10, False, dark)
-    text(content_x + 128, line_y, f"{leave_val(sick)} Days left in 36-month cycle", 10, True, dark)
-    line_y -= 18
-    text(content_x + 13, line_y, 'Family Responsibility Leave:', 10, False, dark)
-    text(content_x + 166, line_y, f"{leave_val(family)} Days left in annual cycle", 10, True, dark)
-
-    if image_resources:
-        pdf_bytes = _build_raw_pdf(['\n'.join(cmds)], page_w, page_h, image_resources)
-    else:
-        pdf_bytes = _build_raw_pdf(['\n'.join(cmds)], page_w, page_h, {})
+        balances = {'annual': 'N/A', 'sick': 'N/A', 'family': 'N/A'}
+    logo_path = None
+    logo_file = comp.get('logo_file') or ''
+    if logo_file:
+        candidate = os.path.join(app.config.get('UPLOAD_FOLDER', 'uploads'), 'logos', os.path.basename(str(logo_file)))
+        if os.path.exists(candidate):
+            logo_path = candidate
+    pdf_bytes = _standard_payslip_pdf(r, emp, comp, logo_path=logo_path, leave_balances=balances, draft=False)
     return io.BytesIO(pdf_bytes)
 
 
@@ -8640,7 +8431,7 @@ def staff_download_payslip(payslip_id):
         period = (format_display_date(row['date']) or str(row['date'] or 'payslip'))[:10]
         filename = f"Payslip_{safe_name}_{period}.pdf"
         log_action('Staff Portal', 'Downloaded Payslip', f"{employee['name']} downloaded payslip ID {payslip_id}.")
-        return send_file(pdf_bytes, mimetype='application/pdf', as_attachment=True, download_name=filename)
+        return _billing_pdf_download_response(_standard_validate_pdf_bytes(pdf_bytes), filename)
     finally:
         conn.close()
 
@@ -13098,6 +12889,34 @@ def export_booking_ops_report():
     response.headers['Content-Disposition'] = f'attachment; filename={filename}'
     return response
 
+@app.route('/export_booking_ops_report.pdf')
+def export_booking_ops_report_pdf():
+    if not _session_has_app_read('booking'):
+        return 'Forbidden', 403
+    report_type = (request.args.get('report_type') or 'bookings').strip().lower()
+    start_date = (request.args.get('start_date') or '').strip()
+    end_date = (request.args.get('end_date') or '').strip()
+    mapping = {'bookings':'booking_detail', 'customers':'bookings_by_client', 'projects':'project_bookings'}
+    if report_type not in mapping or not start_date or not end_date:
+        return 'Invalid report request.', 400
+    filters = _report_filters({'start_date':start_date, 'end_date':end_date})
+    try:
+        report_payload = _build_reports_payload(mapping[report_type], filters)
+    except Exception as exc:
+        app.logger.exception('Booking & Ops PDF report generation failed company_id=%s', session.get('company_id'))
+        return f'Unable to generate report: {exc}', 500
+    conn = get_db_connection()
+    try:
+        company = _accounting_company_payload(conn, session['company_id'])
+    finally:
+        conn.close()
+    pdf_payload = _build_standard_report_pdf_payload(report_payload, company)
+    pdf_bytes = _draw_accounting_report_pdf(pdf_payload)
+    filename = f"Booking_Ops_{report_type.title()}_{start_date}_to_{end_date}.pdf"
+    log_action('Booking & Ops', 'Downloaded Report PDF', f"{report_type} | {start_date} to {end_date}")
+    return _billing_pdf_download_response(pdf_bytes, filename)
+
+
 @app.route('/export_bookings_range', methods=['POST'])
 def export_bookings_range():
     data = request.get_json(silent=True) or {}
@@ -13844,6 +13663,103 @@ def _apply_company_email_headers(msg, settings, to_email):
     if reply_to:
         msg['Reply-To'] = reply_to
     return recipients
+
+
+def _build_admin_payslip_pdf_from_payload(data):
+    data = data or {}
+    emp_id = int(data.get('employee_id') or 0)
+    p = dict(data.get('payslip') or {})
+    if not emp_id or not p:
+        raise ValueError('Employee and payslip data are required.')
+    conn = get_db_connection()
+    try:
+        emp_row = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (emp_id, session['company_id'])).fetchone()
+        company_row = conn.execute('SELECT * FROM companies WHERE id=?', (session['company_id'],)).fetchone()
+        if not emp_row:
+            raise ValueError('Employee not found.')
+        emp = dict(emp_row)
+        company = dict(company_row) if company_row else {}
+    finally:
+        conn.close()
+    # Preserve the exact preview/final values already calculated by Easy Admin.
+    normalized = dict(p)
+    normalized.setdefault('gross_salary', p.get('gross') or 0)
+    normalized.setdefault('net_salary', p.get('net') or 0)
+    try:
+        # Strings are formatted for display; raw numeric values are also accepted.
+        for key, source in [('uif','uif_emp'),('paye','paye'),('overtime','overtime'),('transport','transport'),('bonus','bonus'),('reimbursable_expenses','reimbursable_expenses'),('loan_repayment','loan_repayment')]:
+            if normalized.get(key) in (None,''):
+                normalized[key] = p.get(source) or 0
+    except Exception:
+        pass
+    balances = {
+        'annual': p.get('leave') or 'N/A',
+        'sick': p.get('sick_leave') or 'N/A',
+        'family': p.get('family_leave') or 'N/A',
+    }
+    logo_path = None
+    if company.get('logo_file'):
+        candidate = os.path.join(app.config.get('UPLOAD_FOLDER','uploads'), 'logos', os.path.basename(str(company.get('logo_file'))))
+        if os.path.exists(candidate): logo_path = candidate
+    pdf_bytes = _standard_payslip_pdf(normalized, emp, company, logo_path=logo_path, leave_balances=balances, draft=bool(data.get('draft')))
+    return pdf_bytes, emp, company
+
+
+@app.route('/api/pdf/payslip', methods=['POST'])
+def api_pdf_payslip():
+    if not _session_has_payroll_read_access():
+        return 'Forbidden', 403
+    data = request.get_json(silent=True) or {}
+    try:
+        pdf_bytes, emp, _company = _build_admin_payslip_pdf_from_payload(data)
+    except ValueError as exc:
+        return str(exc), 400
+    date_text = str((data.get('payslip') or {}).get('date') or data.get('date') or '')
+    prefix = 'Draft_Payslip' if data.get('draft') else 'Payslip'
+    filename = f"{prefix}_{secure_filename(emp.get('name') or 'Employee')}_{secure_filename(date_text)}.pdf"
+    log_action('HR & Payroll', 'Downloaded Payslip PDF', f"{emp.get('name')} | {date_text}")
+    return _billing_pdf_download_response(pdf_bytes, filename)
+
+
+@app.route('/api/email_payslip_pdf', methods=['POST'])
+def api_email_payslip_pdf():
+    if not session.get('can_payroll') and not session.get('is_superadmin'):
+        return jsonify({'message':'Forbidden'}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        pdf_bytes, emp, _company = _build_admin_payslip_pdf_from_payload(data)
+    except ValueError as exc:
+        return jsonify({'message':str(exc)}), 400
+    if not emp.get('email'):
+        return jsonify({'message':'Employee has no email address saved in their profile.'}), 400
+    conn = get_db_connection()
+    try:
+        settings_rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (session['company_id'],)).fetchall()
+    finally:
+        conn.close()
+    settings = {r['key']:r['value'] for r in settings_rows}
+    if not settings.get('smtp_server') or not settings.get('smtp_user') or not settings.get('smtp_pass'):
+        return jsonify({'message':'SMTP settings are incomplete. Please configure them in Settings.'}), 400
+    date_text = str((data.get('payslip') or {}).get('date') or data.get('date') or '')
+    prefix = 'Draft Payslip' if data.get('draft') else 'Payslip'
+    filename = f"{prefix.replace(' ','_')}_{secure_filename(emp.get('name') or 'Employee')}_{secure_filename(date_text)}.pdf"
+    try:
+        msg = EmailMessage()
+        msg['Subject'] = f"{prefix} - {date_text}"
+        recipients = _apply_company_email_headers(msg, settings, emp.get('email'))
+        msg.set_content(f"Dear {emp.get('name')},\n\nPlease find attached your {prefix.lower()} for {date_text}.\n\nKind regards,\n{session.get('company_name')}")
+        msg.add_attachment(_standard_validate_pdf_bytes(pdf_bytes), maintype='application', subtype='pdf', filename=filename)
+        port = int(settings.get('smtp_port',465))
+        if port == 587:
+            with smtplib.SMTP(settings['smtp_server'], port, timeout=10) as server:
+                server.starttls(); server.login(settings['smtp_user'],settings['smtp_pass']); server.send_message(msg)
+        else:
+            with smtplib.SMTP_SSL(settings['smtp_server'], port, timeout=10) as server:
+                server.login(settings['smtp_user'],settings['smtp_pass']); server.send_message(msg)
+        log_action('HR & Payroll','Emailed Payslip PDF',f"{emp.get('name')} | {'; '.join(recipients)}")
+        return jsonify({'message':'Email sent successfully!'})
+    except Exception as exc:
+        return jsonify({'message':f'Error sending email: {exc}'}), 500
 
 
 @app.route('/email_payslip', methods=['POST'])
@@ -15137,81 +15053,69 @@ def ui19_data():
 
 
 
-def _pdf_escape(value):
-    text = str(value or '')
-    text = text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
-    return text.encode('latin-1', 'replace').decode('latin-1')
-
-
 class _SimplePdf:
-    """Tiny PDF writer used for UI-19 output without third-party dependencies."""
+    """ReportLab-backed drawing adapter used by the existing UI-19 layout."""
     def __init__(self, width=841.89, height=595.28):
+        from reportlab.pdfgen import canvas
         self.width = float(width)
         self.height = float(height)
-        self.pages = []
-        self.current = []
-        self.font_alias = {'Helvetica': 'F1', 'Helvetica-Bold': 'F2'}
-        self.current_font = ('Helvetica', 8)
+        self.buffer = io.BytesIO()
+        self.canvas = canvas.Canvas(self.buffer, pagesize=(self.width, self.height), pdfVersion=(1, 4), pageCompression=1)
+        self.current_font = ('Helvetica', 8.0)
+        self._page_started = False
 
     def new_page(self):
-        if self.current:
-            self.pages.append('\n'.join(self.current))
-        self.current = []
+        if self._page_started:
+            self.canvas.showPage()
+        self._page_started = True
         self.set_font('Helvetica', 8)
         self.set_line_width(0.6)
 
     def set_font(self, font='Helvetica', size=8):
-        if font not in self.font_alias:
+        if font not in ('Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique', 'Helvetica-BoldOblique'):
             font = 'Helvetica'
         self.current_font = (font, float(size))
-        self.current.append(f"/{self.font_alias[font]} {float(size):.2f} Tf")
+        self.canvas.setFont(font, float(size))
 
     def set_line_width(self, width):
-        self.current.append(f"{float(width):.2f} w")
+        self.canvas.setLineWidth(float(width))
 
     def rect(self, x, y, w, h):
-        self.current.append(f"{float(x):.2f} {float(y):.2f} {float(w):.2f} {float(h):.2f} re S")
+        self.canvas.rect(float(x), float(y), float(w), float(h), stroke=1, fill=0)
 
     def line(self, x1, y1, x2, y2):
-        self.current.append(f"{float(x1):.2f} {float(y1):.2f} m {float(x2):.2f} {float(y2):.2f} l S")
+        self.canvas.line(float(x1), float(y1), float(x2), float(y2))
 
     def text_width(self, text, font='Helvetica', size=8):
-        text = str(text or '')
-        # Conservative Helvetica approximation. Good enough for wrapping in form cells.
-        total = 0.0
-        for ch in text:
-            if ch in 'il.,:;|! ':
-                total += 0.25
-            elif ch in 'MW@#%&':
-                total += 0.75
-            elif ch.isupper() or ch.isdigit():
-                total += 0.58
-            else:
-                total += 0.50
-        return total * float(size)
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        try:
+            return stringWidth(str(text or ''), font, float(size))
+        except Exception:
+            return stringWidth(str(text or ''), 'Helvetica', float(size))
 
     def draw_string(self, x, y, text, font=None, size=None):
         if font or size:
             self.set_font(font or self.current_font[0], size or self.current_font[1])
-        self.current.append(f"BT 1 0 0 1 {float(x):.2f} {float(y):.2f} Tm ({_pdf_escape(text)}) Tj ET")
+        self.canvas.drawString(float(x), float(y), str(text or ''))
 
     def draw_centered(self, x, y, text, font=None, size=None):
         font = font or self.current_font[0]
         size = float(size or self.current_font[1])
-        self.draw_string(float(x) - self.text_width(text, font, size) / 2, y, text, font, size)
+        self.set_font(font, size)
+        self.canvas.drawCentredString(float(x), float(y), str(text or ''))
 
     def draw_right(self, x, y, text, font=None, size=None):
         font = font or self.current_font[0]
         size = float(size or self.current_font[1])
-        self.draw_string(float(x) - self.text_width(text, font, size), y, text, font, size)
+        self.set_font(font, size)
+        self.canvas.drawRightString(float(x), float(y), str(text or ''))
 
     def wrap_text(self, text, max_width, font='Helvetica', size=7, max_lines=2):
         text = str(text or '').replace('\r', ' ').replace('\n', ' ')
         words = text.split()
         if not words:
             return []
-        lines = []
-        current = ''
+        lines, current = [], ''
         for word in words:
             trial = (current + ' ' + word).strip()
             if not current or self.text_width(trial, font, size) <= max_width:
@@ -15235,50 +15139,10 @@ class _SimplePdf:
         self.draw_wrapped(value, x + label_w, y + h - font_size - 3, max(10, w - label_w - 6), 'Helvetica', font_size, font_size + 1, 2)
 
     def finish(self):
-        if self.current:
-            self.pages.append('\n'.join(self.current))
-            self.current = []
-        objects = []
-        catalog_id = 1
-        pages_id = 2
-        font1_id = 3
-        font2_id = 4
-        next_id = 5
-        page_ids = []
-        content_ids = []
-        for content in self.pages:
-            page_ids.append(next_id); next_id += 1
-            content_ids.append(next_id); next_id += 1
-        objects.append((catalog_id, f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode('latin-1')))
-        kids = ' '.join(f'{pid} 0 R' for pid in page_ids)
-        objects.append((pages_id, f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>".encode('latin-1')))
-        objects.append((font1_id, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"))
-        objects.append((font2_id, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"))
-        for pid, cid, content in zip(page_ids, content_ids, self.pages):
-            page_obj = (f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {self.width:.2f} {self.height:.2f}] "
-                        f"/Resources << /Font << /F1 {font1_id} 0 R /F2 {font2_id} 0 R >> >> /Contents {cid} 0 R >>")
-            stream = content.encode('latin-1', 'replace')
-            content_obj = b"<< /Length " + str(len(stream)).encode('ascii') + b" >>\nstream\n" + stream + b"\nendstream"
-            objects.append((pid, page_obj.encode('latin-1')))
-            objects.append((cid, content_obj))
-        out = io.BytesIO()
-        out.write(b'%PDF-1.4\n%\xe2\xe3\xcf\xd3\n')
-        offsets = [0]
-        for obj_id, body in objects:
-            offsets.append(out.tell())
-            out.write(f"{obj_id} 0 obj\n".encode('ascii'))
-            out.write(body)
-            out.write(b"\nendobj\n")
-        xref_pos = out.tell()
-        max_id = max(obj_id for obj_id, _ in objects)
-        obj_by_id = {obj_id: offsets[i + 1] for i, (obj_id, _) in enumerate(objects)}
-        out.write(f"xref\n0 {max_id + 1}\n".encode('ascii'))
-        out.write(b"0000000000 65535 f \n")
-        for obj_id in range(1, max_id + 1):
-            out.write(f"{obj_by_id.get(obj_id, 0):010d} 00000 n \n".encode('ascii'))
-        out.write(f"trailer\n<< /Size {max_id + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_pos}\n%%EOF".encode('ascii'))
-        out.seek(0)
-        return out
+        if not self._page_started:
+            self.new_page()
+        self.canvas.save()
+        return io.BytesIO(_standard_validate_pdf_bytes(self.buffer.getvalue()))
 
 
 def _fmt_amount(value):
@@ -15442,7 +15306,7 @@ def export_ui19():
     conn.close()
     log_action('HR & Payroll', 'Generated UI-19 Declaration', f'Generated UI-19 declaration for {month_str} using {len(employee_ids)} selected employee(s)')
     filename = f"UI-19_{session.get('company_name', 'Company').replace(' ', '_')}_{month_str}.pdf"
-    return send_file(pdf_bytes, mimetype='application/pdf', as_attachment=True, download_name=filename)
+    return _billing_pdf_download_response(_standard_validate_pdf_bytes(pdf_bytes), filename)
 
 
 @app.route('/generate_emp201', methods=['POST'])
@@ -15485,44 +15349,64 @@ def generate_emp201():
         "payslip_count": payslip_count
     })
 
+def _build_irp5_data(emp_id, tax_year):
+    tax_year = int(tax_year)
+    start_date = f"{tax_year-1}-03-01"
+    end_date = f"{tax_year}-02-28"
+    conn = get_db_connection()
+    try:
+        emp = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (emp_id, session['company_id'])).fetchone()
+        if not emp:
+            raise ValueError('Employee not found.')
+        ledger = conn.execute('''SELECT SUM(gross_salary) as gross, SUM(overtime) as ot, SUM(transport) as travel, SUM(COALESCE(bonus,0)) as bonus, SUM(COALESCE(reimbursable_expenses,0)) as reimbursable_expenses, SUM(paye) as paye, SUM(uif) as uif, COUNT(*) as payslip_count FROM payslips WHERE company_id=? AND employee_id=? AND date>=? AND date<=?''', (session['company_id'], emp_id, start_date, end_date)).fetchone()
+        gross = float(ledger['gross'] or 0); ot = float(ledger['ot'] or 0); travel = float(ledger['travel'] or 0); bonus = float(ledger['bonus'] or 0)
+        paye = float(ledger['paye'] or 0); uif = float(ledger['uif'] or 0); payslip_count = int(ledger['payslip_count'] or 0)
+        taxable_regular_income = gross + bonus
+        total_gross = taxable_regular_income + ot + travel
+        return {
+            'internal_use':'Internal Use', 'tax_year':tax_year, 'period':f"01 Mar {tax_year-1} - 28 Feb {tax_year}",
+            'name':emp['name'], 'emp_num':emp['emp_number'] or 'N/A', 'id_num':emp['id_passport'] or 'N/A',
+            'tax_number':emp['tax_number'] or 'N/A', 'code_3601':f"{taxable_regular_income:.2f}", 'code_3605':f"{ot:.2f}",
+            'code_3702':f"{travel:.2f}", 'code_3699':f"{total_gross:.2f}", 'code_4102':f"{paye:.2f}", 'code_4141':f"{uif:.2f}",
+            'source':'Saved Payslip Ledger Only', 'payslip_count':payslip_count
+        }
+    finally:
+        conn.close()
+
+
 @app.route('/generate_irp5', methods=['POST'])
 def generate_irp5():
-    data = request.get_json()
-    emp_id = data.get('employee_id')
-    tax_year = int(data.get('tax_year'))
-    
-    start_date = f"{tax_year-1}-03-01"
-    end_date = f"{tax_year}-02-28" 
-    
+    data = request.get_json(silent=True) or {}
+    try:
+        irp5 = _build_irp5_data(data.get('employee_id'), data.get('tax_year'))
+    except (ValueError, TypeError) as exc:
+        return jsonify({'message':str(exc)}), 404 if 'not found' in str(exc).lower() else 400
+    log_action('HR & Payroll', 'Generated Document', f"Generated Ledger-backed IRP5 for {irp5['name']} (Year: {irp5['tax_year']})")
+    return jsonify({'irp5':irp5})
+
+
+@app.route('/download/irp5/<int:employee_id>/<int:tax_year>.pdf')
+def download_irp5_pdf(employee_id, tax_year):
+    if not _session_has_payroll_read_access():
+        return 'Forbidden', 403
+    try:
+        irp5 = _build_irp5_data(employee_id, tax_year)
+    except ValueError as exc:
+        return str(exc), 404
     conn = get_db_connection()
-    emp = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (emp_id, session['company_id'])).fetchone()
-    if not emp:
+    try:
+        company = dict(conn.execute('SELECT * FROM companies WHERE id=?', (session['company_id'],)).fetchone() or {})
+    finally:
         conn.close()
-        return jsonify({"message": "Employee not found."}), 404
-    
-    # IRP5 / IT3(a) internal-use totals are based strictly on saved payslip ledger records.
-    # Unsaved payslip previews/calculations are not included.
-    ledger = conn.execute('''SELECT SUM(gross_salary) as gross, SUM(overtime) as ot, SUM(transport) as travel, SUM(COALESCE(bonus,0)) as bonus, SUM(COALESCE(reimbursable_expenses,0)) as reimbursable_expenses, 
-                                    SUM(paye) as paye, SUM(uif) as uif, COUNT(*) as payslip_count 
-                             FROM payslips 
-                             WHERE company_id=? AND employee_id=? AND date >= ? AND date <= ?''', 
-                          (session['company_id'], emp_id, start_date, end_date)).fetchone()
-    conn.close()
-    
-    gross = float(ledger['gross'] or 0)
-    ot = float(ledger['ot'] or 0)
-    travel = float(ledger['travel'] or 0)
-    bonus = float(ledger['bonus'] or 0)
-    reimbursable_expenses = float(ledger['reimbursable_expenses'] or 0)
-    paye = float(ledger['paye'] or 0)
-    uif = float(ledger['uif'] or 0)
-    taxable_regular_income = gross + bonus
-    total_gross = taxable_regular_income + ot + travel
-    payslip_count = int(ledger['payslip_count'] or 0)
-    
-    log_action('HR & Payroll', 'Generated Document', f"Generated Ledger-backed IRP5 for {emp['name']} (Year: {tax_year})")
-    
-    return jsonify({"irp5": { "internal_use": "Internal Use", "tax_year": tax_year, "period": f"01 Mar {tax_year-1} - 28 Feb {tax_year}", "name": emp['name'], "emp_num": emp['emp_number'] or 'N/A', "id_num": emp['id_passport'] or 'N/A', "tax_number": emp['tax_number'] or 'N/A', "code_3601": f"{taxable_regular_income:.2f}", "code_3605": f"{ot:.2f}", "code_3702": f"{travel:.2f}", "code_3699": f"{total_gross:.2f}", "code_4102": f"{paye:.2f}", "code_4141": f"{uif:.2f}", "source": "Saved Payslip Ledger Only", "payslip_count": payslip_count }})
+    logo_path = None
+    if company.get('logo_file'):
+        candidate = os.path.join(app.config.get('UPLOAD_FOLDER','uploads'), 'logos', os.path.basename(str(company.get('logo_file'))))
+        if os.path.exists(candidate): logo_path = candidate
+    pdf_bytes = _standard_irp5_pdf(irp5, company=company, logo_path=logo_path)
+    filename = f"IRP5_{secure_filename(irp5.get('name') or 'Employee')}_{tax_year}.pdf"
+    log_action('HR & Payroll', 'Downloaded IRP5 PDF', f"{irp5.get('name')} | {tax_year}")
+    return _billing_pdf_download_response(pdf_bytes, filename)
+
 
 @app.route('/export_emp501/<year>')
 def export_emp501(year):
@@ -15599,36 +15483,67 @@ def export_payroll_bank_file():
     output.headers['Content-Disposition'] = f'attachment; filename=Payroll_Bank_Export_{safe_label}_{month_str}.csv'
     return output
 
-@app.route('/generate_report', methods=['POST'])
-def generate_report():
-    data = request.get_json()
-    emp_id, emp_name, s_date, e_date = data.get('employee_id'), data.get('employee_name'), data.get('start_date'), data.get('end_date')
+def _build_employee_activity_report(emp_id, emp_name, s_date, e_date):
     conn = get_db_connection()
     cid = session['company_id']
-    bookings = conn.execute("SELECT start, title, booking_notes FROM bookings WHERE company_id=? AND employee LIKE ? AND substr(start, 1, 10) BETWEEN ? AND ? ORDER BY start ASC", (cid, f"%{emp_name}%", s_date, e_date)).fetchall()
-    leave = conn.execute("SELECT * FROM leave_records WHERE company_id=? AND employee_id=? AND date_taken BETWEEN ? AND ? ORDER BY date_taken ASC", (cid, emp_id, s_date, e_date)).fetchall()
-    emp = conn.execute("SELECT * FROM employees WHERE id=? AND company_id=?", (emp_id, cid)).fetchone()
-    workday_hours = get_employee_workday_hours(emp) if emp else 7.0
-    conn.close()
-    
-    dates_worked = []
-    for b in bookings:
-        work_date = b['start'][:10]
-        try:
-            weekday = datetime.strptime(work_date, '%Y-%m-%d').strftime('%A')
-        except Exception:
-            weekday = ''
-        dates_worked.append({"date": work_date, "day": weekday, "client": b['title'], "notes": b['booking_notes'] or ""})
-    leave_records = [{
-        "id": l['id'],
-        "date": l['date_taken'],
-        "days": l['days'],
-        "type": l['leave_type'],
-        "notes": (dict(l).get('notes') or ''),
-        "doc": l['document_file'],
-        "attachment_url": (url_for('leave_record_attachment', leave_id=l['id']) if l['document_file'] else '')
-    } for l in leave]
-    return jsonify({"total_hours": round(len(dates_worked) * workday_hours, 2), "dates_worked": dates_worked, "total_leave": sum(l['days'] for l in leave_records), "leave_records": leave_records})
+    try:
+        emp = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (emp_id, cid)).fetchone()
+        if not emp:
+            raise ValueError('Employee not found.')
+        actual_name = emp['name'] or emp_name or ''
+        bookings = conn.execute("SELECT start, title, booking_notes FROM bookings WHERE company_id=? AND employee LIKE ? AND substr(start, 1, 10) BETWEEN ? AND ? ORDER BY start ASC", (cid, f"%{actual_name}%", s_date, e_date)).fetchall()
+        leave = conn.execute("SELECT * FROM leave_records WHERE company_id=? AND employee_id=? AND date_taken BETWEEN ? AND ? ORDER BY date_taken ASC", (cid, emp_id, s_date, e_date)).fetchall()
+        workday_hours = get_employee_workday_hours(emp)
+        dates_worked = []
+        for b in bookings:
+            work_date = b['start'][:10]
+            try: weekday = datetime.strptime(work_date, '%Y-%m-%d').strftime('%A')
+            except Exception: weekday = ''
+            dates_worked.append({'date':work_date,'day':weekday,'client':b['title'],'notes':b['booking_notes'] or ''})
+        leave_records = [{'id':l['id'],'date':l['date_taken'],'days':l['days'],'type':l['leave_type'],'notes':(dict(l).get('notes') or ''),'doc':l['document_file'],'attachment_url':(url_for('leave_record_attachment', leave_id=l['id']) if l['document_file'] else '')} for l in leave]
+        return {'employee_id':int(emp_id),'employee_name':actual_name,'start_date':s_date,'end_date':e_date,'total_hours':round(len(dates_worked)*workday_hours,2),'dates_worked':dates_worked,'total_leave':sum(float(l['days'] or 0) for l in leave_records),'leave_records':leave_records}
+    finally:
+        conn.close()
+
+
+@app.route('/generate_report', methods=['POST'])
+def generate_report():
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(_build_employee_activity_report(data.get('employee_id'), data.get('employee_name'), data.get('start_date'), data.get('end_date')))
+    except ValueError as exc:
+        return jsonify({'message':str(exc)}), 404
+
+
+@app.route('/download/employee_activity/<int:employee_id>.pdf')
+def download_employee_activity_pdf(employee_id):
+    if not _session_has_payroll_read_access():
+        return 'Forbidden', 403
+    start_date = (request.args.get('start_date') or '').strip()
+    end_date = (request.args.get('end_date') or '').strip()
+    if not start_date or not end_date:
+        return 'Start and end dates are required.', 400
+    try:
+        report = _build_employee_activity_report(employee_id, '', start_date, end_date)
+    except ValueError as exc:
+        return str(exc), 404
+    conn = get_db_connection()
+    try: company = _accounting_company_payload(conn, session['company_id'])
+    finally: conn.close()
+    groups = []
+    work_rows = [{'cells':[r.get('date') or '', r.get('day') or '', r.get('client') or '', r.get('notes') or '']} for r in report['dates_worked']]
+    work_rows.append({'cells':['','','Total Hours',str(report['total_hours'])], 'bold':True, 'shade':True, 'total':True})
+    leave_rows = [{'cells':[r.get('date') or '', str(r.get('days') or ''), r.get('type') or '', r.get('notes') or '']} for r in report['leave_records']]
+    leave_rows.append({'cells':['','','Total Leave Days',str(report['total_leave'])], 'bold':True, 'shade':True, 'total':True})
+    # Both sections use the same four-column geometry so they can share the standard renderer.
+    groups.append({'title':'Bookings Worked','rows':work_rows})
+    groups.append({'title':'Leave Taken','rows':leave_rows})
+    payload={'title':'Employee Activity Report','subtitle':f"{report['employee_name']} | {start_date} to {end_date}",'framework':'','company':company,'columns':[{'label':'Date'},{'label':'Day / Days'},{'label':'Client / Leave Type'},{'label':'Notes'}],'groups':groups,'orientation':'landscape'}
+    pdf_bytes=_draw_accounting_report_pdf(payload)
+    filename=f"Activity_Report_{secure_filename(report['employee_name'])}_{start_date}_to_{end_date}.pdf"
+    log_action('HR & Payroll','Downloaded Activity Report PDF',f"{report['employee_name']} | {start_date} to {end_date}")
+    return _billing_pdf_download_response(pdf_bytes, filename)
+
 
 # ==========================================================
 # PERMANENT TENANT BILLING NUMBERING
@@ -16807,15 +16722,7 @@ def convert_quote_to_invoice(q_id):
 
 
 
-# --- REAL DOCUMENT PDF GENERATOR FOR INVOICES & QUOTES ---
-def _pdf_text_escape(value):
-    text = str(value or '')
-    text = text.replace('\u00a0', ' ')
-    text = text.replace('\r', ' ').replace('\n', ' ')
-    text = text.encode('latin-1', 'replace').decode('latin-1')
-    return text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
-
-
+# --- SERVER-SIDE REPORTLAB DOCUMENT GENERATOR FOR BILLING DOCUMENTS ---
 def _money(value):
     # Raw PDF text uses base fonts that can render non-breaking spaces
     # inconsistently in some viewers. Keep the Trial Balance style, but use a
@@ -16833,34 +16740,8 @@ def _qty_text(value):
     return f"{qty:.2f}".rstrip('0').rstrip('.')
 
 
-def _wrap_pdf_text(text, max_chars):
-    words = str(text or '').replace('\r', ' ').replace('\n', ' ').split()
-    if not words:
-        return ['']
-    lines = []
-    current = ''
-    for word in words:
-        if len(word) > max_chars:
-            if current:
-                lines.append(current)
-                current = ''
-            while len(word) > max_chars:
-                lines.append(word[:max_chars])
-                word = word[max_chars:]
-            current = word
-        elif not current:
-            current = word
-        elif len(current) + 1 + len(word) <= max_chars:
-            current += ' ' + word
-        else:
-            lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines or ['']
-
-
 def _send_pdf_email(pdf_bytes, filename, email, doc_name, client_name):
+    pdf_bytes = _standard_validate_pdf_bytes(pdf_bytes)
     conn = get_db_connection()
     settings_rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (session['company_id'],)).fetchall()
     conn.close()
@@ -16991,146 +16872,84 @@ def _build_billing_pdf_payload(kind, doc_id):
 
 
 
-
-def _jpeg_dimensions(data):
+def _build_receipt_pdf_payload(payment_id):
+    cid = session['company_id']
+    conn = get_db_connection()
     try:
-        i = 2
-        while i < len(data):
-            if data[i] != 0xFF:
-                i += 1
-                continue
-            marker = data[i + 1]
-            i += 2
-            if marker in (0xD8, 0xD9):
-                continue
-            if i + 2 > len(data):
-                break
-            length = int.from_bytes(data[i:i+2], 'big')
-            if marker in (0xC0, 0xC1, 0xC2, 0xC3):
-                precision = data[i+2]
-                height = int.from_bytes(data[i+3:i+5], 'big')
-                width = int.from_bytes(data[i+5:i+7], 'big')
-                components = data[i+7]
-                return width, height, components
-            i += length
-    except Exception:
-        return None
-    return None
-
-
-def _png_unfilter(raw, width, height, bpp):
-    row_len = width * bpp
-    rows = []
-    pos = 0
-    prev = bytearray(row_len)
-    for _ in range(height):
-        filter_type = raw[pos]
-        pos += 1
-        scan = bytearray(raw[pos:pos + row_len])
-        pos += row_len
-        recon = bytearray(row_len)
-        for i, val in enumerate(scan):
-            left = recon[i - bpp] if i >= bpp else 0
-            up = prev[i]
-            up_left = prev[i - bpp] if i >= bpp else 0
-            if filter_type == 0:
-                recon[i] = val
-            elif filter_type == 1:
-                recon[i] = (val + left) & 0xff
-            elif filter_type == 2:
-                recon[i] = (val + up) & 0xff
-            elif filter_type == 3:
-                recon[i] = (val + ((left + up) // 2)) & 0xff
-            elif filter_type == 4:
-                p = left + up - up_left
-                pa = abs(p - left)
-                pb = abs(p - up)
-                pc = abs(p - up_left)
-                pr = left if pa <= pb and pa <= pc else (up if pb <= pc else up_left)
-                recon[i] = (val + pr) & 0xff
-            else:
-                recon[i] = val
-        rows.append(bytes(recon))
-        prev = recon
-    return b''.join(rows)
-
-
-def _load_pdf_image(path):
-    try:
-        import zlib, struct
-        with open(path, 'rb') as f:
-            data = f.read()
-        if data[:2] == b'\xff\xd8':
-            dims = _jpeg_dimensions(data)
-            if not dims:
-                return None
-            w, h, comps = dims
-            colorspace = '/DeviceGray' if comps == 1 else '/DeviceRGB'
-            return {'width': w, 'height': h, 'data': data, 'filter': '/DCTDecode', 'colorspace': colorspace, 'bits': 8}
-        if data[:8] != b'\x89PNG\r\n\x1a\n':
+        company_row = conn.execute('SELECT * FROM companies WHERE id=?', (cid,)).fetchone()
+        payment = conn.execute(
+            'SELECT * FROM invoice_payments WHERE id=? AND company_id=?',
+            (payment_id, cid)
+        ).fetchone()
+        if not payment:
             return None
-        pos = 8
-        width = height = bit_depth = color_type = None
-        idat = bytearray()
-        while pos + 8 <= len(data):
-            length = struct.unpack('>I', data[pos:pos+4])[0]
-            ctype = data[pos+4:pos+8]
-            chunk = data[pos+8:pos+8+length]
-            pos += 12 + length
-            if ctype == b'IHDR':
-                width, height, bit_depth, color_type, comp, filt, interlace = struct.unpack('>IIBBBBB', chunk)
-                if comp != 0 or filt != 0 or interlace != 0 or bit_depth != 8:
-                    return None
-            elif ctype == b'IDAT':
-                idat.extend(chunk)
-            elif ctype == b'IEND':
-                break
-        if not width or not height or not idat:
+        invoice = conn.execute(
+            'SELECT * FROM invoices WHERE id=? AND company_id=?',
+            (payment['invoice_id'], cid)
+        ).fetchone()
+        if not invoice:
             return None
-        if color_type == 6:
-            bpp = 4
-            decoded = _png_unfilter(zlib.decompress(bytes(idat)), width, height, bpp)
-            rgb = bytearray()
-            alpha = bytearray()
-            for i in range(0, len(decoded), 4):
-                rgb.extend(decoded[i:i+3])
-                alpha.append(decoded[i+3])
-            image = {'width': width, 'height': height, 'data': zlib.compress(bytes(rgb)), 'filter': '/FlateDecode', 'colorspace': '/DeviceRGB', 'bits': 8}
-            if any(a != 255 for a in alpha):
-                image['smask'] = {'width': width, 'height': height, 'data': zlib.compress(bytes(alpha)), 'filter': '/FlateDecode', 'colorspace': '/DeviceGray', 'bits': 8}
-            return image
-        if color_type == 2:
-            decoded = _png_unfilter(zlib.decompress(bytes(idat)), width, height, 3)
-            return {'width': width, 'height': height, 'data': zlib.compress(decoded), 'filter': '/FlateDecode', 'colorspace': '/DeviceRGB', 'bits': 8}
-        if color_type == 0:
-            decoded = _png_unfilter(zlib.decompress(bytes(idat)), width, height, 1)
-            return {'width': width, 'height': height, 'data': zlib.compress(decoded), 'filter': '/FlateDecode', 'colorspace': '/DeviceGray', 'bits': 8}
-    except Exception:
-        return None
-    return None
+
+        client = get_document_client(conn, cid, invoice)
+        invoice_number = _billing_document_formatted_number(conn, cid, 'invoice', invoice)
+        receipt_number = f"RCP-{payment_id:04d}"
+        amount = float(payment['amount'] or 0)
+        totals = get_invoice_financial_totals(conn, cid, invoice['id'])
+
+        client_full = invoice['client_name']
+        client_email = ''
+        client_lines = []
+        if client:
+            cdict = dict(client)
+            client_full = f"{cdict.get('name', '')} {cdict.get('surname', '')}".strip() if cdict.get('surname') else cdict.get('name', invoice['client_name'])
+            client_email = cdict.get('email') or ''
+            if cdict.get('company_name'):
+                client_lines.append(cdict.get('company_name'))
+            if cdict.get('registration_number'):
+                client_lines.append(f"Reg No: {cdict.get('registration_number')}")
+            if cdict.get('vat_number'):
+                client_lines.append(f"VAT No: {cdict.get('vat_number')}")
+            if cdict.get('address'):
+                client_lines.extend([line for line in str(cdict.get('address')).splitlines() if line.strip()])
+
+        description = f"Payment received for Invoice {invoice_number}"
+        if payment['reference']:
+            description += f" - Ref: {payment['reference']}"
+
+        return {
+            'kind': 'receipt',
+            'title': 'RECEIPT',
+            'number': receipt_number,
+            'date': payment['payment_date'],
+            'meta_label': 'Invoice',
+            'meta_value': invoice_number,
+            'company': dict(company_row) if company_row else {},
+            'client_label': 'RECEIVED FROM:',
+            'client_name': client_full,
+            'client_email': client_email,
+            'client_lines': client_lines,
+            'items': [{
+                'service_date': payment['payment_date'],
+                'description': description,
+                'quantity': 1,
+                'unit_price': amount,
+                'amount': amount,
+            }],
+            'credit_notes': [],
+            'totals_rows': [
+                ('Subtotal', amount),
+                ('VAT', 0),
+                ('TOTAL RECEIPT', amount),
+                ('Total Paid', totals.get('paid', 0)),
+                ('Outstanding Balance', totals.get('outstanding', 0)),
+            ],
+            'additional_info': payment['notes'] or '',
+            'filename': f"RECEIPT_{receipt_number}.pdf",
+        }
+    finally:
+        conn.close()
 
 
-# Cache decoded logo images in memory so each PDF request does not repeatedly
-# read and decode the same logo file. The cache automatically refreshes when
-# the file changes on disk.
-_PDF_IMAGE_CACHE = {}
-
-
-def _get_cached_pdf_image(path):
-    try:
-        stat = os.stat(path)
-        key = (os.path.abspath(path), stat.st_mtime_ns, stat.st_size)
-        cached = _PDF_IMAGE_CACHE.get(os.path.abspath(path))
-        if cached and cached.get('key') == key:
-            return cached.get('image')
-        image = _load_pdf_image(path)
-        if image:
-            if len(_PDF_IMAGE_CACHE) > 24:
-                _PDF_IMAGE_CACHE.clear()
-            _PDF_IMAGE_CACHE[os.path.abspath(path)] = {'key': key, 'image': image}
-        return image
-    except Exception:
-        return None
 
 
 def _billing_pdf_safe_text(value):
@@ -17178,16 +16997,12 @@ def _billing_pdf_wrap_text(value, font_name, font_size, max_width):
 
 
 def _validate_billing_pdf_bytes(pdf_bytes):
-    if not isinstance(pdf_bytes, (bytes, bytearray)):
-        raise ValueError('PDF generation did not return a binary document.')
-    data = bytes(pdf_bytes)
-    if len(data) < 800 or not data.startswith(b'%PDF-') or b'%%EOF' not in data[-64:]:
-        raise ValueError('Generated PDF failed document validation.')
-    return data
+    """Backwards-compatible alias for the shared ReportLab PDF validator."""
+    return _standard_validate_pdf_bytes(pdf_bytes)
 
 
 def _draw_pdf_document(payload):
-    """Generate invoice/quote PDFs with ReportLab for cross-viewer compatibility."""
+    """Generate invoice/quote/receipt PDFs with ReportLab for cross-viewer compatibility."""
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.colors import Color
@@ -17322,7 +17137,7 @@ def _draw_pdf_document(payload):
         header_line_y = min(y_top - 76, y - 8)
         line(margin, header_line_y, page_w - margin, header_line_y, stroke=blue, width=1.2)
 
-        client_label = 'QUOTED TO:' if payload.get('kind') == 'quote' else 'BILLED TO:'
+        client_label = payload.get('client_label') or ('QUOTED TO:' if payload.get('kind') == 'quote' else 'BILLED TO:')
         client_name_lines = _billing_pdf_wrap_text(payload.get('client_name') or '', 'Helvetica-Bold', 10, table_w - 16)
         client_extra_lines = []
         for client_line in payload.get('client_lines', []) or []:
@@ -17457,56 +17272,6 @@ def _billing_pdf_download_response(pdf_bytes, filename):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     return response
 
-def _build_raw_pdf(page_streams, page_w=595.28, page_h=841.89, image_resources=None):
-    objects = []
-    def add(obj):
-        objects.append(obj)
-        return len(objects)
-    font_regular = add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-    font_bold = add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
-    image_ids = {}
-    image_resources = image_resources or {}
-    for name, img in image_resources.items():
-        smask_ref = ''
-        smask = img.get('smask') if isinstance(img, dict) else None
-        if smask:
-            smask_dict = f"<< /Type /XObject /Subtype /Image /Width {int(smask['width'])} /Height {int(smask['height'])} /ColorSpace {smask['colorspace']} /BitsPerComponent {int(smask.get('bits', 8))} /Filter {smask['filter']} /Length {len(smask['data'])} >>".encode('ascii')
-            smask_obj = smask_dict + b"\nstream\n" + smask['data'] + b"\nendstream"
-            smask_id = add(smask_obj)
-            smask_ref = f" /SMask {smask_id} 0 R"
-        img_dict = f"<< /Type /XObject /Subtype /Image /Width {int(img['width'])} /Height {int(img['height'])} /ColorSpace {img['colorspace']} /BitsPerComponent {int(img.get('bits', 8))} /Filter {img['filter']}{smask_ref} /Length {len(img['data'])} >>".encode('ascii')
-        img_obj = img_dict + b"\nstream\n" + img['data'] + b"\nendstream"
-        image_ids[name] = add(img_obj)
-    page_ids = []
-    xobject_resource = ''
-    if image_ids:
-        xobject_resource = ' /XObject << ' + ' '.join(f'/{name} {obj_id} 0 R' for name, obj_id in image_ids.items()) + ' >>'
-    for stream in page_streams:
-        data = stream.encode('latin-1', 'replace')
-        stream_id = add(b"<< /Length " + str(len(data)).encode('ascii') + b" >>\nstream\n" + data + b"\nendstream")
-        page_obj = f"<< /Type /Page /Parent {{PAGES}} 0 R /MediaBox [0 0 {page_w:.2f} {page_h:.2f}] /Resources << /Font << /F1 {font_regular} 0 R /F2 {font_bold} 0 R >>{xobject_resource} >> /Contents {stream_id} 0 R >>".encode('ascii')
-        page_ids.append(add(page_obj))
-    kids = ' '.join(f'{pid} 0 R' for pid in page_ids)
-    pages_id = add(f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>".encode('ascii'))
-    for pid in page_ids:
-        objects[pid-1] = objects[pid-1].replace(b'{PAGES}', str(pages_id).encode('ascii'))
-    catalog_id = add(f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode('ascii'))
-    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = [0]
-    for idx, obj in enumerate(objects, start=1):
-        offsets.append(len(output))
-        output.extend(f"{idx} 0 obj\n".encode('ascii'))
-        output.extend(obj)
-        output.extend(b"\nendobj\n")
-    xref_pos = len(output)
-    output.extend(f"xref\n0 {len(objects)+1}\n".encode('ascii'))
-    output.extend(b"0000000000 65535 f \n")
-    for off in offsets[1:]:
-        output.extend(f"{off:010d} 00000 n \n".encode('ascii'))
-    output.extend(f"trailer\n<< /Size {len(objects)+1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode('ascii'))
-    return bytes(output)
-
-
 @app.route('/download/invoice/<int:inv_id>.pdf')
 def download_invoice_pdf(inv_id):
     if not _session_has_app_read('invoicing'):
@@ -17539,6 +17304,49 @@ def download_quote_pdf(q_id):
         return 'Unable to generate the quote PDF. Please try again or contact support.', 500
     log_action('Invoicing', 'Downloaded Quote PDF', payload['number'])
     return response
+
+
+@app.route('/download/receipt/<int:payment_id>.pdf')
+def download_receipt_pdf(payment_id):
+    if not _session_has_app_read('invoicing'):
+        return "Forbidden", 403
+    payload = _build_receipt_pdf_payload(payment_id)
+    if not payload:
+        return "Receipt not found", 404
+    try:
+        pdf_bytes = _draw_pdf_document(payload)
+        response = _billing_pdf_download_response(pdf_bytes, payload['filename'])
+    except Exception:
+        app.logger.exception('Receipt PDF generation failed payment_id=%s company_id=%s', payment_id, session.get('company_id'))
+        return 'Unable to generate the receipt PDF. Please try again or contact support.', 500
+    log_action('Invoicing', 'Downloaded Receipt PDF', payload['number'])
+    return response
+
+
+@app.route('/api/email_receipt_pdf/<int:payment_id>', methods=['POST'])
+def email_receipt_pdf(payment_id):
+    if not _session_has_app_full('invoicing'):
+        return jsonify({'message': 'Forbidden'}), 403
+    data = request.get_json(silent=True) or {}
+    email = data.get('email')
+    if not email:
+        return jsonify({'message': 'Missing email address.'}), 400
+    payload = _build_receipt_pdf_payload(payment_id)
+    if not payload:
+        return jsonify({'message': 'Receipt not found.'}), 404
+    try:
+        pdf_bytes = _validate_billing_pdf_bytes(_draw_pdf_document(payload))
+    except Exception:
+        app.logger.exception('Receipt PDF generation failed before email payment_id=%s company_id=%s', payment_id, session.get('company_id'))
+        return jsonify({'message': 'Unable to generate the receipt PDF. The email was not sent.'}), 500
+    result, status = _send_pdf_email(
+        pdf_bytes,
+        payload['filename'],
+        email,
+        payload['title'] + '_' + payload['number'],
+        payload.get('client_name') or 'Client'
+    )
+    return jsonify(result), status
 
 
 @app.route('/api/email_invoice_pdf/<int:inv_id>', methods=['POST'])
@@ -17626,25 +17434,19 @@ def email_document():
     except Exception as e: 
         return jsonify({"message": f"Error sending email: {str(e)}"}), 500
 
-# --- NEW: CLIENT STATEMENT ROUTE ---
-@app.route('/api/client_statement', methods=['POST'])
-def client_statement():
-    if not _session_has_app_read('invoicing'):
-        return jsonify({"message": "Forbidden"}), 403
-
-    data = request.json or {}
+# --- CLIENT STATEMENT PDF / DATA ROUTES ---
+def _build_client_statement_data(data):
+    data = data or {}
     client_name = (data.get('client_name') or '').strip()
-    start_date = data.get('start_date')
-    end_date = data.get('end_date')
+    start_date = (data.get('start_date') or '').strip()
+    end_date = (data.get('end_date') or '').strip()
     try:
         client_id = int(data.get('client_id') or 0)
     except Exception:
         client_id = 0
     cid = session['company_id']
-
     if not start_date or not end_date:
-        return jsonify({"message": "Start date and end date are required."}), 400
-
+        raise ValueError('Start date and end date are required.')
     conn = get_db_connection()
     try:
         client = get_client_by_id(conn, cid, client_id) if client_id else find_client_by_display_name(conn, cid, client_name)
@@ -17652,145 +17454,182 @@ def client_statement():
         client_email = ''
         client_dict = {}
         match_name = client_name
-
         if client:
             client_id = client['id']
             client_dict = dict(client)
             client_full = client_display_name(client)
             match_name = client_full
-            if client_dict.get('email'):
-                client_email = client_dict.get('email') or ''
-
-        # Historical invoices may have been saved before client_id existed/backfilled.
-        # Match by client_id where available, with a client-name fallback for older records.
+            client_email = client_dict.get('email') or ''
         if client:
-            invoice_rows = conn.execute('''
-                SELECT * FROM invoices
-                WHERE company_id=?
-                  AND date >= ? AND date <= ?
-                  AND (client_id=? OR client_name=?)
-                ORDER BY date ASC, id ASC
-            ''', (cid, start_date, end_date, client_id, match_name)).fetchall()
-            credit_rows = conn.execute('''
-                SELECT cn.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
-                FROM invoice_credit_notes cn
-                JOIN invoices i ON i.id = cn.invoice_id AND i.company_id = cn.company_id
-                WHERE cn.company_id=?
-                  AND cn.credit_date >= ? AND cn.credit_date <= ?
-                  AND (i.client_id=? OR i.client_name=?)
-                ORDER BY cn.credit_date ASC, cn.id ASC
-            ''', (cid, start_date, end_date, client_id, match_name)).fetchall()
-            payment_rows = conn.execute('''
-                SELECT p.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
-                FROM invoice_payments p
-                JOIN invoices i ON i.id = p.invoice_id AND i.company_id = p.company_id
-                WHERE p.company_id=?
-                  AND p.payment_date >= ? AND p.payment_date <= ?
-                  AND (i.client_id=? OR i.client_name=?)
-                ORDER BY p.payment_date ASC, p.id ASC
-            ''', (cid, start_date, end_date, client_id, match_name)).fetchall()
+            invoice_rows = conn.execute('''SELECT * FROM invoices WHERE company_id=? AND date>=? AND date<=? AND (client_id=? OR client_name=?) ORDER BY date ASC, id ASC''', (cid, start_date, end_date, client_id, match_name)).fetchall()
+            credit_rows = conn.execute('''SELECT cn.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id FROM invoice_credit_notes cn JOIN invoices i ON i.id=cn.invoice_id AND i.company_id=cn.company_id WHERE cn.company_id=? AND cn.credit_date>=? AND cn.credit_date<=? AND (i.client_id=? OR i.client_name=?) ORDER BY cn.credit_date ASC, cn.id ASC''', (cid, start_date, end_date, client_id, match_name)).fetchall()
+            payment_rows = conn.execute('''SELECT p.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id FROM invoice_payments p JOIN invoices i ON i.id=p.invoice_id AND i.company_id=p.company_id WHERE p.company_id=? AND p.payment_date>=? AND p.payment_date<=? AND (i.client_id=? OR i.client_name=?) ORDER BY p.payment_date ASC, p.id ASC''', (cid, start_date, end_date, client_id, match_name)).fetchall()
         else:
-            invoice_rows = conn.execute('''
-                SELECT * FROM invoices
-                WHERE client_name=? AND company_id=? AND date >= ? AND date <= ?
-                ORDER BY date ASC, id ASC
-            ''', (client_name, cid, start_date, end_date)).fetchall()
-            credit_rows = conn.execute('''
-                SELECT cn.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
-                FROM invoice_credit_notes cn
-                JOIN invoices i ON i.id = cn.invoice_id AND i.company_id = cn.company_id
-                WHERE cn.company_id=? AND i.client_name=? AND cn.credit_date >= ? AND cn.credit_date <= ?
-                ORDER BY cn.credit_date ASC, cn.id ASC
-            ''', (cid, client_name, start_date, end_date)).fetchall()
-            payment_rows = conn.execute('''
-                SELECT p.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id
-                FROM invoice_payments p
-                JOIN invoices i ON i.id = p.invoice_id AND i.company_id = p.company_id
-                WHERE p.company_id=? AND i.client_name=? AND p.payment_date >= ? AND p.payment_date <= ?
-                ORDER BY p.payment_date ASC, p.id ASC
-            ''', (cid, client_name, start_date, end_date)).fetchall()
-
-        def _invoice_number(invoice_id):
-            return _billing_document_formatted_number(conn, cid, 'invoice', invoice_id)
-
-        statement_items = []
-        total_invoiced = 0.0
-        total_paid = 0.0
-        total_credited = 0.0
-
+            invoice_rows = conn.execute('''SELECT * FROM invoices WHERE client_name=? AND company_id=? AND date>=? AND date<=? ORDER BY date ASC, id ASC''', (client_name, cid, start_date, end_date)).fetchall()
+            credit_rows = conn.execute('''SELECT cn.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id FROM invoice_credit_notes cn JOIN invoices i ON i.id=cn.invoice_id AND i.company_id=cn.company_id WHERE cn.company_id=? AND i.client_name=? AND cn.credit_date>=? AND cn.credit_date<=? ORDER BY cn.credit_date ASC, cn.id ASC''', (cid, client_name, start_date, end_date)).fetchall()
+            payment_rows = conn.execute('''SELECT p.*, i.date AS invoice_date, i.total AS invoice_total, i.status AS invoice_status, i.id AS source_invoice_id FROM invoice_payments p JOIN invoices i ON i.id=p.invoice_id AND i.company_id=p.company_id WHERE p.company_id=? AND i.client_name=? AND p.payment_date>=? AND p.payment_date<=? ORDER BY p.payment_date ASC, p.id ASC''', (cid, client_name, start_date, end_date)).fetchall()
+        def inv_num(inv_id):
+            return _billing_document_formatted_number(conn, cid, 'invoice', inv_id)
+        items, total_invoiced, total_paid, total_credited = [], 0.0, 0.0, 0.0
         for inv in invoice_rows:
-            d = dict(inv)
-            amount = float(d.get('total') or 0)
-            total_invoiced += amount
-            statement_items.append({
-                "date": d.get('date'),
-                "description": f"Tax Invoice {_invoice_number(d.get('id'))}",
-                "amount": round(amount, 2),
-                "status": d.get('status') or '',
-                "type": "invoice",
-                "sort_id": int(d.get('id') or 0)
-            })
-
+            d = dict(inv); amount = float(d.get('total') or 0); total_invoiced += amount
+            items.append({'date': d.get('date'), 'description': f"Tax Invoice {inv_num(d.get('id'))}", 'amount': round(amount,2), 'status': d.get('status') or '', 'type':'invoice', 'sort_id': int(d.get('id') or 0)})
         for cn in credit_rows:
-            c = dict(cn)
-            amount = float(c.get('amount') or 0)
-            total_credited += abs(amount)
-            inv_no = _invoice_number(c.get('invoice_id') or c.get('source_invoice_id'))
-            reason = (c.get('reason') or '').strip()
-            description = f"Credit Note against {inv_no}"
-            if reason:
-                description += f" - {reason}"
-            statement_items.append({
-                "date": c.get('credit_date'),
-                "description": description,
-                "amount": round(-abs(amount), 2),
-                "status": "Credit Note",
-                "type": "credit_note",
-                "sort_id": int(c.get('id') or 0)
-            })
-
+            d = dict(cn); amount = abs(float(d.get('amount') or 0)); total_credited += amount
+            desc = f"Credit Note against {inv_num(d.get('invoice_id') or d.get('source_invoice_id'))}" + (f" - {(d.get('reason') or '').strip()}" if (d.get('reason') or '').strip() else '')
+            items.append({'date': d.get('credit_date'), 'description': desc, 'amount': round(-amount,2), 'status':'Credit Note', 'type':'credit_note', 'sort_id': int(d.get('id') or 0)})
         for pay in payment_rows:
-            p = dict(pay)
-            amount = float(p.get('amount') or 0)
-            total_paid += abs(amount)
-            inv_no = _invoice_number(p.get('invoice_id') or p.get('source_invoice_id'))
-            ref = (p.get('reference') or '').strip()
-            description = f"Payment received for {inv_no}"
-            if ref:
-                description += f" - {ref}"
-            statement_items.append({
-                "date": p.get('payment_date'),
-                "description": description,
-                "amount": round(-abs(amount), 2),
-                "status": "Payment",
-                "type": "payment",
-                "sort_id": int(p.get('id') or 0)
-            })
-
-        statement_items.sort(key=lambda item: (
-            str(item.get('date') or ''),
-            0 if item.get('type') == 'invoice' else 1 if item.get('type') == 'credit_note' else 2,
-            int(item.get('sort_id') or 0)
-        ))
-        total_due = round(total_invoiced - total_credited - total_paid, 2)
-
-        return jsonify({
-            "client_full_name": client_full,
-            "client_email": client_email,
-            "client_address": client_dict.get('address') if client_dict.get('address') else '',
-            "client_company": client_dict.get('company_name') if client_dict.get('company_name') else '',
-            "client_reg": client_dict.get('registration_number') if client_dict.get('registration_number') else '',
-            "client_vat": client_dict.get('vat_number') if client_dict.get('vat_number') else '',
-            "items": statement_items,
-            "total_invoiced": round(total_invoiced, 2),
-            "total_credited": round(total_credited, 2),
-            "total_paid": round(total_paid, 2),
-            "total_due": total_due,
-            "start_date": start_date,
-            "end_date": end_date
-        })
+            d = dict(pay); amount = abs(float(d.get('amount') or 0)); total_paid += amount
+            desc = f"Payment received for {inv_num(d.get('invoice_id') or d.get('source_invoice_id'))}" + (f" - {(d.get('reference') or '').strip()}" if (d.get('reference') or '').strip() else '')
+            items.append({'date': d.get('payment_date'), 'description': desc, 'amount': round(-amount,2), 'status':'Payment', 'type':'payment', 'sort_id': int(d.get('id') or 0)})
+        items.sort(key=lambda item: (str(item.get('date') or ''), 0 if item.get('type')=='invoice' else 1 if item.get('type')=='credit_note' else 2, int(item.get('sort_id') or 0)))
+        return {
+            'client_id': client_id, 'client_full_name': client_full, 'client_email': client_email,
+            'client_address': client_dict.get('address') or '', 'client_company': client_dict.get('company_name') or '',
+            'client_reg': client_dict.get('registration_number') or '', 'client_vat': client_dict.get('vat_number') or '',
+            'items': items, 'total_invoiced': round(total_invoiced,2), 'total_credited': round(total_credited,2),
+            'total_paid': round(total_paid,2), 'total_due': round(total_invoiced-total_credited-total_paid,2),
+            'start_date': start_date, 'end_date': end_date
+        }
     finally:
         conn.close()
+
+
+def _client_statement_pdf_bytes(data):
+    statement = _build_client_statement_data(data)
+    conn = get_db_connection()
+    try:
+        company = _accounting_company_payload(conn, session['company_id'])
+    finally:
+        conn.close()
+    rows = []
+    for item in statement['items']:
+        rows.append({'cells':[item.get('date') or '', item.get('description') or '', item.get('status') or '', _accounting_pdf_money(item.get('amount'))]})
+    rows.extend([
+        {'cells':['', '', 'Total Invoiced', _accounting_pdf_money(statement['total_invoiced'])], 'bold':True, 'shade':True},
+        {'cells':['', '', 'Credit Notes', _accounting_pdf_money(-abs(statement['total_credited']))], 'bold':True, 'shade':True},
+        {'cells':['', '', 'Payments', _accounting_pdf_money(-abs(statement['total_paid']))], 'bold':True, 'shade':True},
+        {'cells':['', '', 'Balance Due', _accounting_pdf_money(statement['total_due'])], 'bold':True, 'dark':True, 'total':True},
+    ])
+    payload = {
+        'title':'ACCOUNT STATEMENT',
+        'subtitle':f"{statement['client_full_name']} | {statement['start_date']} to {statement['end_date']}",
+        'framework':'', 'company':company,
+        'columns':[{'label':'Date','align':'left'},{'label':'Description','align':'left'},{'label':'Status','align':'left'},{'label':'Amount','align':'right'}],
+        'groups':[{'rows':rows}], 'orientation':'portrait'
+    }
+    return _draw_accounting_report_pdf(payload), statement
+
+
+@app.route('/api/client_statement', methods=['POST'])
+def client_statement():
+    if not _session_has_app_read('invoicing'):
+        return jsonify({'message':'Forbidden'}), 403
+    try:
+        return jsonify(_build_client_statement_data(request.get_json(silent=True) or {}))
+    except ValueError as exc:
+        return jsonify({'message':str(exc)}), 400
+
+
+@app.route('/download/client_statement.pdf')
+def download_client_statement_pdf():
+    if not _session_has_app_read('invoicing'):
+        return 'Forbidden', 403
+    data = request.args.to_dict(flat=True)
+    try:
+        pdf_bytes, statement = _client_statement_pdf_bytes(data)
+    except ValueError as exc:
+        return str(exc), 400
+    filename = f"Statement_{secure_filename(statement.get('client_full_name') or 'Client')}_{statement.get('end_date')}.pdf"
+    log_action('Invoicing', 'Downloaded Statement PDF', statement.get('client_full_name') or '')
+    return _billing_pdf_download_response(pdf_bytes, filename)
+
+
+@app.route('/api/email_client_statement_pdf', methods=['POST'])
+def email_client_statement_pdf():
+    if not _session_has_app_full('invoicing'):
+        return jsonify({'message':'Forbidden'}), 403
+    data = request.get_json(silent=True) or {}
+    email = data.get('email')
+    if not email:
+        return jsonify({'message':'Missing email address.'}), 400
+    try:
+        pdf_bytes, statement = _client_statement_pdf_bytes(data)
+    except ValueError as exc:
+        return jsonify({'message':str(exc)}), 400
+    filename = f"Statement_{secure_filename(statement.get('client_full_name') or 'Client')}_{statement.get('end_date')}.pdf"
+    result, status = _send_pdf_email(pdf_bytes, filename, email, 'Account Statement', statement.get('client_full_name') or 'Client')
+    return jsonify(result), status
+
+
+def _build_credit_note_pdf_payload(credit_id):
+    cid = session['company_id']
+    conn = get_db_connection()
+    try:
+        credit = conn.execute('SELECT * FROM invoice_credit_notes WHERE id=? AND company_id=?', (credit_id, cid)).fetchone()
+        if not credit:
+            return None
+        invoice = conn.execute('SELECT * FROM invoices WHERE id=? AND company_id=?', (credit['invoice_id'], cid)).fetchone()
+        if not invoice:
+            return None
+        company_row = conn.execute('SELECT * FROM companies WHERE id=?', (cid,)).fetchone()
+        client = get_document_client(conn, cid, invoice)
+        cdict = dict(client) if client else {}
+        client_name = client_display_name(client) if client else invoice['client_name']
+        client_lines = []
+        if cdict.get('company_name'): client_lines.append(cdict.get('company_name'))
+        if cdict.get('registration_number'): client_lines.append('Reg No: ' + str(cdict.get('registration_number')))
+        if cdict.get('vat_number'): client_lines.append('VAT No: ' + str(cdict.get('vat_number')))
+        if cdict.get('address'): client_lines.extend([x for x in str(cdict.get('address')).splitlines() if x.strip()])
+        amount = abs(float(credit['amount'] or 0))
+        invoice_no = _billing_document_formatted_number(conn, cid, 'invoice', invoice)
+        number = _credit_note_formatted_number(credit_id)
+        return {
+            'kind':'credit_note', 'title':'CREDIT NOTE', 'number':number, 'date':credit['credit_date'],
+            'meta_label':'Against Invoice', 'meta_value':invoice_no,
+            'company':dict(company_row) if company_row else {}, 'client_name':client_name,
+            'client_email':cdict.get('email') or '', 'client_lines':client_lines, 'client_label':'CREDITED TO:',
+            'items':[{'service_date':credit['credit_date'], 'description':f"Credit note against Invoice {invoice_no}" + (f" - {credit['reason']}" if credit['reason'] else ''), 'quantity':1, 'unit_price':-amount, 'amount':-amount}],
+            'credit_notes':[], 'totals_rows':[('CREDIT TOTAL', -amount)], 'additional_info':credit['reason'] or '',
+            'filename':f"CREDIT_NOTE_{secure_filename(str(number))}.pdf"
+        }
+    finally:
+        conn.close()
+
+
+@app.route('/download/credit_note/<int:credit_id>.pdf')
+def download_credit_note_pdf(credit_id):
+    if not _session_has_app_read('invoicing'):
+        return 'Forbidden', 403
+    payload = _build_credit_note_pdf_payload(credit_id)
+    if not payload:
+        return 'Credit note not found', 404
+    try:
+        pdf_bytes = _draw_pdf_document(payload)
+    except Exception:
+        app.logger.exception('Credit note PDF generation failed credit_id=%s company_id=%s', credit_id, session.get('company_id'))
+        return 'Unable to generate the credit note PDF.', 500
+    log_action('Invoicing', 'Downloaded Credit Note PDF', payload['number'])
+    return _billing_pdf_download_response(pdf_bytes, payload['filename'])
+
+
+@app.route('/api/email_credit_note_pdf/<int:credit_id>', methods=['POST'])
+def email_credit_note_pdf(credit_id):
+    if not _session_has_app_full('invoicing'):
+        return jsonify({'message':'Forbidden'}), 403
+    data = request.get_json(silent=True) or {}
+    if not data.get('email'):
+        return jsonify({'message':'Missing email address.'}), 400
+    payload = _build_credit_note_pdf_payload(credit_id)
+    if not payload:
+        return jsonify({'message':'Credit note not found.'}), 404
+    try:
+        pdf_bytes = _standard_validate_pdf_bytes(_draw_pdf_document(payload))
+    except Exception:
+        app.logger.exception('Credit note PDF generation failed before email credit_id=%s company_id=%s', credit_id, session.get('company_id'))
+        return jsonify({'message':'Unable to generate the credit note PDF. The email was not sent.'}), 500
+    result, status = _send_pdf_email(pdf_bytes, payload['filename'], data.get('email'), 'Credit Note', payload.get('client_name') or 'Client')
+    return jsonify(result), status
 
 
 # ==========================================================
@@ -19383,6 +19222,8 @@ def _accounting_company_payload(conn, company_id):
         'address': company.get('address') or '',
         'registration_number': company.get('registration_number') or '',
         'vat_number': company.get('vat_number') or '',
+        'contact_email': company.get('contact_email') or '',
+        'contact_number': company.get('contact_number') or '',
         'logo_file': company.get('logo_file') or ''
     }
 
@@ -19405,248 +19246,19 @@ def _accounting_make_row(cells, bold=False, shade=False, dark=False, total=False
 
 
 def _draw_accounting_report_pdf(payload):
-    orientation = str((payload or {}).get('orientation') or 'portrait').lower()
-    if orientation == 'landscape':
-        page_w, page_h = 841.89, 595.28
-    else:
-        page_w, page_h = 595.28, 841.89
-    margin = 36.0
-    table_w = page_w - (margin * 2)
-    dark = (0.10, 0.12, 0.16)
-    blue = (0.05, 0.32, 0.56)
-    grey = (0.42, 0.45, 0.50)
-    light = (0.95, 0.96, 0.97)
-    white = (1, 1, 1)
-    cmds = []
-    pages = []
-    page_no = 0
-    image_resources = {}
-    logo_resource_name = None
-    logo_info = None
-
-    def cmd(line):
-        cmds.append(line)
-
-    def color(c, op='rg'):
-        return f"{c[0]:.3f} {c[1]:.3f} {c[2]:.3f} {op}"
-
-    def _tw(value, size=9, bold=False):
-        value = str(value or '')
-        total = 0.0
-        for ch in value:
-            if ch.isdigit(): total += 0.556
-            elif ch in ',.': total += 0.278 if not bold else 0.333
-            elif ch in ' -/:()': total += 0.278 if not bold else 0.333
-            elif ch in 'ilI': total += 0.240 if not bold else 0.300
-            elif ch in 'mwMW': total += 0.800 if not bold else 0.900
-            else: total += 0.520 if not bold else 0.600
-        return total * size
-
-    def text_at(x, y, value, size=8.5, bold=False, c=dark, align='left'):
-        value = str(value or '')
-        if align == 'right':
-            x -= _tw(value, size, bold)
-        elif align == 'center':
-            x -= _tw(value, size, bold) / 2
-        font = 'F2' if bold else 'F1'
-        cmd(f"{color(c)} BT /{font} {size:.2f} Tf {x:.2f} {y:.2f} Td ({_pdf_text_escape(value)}) Tj ET")
-
-    def rect(x, y, w, h, stroke=None, fill=None):
-        if fill is not None:
-            cmd(f"{color(fill)} {x:.2f} {y:.2f} {w:.2f} {h:.2f} re f")
-        if stroke is not None:
-            cmd(f"{color(stroke, 'RG')} {x:.2f} {y:.2f} {w:.2f} {h:.2f} re S")
-
-    def line(x1, y1, x2, y2, stroke=(0.78,0.78,0.78), width=0.45):
-        cmd(f"{width:.2f} w {color(stroke, 'RG')} {x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S")
-
-    def draw_image(name, x, y, w, h):
-        cmd(f"q {w:.2f} 0 0 {h:.2f} {x:.2f} {y:.2f} cm /{name} Do Q")
-
-    company = payload.get('company') or {}
-    try:
-        logo_file = company.get('logo_file') or ''
-        if logo_file:
-            logo_path = os.path.join(app.config.get('UPLOAD_FOLDER', 'uploads'), 'logos', os.path.basename(str(logo_file)))
-            logo_info = _get_cached_pdf_image(logo_path) if os.path.exists(logo_path) else None
-            if logo_info:
-                logo_resource_name = 'AcctLogo'
-                image_resources[logo_resource_name] = logo_info
-    except Exception:
-        logo_resource_name = None
-        logo_info = None
-
-    def footer():
-        line(margin, 28, page_w - margin, 28, stroke=(0.82,0.82,0.82), width=0.4)
-        text_at(margin, 16, company.get('name', ''), 7, False, grey)
-        text_at(page_w - margin, 16, f"Page {page_no}", 7, False, grey, 'right')
-
-    def start_page(first=False):
-        nonlocal cmds, page_no
-        if cmds:
-            footer()
-            pages.append('\n'.join(cmds))
-            cmds = []
-        page_no += 1
-        y_top = page_h - margin
-        if first:
-            lx = margin
-            ly = y_top
-            if logo_resource_name and logo_info:
-                max_logo_w, max_logo_h = 100.0, 50.0
-                ratio = min(max_logo_w / max(float(logo_info.get('width') or 1), 1), max_logo_h / max(float(logo_info.get('height') or 1), 1))
-                logo_w = max(1.0, float(logo_info.get('width') or 1) * ratio)
-                logo_h = max(1.0, float(logo_info.get('height') or 1) * ratio)
-                draw_image(logo_resource_name, lx, ly - logo_h, logo_w, logo_h)
-                detail_x = lx + max_logo_w + 16
-            else:
-                detail_x = lx
-            text_at(detail_x, y_top - 10, company.get('name', ''), 12, True, dark)
-            cy = y_top - 24
-            if company.get('address'):
-                for addr_line in _wrap_pdf_text(company.get('address'), 48)[:2]:
-                    text_at(detail_x, cy, addr_line, 8, False, grey)
-                    cy -= 10
-            if company.get('registration_number'):
-                text_at(detail_x, cy, 'Reg No: ' + str(company.get('registration_number')), 8, False, grey)
-                cy -= 10
-            if company.get('vat_number'):
-                text_at(detail_x, cy, 'VAT No: ' + str(company.get('vat_number')), 8, False, grey)
-            text_at(page_w - margin, y_top - 10, payload.get('title', 'Accounting Report'), 18, True, blue, 'right')
-            text_at(page_w - margin, y_top - 28, payload.get('subtitle', ''), 8.5, False, grey, 'right')
-            framework = payload.get('framework')
-            if framework is None:
-                framework = 'IFRS for SMEs'
-            if framework:
-                text_at(page_w - margin, y_top - 41, framework, 8, True, dark, 'right')
-            line(margin, y_top - 70, page_w - margin, y_top - 70, stroke=(0.75,0.80,0.86), width=0.8)
-            return y_top - 92
-        text_at(margin, y_top - 12, payload.get('title', 'Accounting Report') + ' (continued)', 12, True, blue)
-        text_at(page_w - margin, y_top - 12, payload.get('subtitle', ''), 8, False, grey, 'right')
-        line(margin, y_top - 28, page_w - margin, y_top - 28, stroke=(0.75,0.80,0.86), width=0.5)
-        return y_top - 48
-
-    columns = payload.get('columns') or []
-    if not columns:
-        columns = [{'label':'Description','width':table_w*0.75,'align':'left'}, {'label':'Amount','width':table_w*0.25,'align':'right'}]
-
-    # Normalise accounting report column widths before drawing.
-    # Some report payloads only provide labels/alignments. Without widths the old PDF
-    # renderer calculated zero-width columns, which made all text print on top of itself.
-    has_widths = any(float(c.get('width') or 0) > 0 for c in columns)
-    if not has_widths:
-        preferred = []
-        flexible_indexes = []
-        for idx, c in enumerate(columns):
-            label = str(c.get('label') or '').strip().lower()
-            if 'description' in label or 'account' in label or 'client' in label:
-                preferred.append(0.0)
-                flexible_indexes.append(idx)
-            elif 'date' in label:
-                preferred.append(68.0)
-            elif 'reference' in label or 'journal' in label:
-                preferred.append(76.0)
-            elif 'type' in label or 'status' in label or 'normal' in label:
-                preferred.append(64.0)
-            elif any(token in label for token in ['amount', 'vat', 'debit', 'credit', 'total', 'incl', 'excl', 'balance']):
-                preferred.append(82.0)
-            elif 'code' in label:
-                preferred.append(58.0)
-            else:
-                preferred.append(74.0)
-        fixed_total = sum(preferred)
-        flexible_count = max(1, len(flexible_indexes))
-        flex_width = max(85.0, (table_w - fixed_total) / flexible_count)
-        for idx, c in enumerate(columns):
-            if idx in flexible_indexes:
-                c['width'] = flex_width
-            else:
-                c['width'] = preferred[idx]
-
-    total_defined_w = sum(float(c.get('width') or 0) for c in columns)
-    scale = table_w / total_defined_w if total_defined_w else 1
-    for c in columns:
-        c['draw_width'] = max(16.0, float(c.get('width') or 0) * scale)
-    col_x = [margin]
-    for c in columns[:-1]:
-        col_x.append(col_x[-1] + c['draw_width'])
-
-    def draw_table_header(y):
-        h = 18
-        rect(margin, y - h, table_w, h, stroke=(0.72,0.72,0.72), fill=blue)
-        for i, c in enumerate(columns):
-            x = col_x[i]
-            w = c['draw_width']
-            align = c.get('align') or 'left'
-            tx = x + 4 if align != 'right' else x + w - 4
-            text_at(tx, y - 12, c.get('label', ''), 7.6, True, white, align)
-            if i > 0:
-                line(x, y - h, x, y, stroke=(0.88,0.88,0.88), width=0.3)
-        return y - h
-
-    def cell_lines(value, width):
-        value = str(value or '')
-        max_chars = max(8, int(width / 4.4))
-        return _wrap_pdf_text(value, max_chars) or ['']
-
-    def draw_row(y, row):
-        cells = row.get('cells') if isinstance(row, dict) else row
-        bold = bool(isinstance(row, dict) and row.get('bold'))
-        shade = bool(isinstance(row, dict) and row.get('shade'))
-        dark_row = bool(isinstance(row, dict) and row.get('dark'))
-        total = bool(isinstance(row, dict) and row.get('total'))
-        wrapped = []
-        for i, c in enumerate(columns):
-            wrapped.append(cell_lines(cells[i] if i < len(cells) else '', c['draw_width'] - 8))
-        max_lines = max(len(w) for w in wrapped) if wrapped else 1
-        row_h = max(18, 8 + max_lines * 9)
-        if y - row_h < 52:
-            y = start_page(False)
-            y = draw_table_header(y)
-        fill = dark if dark_row else (light if shade else None)
-        stroke = (0.82,0.82,0.82)
-        rect(margin, y - row_h, table_w, row_h, stroke=stroke, fill=fill)
-        if total:
-            line(margin, y, page_w - margin, y, stroke=(0.18,0.18,0.18), width=0.8)
-        for i, c in enumerate(columns):
-            x = col_x[i]
-            w = c['draw_width']
-            if i > 0:
-                line(x, y - row_h, x, y, stroke=(0.88,0.88,0.88), width=0.3)
-            align = c.get('align') or 'left'
-            tx_base = x + 4 if align != 'right' else x + w - 4
-            ty = y - 13
-            for ln in wrapped[i]:
-                text_at(tx_base, ty, ln, 7.5, bold, white if dark_row else dark, align)
-                ty -= 9
-        return y - row_h
-
-    y = start_page(True)
-    for group in payload.get('groups') or []:
-        title = group.get('title') or ''
-        if title:
-            if y - 24 < 52:
-                y = start_page(False)
-            rect(margin, y - 18, table_w, 18, stroke=(0.82,0.82,0.82), fill=light)
-            text_at(margin + 6, y - 12, title, 8.5, True, dark)
-            y -= 18
-        y = draw_table_header(y)
-        rows = group.get('rows') or []
-        if not rows:
-            y = draw_row(y, _accounting_make_row(['No records found'] + [''] * (len(columns)-1)))
-        for row in rows:
-            y = draw_row(y, row)
-        y -= 10
-
-    if not pages and not cmds:
-        y = start_page(True)
-    footer()
-    pages.append('\n'.join(cmds))
-    return _build_raw_pdf(pages, page_w, page_h, image_resources)
+    """Render all Accounting and Reporting PDFs through the shared ReportLab pipeline."""
+    company = (payload or {}).get('company') or {}
+    logo_path = None
+    logo_file = company.get('logo_file') or ''
+    if logo_file:
+        candidate = os.path.join(app.config.get('UPLOAD_FOLDER', 'uploads'), 'logos', os.path.basename(str(logo_file)))
+        if os.path.exists(candidate):
+            logo_path = candidate
+    return _standard_table_pdf(payload, logo_path=logo_path)
 
 
 def _accounting_pdf_response(pdf_bytes, filename):
-    return Response(pdf_bytes, mimetype='application/pdf', headers={'Content-Disposition': f'attachment; filename={filename}'})
+    return _billing_pdf_download_response(_standard_validate_pdf_bytes(pdf_bytes), filename)
 
 
 # ==========================================================
