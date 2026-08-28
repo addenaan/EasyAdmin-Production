@@ -653,6 +653,7 @@
                                         <th>Time</th>
                                         <th>{{ client_label }}</th>
                                         <th>{{ employee_label }}</th>
+                                        <th>Transport</th>
                                         <th>{{ service_label }}</th>
                                         <th>Project</th>
                                         <th>Status</th>
@@ -660,7 +661,7 @@
                                     </tr>
                                 </thead>
                                 <tbody id="bulkManageBookingsBody">
-                                    <tr><td colspan="9" class="text-center text-muted py-4">Use the filters above and click Load.</td></tr>
+                                    <tr><td colspan="10" class="text-center text-muted py-4">Use the filters above and click Load.</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -747,6 +748,21 @@
                                     </div>
                                     <input type="time" id="bulkManageTime" class="form-control border-dark" value="08:00">
                                     <div class="form-text small">Google Calendar is updated when linked events already exist.</div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="border rounded p-3 h-100">
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="bulkManageUpdateTransport">
+                                        <label class="form-check-label fw-bold" for="bulkManageUpdateTransport">Update Transport Type</label>
+                                    </div>
+                                    <select id="bulkManageTransport" class="form-select border-primary">
+                                        <option value="">No Transport Required</option>
+                                        <option value="Pickup">Pickup Only</option>
+                                        <option value="Drop Off">Drop Off Only</option>
+                                        <option value="Pickup & Drop Off">Pickup & Drop Off</option>
+                                    </select>
+                                    <div class="form-text small">Applies to the employee(s) assigned to each selected booking. Grouped staff bookings share this booking transport type.</div>
                                 </div>
                             </div>
                             <div class="col-md-6">
@@ -2359,9 +2375,11 @@
             document.querySelectorAll('.bulk-manage-employee-choice').forEach(item => item.style.display = '');
             updateBulkManageEmployeeChoiceCount();
             document.getElementById('bulkManageUpdateTime').checked = false;
+            document.getElementById('bulkManageUpdateTransport').checked = false;
             document.getElementById('bulkManageUpdateNotes').checked = false;
             document.getElementById('bulkManageProject').value = '';
             document.getElementById('bulkManageTime').value = '08:00';
+            document.getElementById('bulkManageTransport').value = '';
             document.getElementById('bulkManageNotes').value = '';
             document.querySelectorAll('.bulk-manage-custom-check').forEach(cb => cb.checked = false);
             document.querySelectorAll('.bulk-manage-custom-control').forEach(field => {
@@ -2431,7 +2449,7 @@
             const countEl = document.getElementById('bulkManageCount');
             const selectAll = document.getElementById('bulkManageSelectAll');
             if (!bulkManageRows.length) {
-                body.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No matching bookings loaded.</td></tr>';
+                body.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">No matching bookings loaded.</td></tr>';
                 countEl.innerText = 'No bookings loaded.';
                 selectAll.checked = false;
                 updateBulkManageSelectedCount();
@@ -2450,6 +2468,7 @@
                         <td>${escapeHtml(row.time)}</td>
                         <td>${escapeHtml(row.client)}</td>
                         <td>${escapeHtml(row.employee)}</td>
+                        <td>${row.transport ? escapeHtml(row.transport) : '<span class="text-muted">None</span>'}</td>
                         <td>${escapeHtml(row.booking_type)}</td>
                         <td>${projectDisplay}</td>
                         <td>${invoiceBadge}<br>${statusBadge}</td>
@@ -2517,6 +2536,8 @@
                 employee_names: selectedBulkManageEmployeeNames(),
                 update_time: document.getElementById('bulkManageUpdateTime').checked,
                 time: document.getElementById('bulkManageTime').value,
+                update_transport: document.getElementById('bulkManageUpdateTransport').checked,
+                transport: document.getElementById('bulkManageTransport').value,
                 update_notes: document.getElementById('bulkManageUpdateNotes').checked,
                 booking_notes: document.getElementById('bulkManageNotes').value,
                 skip_invoiced: document.getElementById('bulkManageSkipInvoiced').checked,
@@ -2550,7 +2571,7 @@
             if (!ids.length) return alert('Please select at least one booking to update.');
             const payload = collectBulkManagePayload(ids, true);
             const customFields = payload.custom_fields || {};
-            if (!payload.update_project && !payload.update_service && !payload.update_employees && !payload.update_time && !payload.update_notes && Object.keys(customFields).length === 0) {
+            if (!payload.update_project && !payload.update_service && !payload.update_employees && !payload.update_time && !payload.update_transport && !payload.update_notes && Object.keys(customFields).length === 0) {
                 return alert('Please tick at least one field to update.');
             }
             if (payload.update_employees && !payload.employee_names.length) {

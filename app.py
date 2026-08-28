@@ -2048,9 +2048,12 @@ def init_db():
         company_id INTEGER NOT NULL,
         invoice_id INTEGER NOT NULL,
         project_id INTEGER NOT NULL,
+        prior_project_status TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(company_id, invoice_id, project_id)
     )''')
+    try: conn.execute('ALTER TABLE invoice_projects ADD COLUMN prior_project_status TEXT')
+    except sqlite3.OperationalError: pass
     conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_projects_invoice ON invoice_projects(company_id, invoice_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_projects_project ON invoice_projects(company_id, project_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_items_project ON invoice_items(project_id)')
@@ -11541,6 +11544,7 @@ def api_bulk_bookings_update():
     update_service = bool(data.get('update_service'))
     update_time = bool(data.get('update_time'))
     update_notes = bool(data.get('update_notes'))
+    update_transport = bool(data.get('update_transport'))
     update_employees = bool(data.get('update_employees'))
     employee_mode = str(data.get('employee_mode') or 'replace').strip().lower()
     selected_employee_names = data.get('employee_names') if isinstance(data.get('employee_names'), list) else []
@@ -11548,8 +11552,13 @@ def api_bulk_bookings_update():
     skip_invoiced = data.get('skip_invoiced', True) is not False
     custom_updates = data.get('custom_fields') if isinstance(data.get('custom_fields'), dict) else {}
 
-    if not any([update_project, update_service, update_time, update_notes, update_employees, bool(custom_updates)]):
+    if not any([update_project, update_service, update_time, update_notes, update_transport, update_employees, bool(custom_updates)]):
         return jsonify({'status': 'error', 'message': 'Please tick at least one field to update.'}), 400
+
+    transport_value = str(data.get('transport') or '').strip()
+    allowed_transport_values = {'', 'Pickup', 'Drop Off', 'Pickup & Drop Off'}
+    if update_transport and transport_value not in allowed_transport_values:
+        return jsonify({'status': 'error', 'message': 'Please select a valid transport type.'}), 400
     if update_employees and employee_mode not in ('replace', 'add', 'remove'):
         return jsonify({'status': 'error', 'message': 'Please select a valid employee update action.'}), 400
     if update_employees and not selected_employee_names:
@@ -11726,6 +11735,9 @@ def api_bulk_bookings_update():
             if update_notes:
                 set_parts.append('booking_notes=?')
                 params.append(str(data.get('booking_notes') or ''))
+            if update_transport:
+                set_parts.append('transport=?')
+                params.append(transport_value)
             if update_employees:
                 set_parts.append('employee=?')
                 params.append(new_employee_value)
@@ -11743,7 +11755,7 @@ def api_bulk_bookings_update():
                 if value:
                     conn.execute("INSERT INTO custom_field_values (company_id, module_name, record_id, field_key, field_value) VALUES (?, 'booking', ?, ?, ?)", (cid, r.get('id'), key, value))
             updated_ids.append(r.get('id'))
-            if session.get('comp_google_calendar') and r.get('google_event_id') and (update_service or update_time or update_employees):
+            if session.get('comp_google_calendar') and r.get('google_event_id') and (update_service or update_time or update_transport or update_employees):
                 client_name = ' '.join([x for x in [r.get('client_first_name'), r.get('client_surname')] if x]).strip() or r.get('client_company_name') or r.get('title') or ''
                 google_sync_payload.append({
                     'google_event_id': r.get('google_event_id'),
@@ -11752,7 +11764,7 @@ def api_bulk_bookings_update():
                     'time': _booking_time_part(new_start),
                     'employee': new_employee_value if update_employees else (r.get('employee') or ''),
                     'booking_type': new_booking_type,
-                    'transport': r.get('transport') or ''
+                    'transport': transport_value if update_transport else (r.get('transport') or '')
                 })
 
         conn.commit()
@@ -16266,8 +16278,9 @@ def save_invoice():
 
         if invoice_type == 'project' and project_ids:
             for selected_project_id in project_ids:
-                cursor.execute("""INSERT OR IGNORE INTO invoice_projects (company_id, invoice_id, project_id)
-                                  VALUES (?, ?, ?)""", (cid, inv_id, selected_project_id))
+                prior_status = project_map[selected_project_id]['status'] if selected_project_id in project_map else None
+                cursor.execute("""INSERT OR IGNORE INTO invoice_projects (company_id, invoice_id, project_id, prior_project_status)
+                                  VALUES (?, ?, ?, ?)""", (cid, inv_id, selected_project_id, prior_status))
                 cursor.execute("UPDATE projects SET status='Invoiced', updated_at=CURRENT_TIMESTAMP WHERE id=? AND company_id=?", (selected_project_id, cid))
                 # Project invoice lines represent the project as a whole rather
                 # than carrying every linked booking_id. Mark all bookings
@@ -16450,6 +16463,71 @@ def get_receipt(payment_id):
         'client_vat': client['vat_number'] if client and 'vat_number' in dict(client) and client['vat_number'] else ''
     })
 
+def _invoice_project_links_for_credit(conn, company_id, invoice_id, invoice_row=None):
+    """Return project IDs linked to an invoice with any stored pre-invoice status."""
+    links = {}
+    for row in conn.execute('''SELECT project_id, prior_project_status
+                               FROM invoice_projects
+                               WHERE company_id=? AND invoice_id=?''', (company_id, invoice_id)).fetchall():
+        project_id = int(row['project_id'])
+        links[project_id] = row['prior_project_status']
+
+    # Backwards compatibility for project invoices created before invoice_projects
+    # carried every relationship/status snapshot.
+    if invoice_row is not None:
+        inv = dict(invoice_row)
+        if inv.get('project_id'):
+            links.setdefault(int(inv['project_id']), None)
+    for row in conn.execute('''SELECT DISTINCT project_id FROM invoice_items
+                               WHERE invoice_id=? AND project_id IS NOT NULL''', (invoice_id,)).fetchall():
+        links.setdefault(int(row['project_id']), None)
+    return links
+
+
+def _project_has_other_active_invoice(conn, company_id, project_id, exclude_invoice_id):
+    row = conn.execute('''SELECT i.id
+                          FROM invoices i
+                          WHERE i.company_id=? AND i.id<>?
+                            AND (i.project_id=? OR EXISTS (
+                                SELECT 1 FROM invoice_projects ip
+                                WHERE ip.company_id=i.company_id AND ip.invoice_id=i.id AND ip.project_id=?
+                            ))
+                            AND COALESCE(i.total, 0) > COALESCE((
+                                SELECT SUM(cn.amount) FROM invoice_credit_notes cn
+                                WHERE cn.company_id=i.company_id AND cn.invoice_id=i.id
+                            ), 0) + 0.005
+                          LIMIT 1''', (company_id, exclude_invoice_id, project_id, project_id)).fetchone()
+    return bool(row)
+
+
+def _release_fully_credited_invoice_projects(conn, company_id, invoice_id, invoice_row):
+    """Release project invoicing state after a full invoice credit.
+
+    New project invoices restore the status that existed immediately before the
+    invoice was raised. Legacy project invoices have no snapshot, so an
+    'Invoiced' project falls back to 'Completed' to make it operationally
+    available again without changing Cancelled or manually altered statuses.
+    """
+    released = []
+    for project_id, prior_status in _invoice_project_links_for_credit(conn, company_id, invoice_id, invoice_row).items():
+        if _project_has_other_active_invoice(conn, company_id, project_id, invoice_id):
+            continue
+        project = conn.execute('SELECT status FROM projects WHERE id=? AND company_id=?', (project_id, company_id)).fetchone()
+        if not project:
+            continue
+        current_status = str(project['status'] or '').strip()
+        restore_status = str(prior_status or '').strip()
+        if not restore_status or restore_status.lower() == 'invoiced':
+            restore_status = 'Completed' if current_status.lower() == 'invoiced' else current_status
+        if current_status.lower() == 'invoiced' and restore_status:
+            conn.execute('UPDATE projects SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND company_id=?',
+                         (restore_status, project_id, company_id))
+        conn.execute('UPDATE bookings SET is_invoiced=0 WHERE company_id=? AND project_id=?',
+                     (company_id, project_id))
+        released.append(project_id)
+    return released
+
+
 @app.route('/api/invoice/<int:inv_id>/credit', methods=['POST'])
 def credit_invoice(inv_id):
     if not session.get('can_invoicing') and not session.get('is_superadmin'):
@@ -16485,11 +16563,14 @@ def credit_invoice(inv_id):
     update_invoice_payment_status(conn, cid, inv_id)
     updated_totals = get_invoice_financial_totals(conn, cid, inv_id)
 
-    # Only a full credit note releases associated bookings. Partial credits keep the invoice linked.
+    # Only a full credit note releases associated bookings/projects. Partial
+    # credits keep the original invoice relationships locked.
+    released_project_ids = []
     if updated_totals['credited'] >= updated_totals['total'] and updated_totals['total'] > 0:
         items = conn.execute('SELECT booking_id FROM invoice_items WHERE invoice_id=? AND booking_id IS NOT NULL', (inv_id,)).fetchall()
         for item in items:
             conn.execute('UPDATE bookings SET is_invoiced=0 WHERE id=? AND company_id=?', (item['booking_id'], cid))
+        released_project_ids = _release_fully_credited_invoice_projects(conn, cid, inv_id, inv)
 
     accounting_result = _auto_post_credit_note_to_accounting_if_enabled(conn, cid, credit_id)
     invoice_ref = _billing_document_formatted_number(conn, cid, 'invoice', inv)
@@ -16500,7 +16581,8 @@ def credit_invoice(inv_id):
         log_action('Accounting', 'Auto Posted Credit Note', f"Credit Note #{credit_id} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
     else:
         log_action('Accounting', 'Credit Note Auto Post Skipped/Failed', f"Credit Note #{credit_id}: {accounting_result.get('message')}")
-    log_action('Invoicing', 'Issued Credit Note', f"Credited R{amount:.2f} on Invoice {invoice_ref}.")
+    project_release_note = f" Released {len(released_project_ids)} project(s) for re-invoicing." if released_project_ids else ''
+    log_action('Invoicing', 'Issued Credit Note', f"Credited R{amount:.2f} on Invoice {invoice_ref}.{project_release_note}")
     response_message = 'Credit note created and automatically posted to Accounting.' if accounting_result.get('posted') else 'Credit note created. ' + (accounting_result.get('message') or '')
     return jsonify({
         'status': 'success',
