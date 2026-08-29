@@ -3184,11 +3184,11 @@ def normalise_billing_item(item):
     if quantity <= 0:
         quantity = 1.0
 
-    # If a line total/amount is submitted, treat it as the final line amount.
-    # This allows users to adjust the amount directly while the system derives
-    # the unit price from amount ÷ quantity.
+    # If a line total/amount is submitted, treat it as the final line amount,
+    # including an explicit R0.00 value. This lets zero-value invoice lines be
+    # preserved while still deriving the unit price from amount ÷ quantity.
     submitted_amount = item.get('amount')
-    if submitted_amount not in (None, '') and sanitize_money(submitted_amount, 0) > 0:
+    if submitted_amount not in (None, ''):
         amount = sanitize_money(submitted_amount, 0)
         unit_price = round(amount / quantity, 4) if quantity else amount
     else:
@@ -3266,7 +3266,7 @@ def update_invoice_payment_status(conn, company_id, invoice_id):
     credited = totals['credited']
     outstanding = totals['outstanding']
     if total <= 0:
-        status = 'Unpaid'
+        status = 'Paid'
     elif credited >= total:
         status = 'Credited'
     elif outstanding <= 0 and credited > 0:
@@ -5533,7 +5533,7 @@ def _reports_invoice_rows(conn, filters, include_all_statuses=False):
         if stored_status_lower in {'cancelled', 'canceled', 'void', 'voided'}:
             status = stored_status
         elif total <= 0:
-            status = 'Unpaid'
+            status = 'Paid'
         elif credited >= total:
             status = 'Credited'
         elif balance <= 0.004 and credited > 0:
@@ -16231,8 +16231,27 @@ def save_invoice():
         client_name = client_display_name(client)
         items = data.get('items', [])
 
-    items = [normalise_billing_item(item) for item in (items or [])]
-    items = [item for item in items if item.get('description') and float(item.get('amount') or 0) > 0]
+    raw_items = list(items or [])
+    for line_no, raw_item in enumerate(raw_items, start=1):
+        raw_item = raw_item or {}
+        for field_name, field_label in (('unit_price', 'unit price'), ('amount', 'line total')):
+            raw_value = raw_item.get(field_name)
+            if raw_value in (None, ''):
+                continue
+            try:
+                numeric_value = float(raw_value)
+            except (TypeError, ValueError):
+                conn.close()
+                return jsonify({"status": "error", "message": f"Invoice line {line_no} has an invalid {field_label}."}), 400
+            if numeric_value < 0:
+                conn.close()
+                return jsonify({"status": "error", "message": f"Invoice line {line_no} {field_label} cannot be negative."}), 400
+
+    items = [normalise_billing_item(item) for item in raw_items]
+    items = [item for item in items if (item.get('description') or '').strip()]
+    if not items:
+        conn.close()
+        return jsonify({"status": "error", "message": "Add at least one invoice line item with a description."}), 400
 
     if invoice_type == 'project':
         selected_project_id_set = set(project_ids)
@@ -16257,6 +16276,7 @@ def save_invoice():
     vat_amount = round(discounted_subtotal * 0.15, 2) if apply_vat else 0.0
     total = round(discounted_subtotal + vat_amount, 2)
     amount_due_now, balance_remaining = calculate_invoice_due_now(total, data.get('amount_due_now'))
+    invoice_status = 'Paid' if total <= 0 else 'Unpaid'
     
     invoice_number = allocate_billing_document_number(conn, cid, 'invoice')
     try:
@@ -16266,7 +16286,7 @@ def save_invoice():
         _begin_atomic_write(conn)
         cursor = conn.cursor()
         cursor.execute("""INSERT INTO invoices (company_id, client_id, client_name, date, due_date, subtotal, vat_amount, total, status, discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id, invoice_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                       (cid, client_id, client_name, data['date'], data['due_date'], original_subtotal, vat_amount, total, 'Unpaid', discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id, invoice_number))
+                       (cid, client_id, client_name, data['date'], data['due_date'], original_subtotal, vat_amount, total, invoice_status, discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_type, project_id, invoice_number))
         inv_id = cursor.lastrowid
         
         for item in items:
@@ -18103,10 +18123,17 @@ def _auto_post_invoice_to_accounting_if_enabled(conn, company_id, invoice_id):
     """Post a newly-created invoice to Accounting without blocking invoice creation.
 
     Auto-posting intentionally uses the same posting routine as the manual
-    "Post to Accounting" button. It no longer skips posting because of a stale
-    company/module flag; if Accounting setup is incomplete, the invoice still
-    saves and the returned message explains the posting issue.
+    "Post to Accounting" button. A genuine R0.00 invoice has no accounting
+    value to post, so it is treated as a successful no-journal-required case
+    rather than an accounting failure.
     """
+    invoice_row = conn.execute('SELECT total FROM invoices WHERE id=? AND company_id=?', (invoice_id, company_id)).fetchone()
+    if invoice_row and _money_float(invoice_row['total']) <= 0:
+        try:
+            conn.execute("UPDATE invoices SET accounting_status='not_required', accounting_journal_id=NULL, accounting_posted_at=NULL, accounting_posted_by=NULL WHERE id=? AND company_id=?", (invoice_id, company_id))
+        except Exception:
+            pass
+        return {'posted': False, 'journal_id': None, 'message': 'R0.00 invoice created; no Accounting journal is required.'}
     try:
         journal_id = _run_accounting_post_in_safe_transaction(
             conn,

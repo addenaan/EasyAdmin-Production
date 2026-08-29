@@ -1478,7 +1478,7 @@
                     <input type="date" class="form-control form-control-sm date-input" style="width: 140px;" value="${project.start_date || today}">
                     <input type="text" class="form-control form-control-sm desc-input" value="Project: ${escapeAttr((project.project_name || 'Project') + code)}" placeholder="Project invoice description...">
                     <input type="number" class="form-control form-control-sm qty-input text-end" style="width: 80px;" min="0.01" step="0.01" value="1" readonly oninput="clearManualLineTotal(this); calculateInvTotals()">
-                    <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" value="${fixedPrice.toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()">
+                    <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" min="0" step="0.01" value="${fixedPrice.toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()">
                     <input type="number" class="form-control form-control-sm line-total-display text-end" style="width: 120px;" min="0" step="0.01" value="${fixedPrice.toFixed(2)}" oninput="setManualInvoiceLineTotal(this)" title="Line Total">
                     <span class="badge bg-dark d-flex align-items-center">Project Fixed Price</span>
                 `;
@@ -1524,7 +1524,7 @@
                                     <td><input type="date" class="table-input item-date" value="${b.date}"></td>
                                     <td><input type="text" class="table-input item-desc" value="${escapeAttr(line.description || b.description || b.type)}">${multiBadge}</td>
                                     <td><input type="number" class="table-input item-qty text-end" min="0.01" step="0.01" value="1" oninput="clearManualLineTotal(this); calculateInvTotals()"></td>
-                                    <td><input type="number" class="table-input item-price text-end" value="${linePrice.toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()"></td>
+                                    <td><input type="number" class="table-input item-price text-end" min="0" step="0.01" value="${linePrice.toFixed(2)}" oninput="clearManualLineTotal(this); calculateInvTotals()"></td>
                                     <td><input type="number" class="table-input item-line-total line-total-display text-end" min="0" step="0.01" value="${linePrice.toFixed(2)}" oninput="setManualInvoiceLineTotal(this)"></td>
                                 </tr>
                             `;
@@ -1554,7 +1554,7 @@
                 <input type="date" class="form-control form-control-sm date-input" style="width: 140px;">
                 <input type="text" class="form-control form-control-sm desc-input" list="invoiceServiceList" placeholder="Select service or type custom project cost..." oninput="applyInvoiceServiceSelection(this)" onchange="applyInvoiceServiceSelection(this)">
                 <input type="number" class="form-control form-control-sm qty-input text-end" style="width: 80px;" min="0.01" step="0.01" value="1" oninput="clearManualLineTotal(this); calculateInvTotals()">
-                <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" placeholder="Unit Price (R)" oninput="clearManualLineTotal(this); calculateInvTotals()">
+                <input type="number" class="form-control form-control-sm price-input text-end" style="width: 120px;" min="0" step="0.01" placeholder="Unit Price (R)" oninput="clearManualLineTotal(this); calculateInvTotals()">
                 <input type="number" class="form-control form-control-sm line-total-display text-end" style="width: 120px;" min="0" step="0.01" value="0.00" oninput="setManualInvoiceLineTotal(this)" title="Line Total">
                 <button class="btn btn-sm btn-outline-danger" onclick="this.parentElement.remove(); calculateInvTotals()">X</button>
             `;
@@ -1631,10 +1631,15 @@
             const priceEl = row.querySelector(priceSelector);
             const lineTotalEl = row.querySelector('.line-total-display');
             const quantity = Math.max(parseFloat(qtyEl ? qtyEl.value : '1') || 1, 0);
-            let unitPrice = Math.max(parseFloat(priceEl ? priceEl.value : '0') || 0, 0);
+            const rawUnitPrice = parseFloat(priceEl ? priceEl.value : '0');
+            const rawLineTotal = lineTotalEl ? parseFloat(lineTotalEl.value) : NaN;
+            if((Number.isFinite(rawUnitPrice) && rawUnitPrice < 0) || (Number.isFinite(rawLineTotal) && rawLineTotal < 0)) {
+                throw new Error('Invoice line values cannot be negative.');
+            }
+            let unitPrice = Math.max(Number.isFinite(rawUnitPrice) ? rawUnitPrice : 0, 0);
             let amount = quantity * unitPrice;
             if(lineTotalEl) {
-                const explicitAmount = Math.max(parseFloat(lineTotalEl.value) || 0, 0);
+                const explicitAmount = Math.max(Number.isFinite(rawLineTotal) ? rawLineTotal : 0, 0);
                 amount = explicitAmount;
                 if(quantity > 0) unitPrice = amount / quantity;
             }
@@ -1698,7 +1703,6 @@
             if(!client) return alert("Select a client.");
             
             const totals = calculateInvTotals();
-            if(totals.total === 0) return alert("Invoice total cannot be zero.");
             const invoiceType = document.getElementById('invInvoiceType').value;
             const projectIds = getSelectedInvoiceProjectIds();
             const projectId = projectIds.length ? projectIds[0] : '';
@@ -1706,6 +1710,7 @@
 
             const items = [];
             const selectedBookingIds = getSelectedInvoiceBookingIds();
+            try {
             document.querySelectorAll('.checklist-row').forEach(row => {
                 const bookingId = String(row.dataset.bookingId || '');
                 if(bookingId && selectedBookingIds.has(bookingId)) {
@@ -1726,8 +1731,13 @@
                 const desc = row.querySelector('.desc-input').value;
                 const lineValues = getInvoiceLineValues(row, '.qty-input', '.price-input');
                 const amt = lineValues.amount;
-                if(desc && amt > 0) items.push({ service_date: dateVal, description: desc, quantity: lineValues.quantity, unit_price: lineValues.unitPrice, amount: amt, project_id: row.dataset.projectId || null });
+                if(desc && amt >= 0) items.push({ service_date: dateVal, description: desc, quantity: lineValues.quantity, unit_price: lineValues.unitPrice, amount: amt, project_id: row.dataset.projectId || null });
             });
+            } catch(err) {
+                return alert(err.message || 'Invoice line values cannot be negative.');
+            }
+
+            if(items.length === 0) return alert('Add at least one invoice line item with a description.');
 
             const data = {
                 client_id: client,
