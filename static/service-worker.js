@@ -1,4 +1,4 @@
-const CACHE_NAME = 'easy-admin-mobile-pwa-v20-route-planner';
+const CACHE_NAME = 'easy-admin-mobile-pwa-v21-final-leave-payout';
 const APP_SHELL = [
   '/mobile/offline',
   '/static/mobile.css?v=20260821-route-planner-v1',
@@ -7,7 +7,7 @@ const APP_SHELL = [
   '/static/pwa-update.js?v=20260706-update-prompt-password-route-fix',
   '/static/session-timeout.js?v=20260810-session-warning-v1',
   '/static/staff-portal.css?v=20260706-staffnotify-search',
-  '/static/staff-portal.js?v=20260706-notify500-fix',
+  '/static/staff-portal.js?v=20260831-final-leave-payout',
   '/static/easy_admin_logo.png',
   '/static/pwa-icon-192.png',
   '/static/pwa-icon-512.png',

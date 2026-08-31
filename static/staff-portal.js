@@ -297,6 +297,7 @@
                 <div class="detail-row"><div class="detail-label">Gross Salary</div><div class="detail-value">${safe(fmtMoney(p.gross_salary))}</div></div>
                 <div class="detail-row"><div class="detail-label">Overtime</div><div class="detail-value">${safe(fmtMoney(p.overtime))}</div></div>
                 <div class="detail-row"><div class="detail-label">Bonus</div><div class="detail-value">${safe(fmtMoney(p.bonus))}</div></div>
+                ${Number(p.leave_payout_amount) > 0 ? `<div class="detail-row"><div class="detail-label">Annual Leave Payout (${safe(p.leave_payout_days)} days @ R ${safe(Number(p.leave_payout_daily_rate).toFixed(6))})</div><div class="detail-value">${safe(fmtMoney(p.leave_payout_amount))}</div></div>` : ''}
                 <div class="detail-row"><div class="detail-label">Transport</div><div class="detail-value">${safe(fmtMoney(p.transport))}</div></div>
                 <div class="detail-row"><div class="detail-label">Reimbursable Expenses</div><div class="detail-value">${safe(fmtMoney(p.reimbursable_expenses))}</div></div>
                 <div class="detail-row"><div class="detail-label">UIF</div><div class="detail-value">${safe(fmtMoney(p.uif))}</div></div>

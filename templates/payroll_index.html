@@ -225,7 +225,7 @@
                             <td class="current-month-payroll-cell" data-payroll-status-employee-id="{{ emp.id }}">
                                 {% if not emp.current_month_payroll_applicable %}
                                     <span class="badge bg-secondary">N/A</span>
-                                    <div class="small text-muted">Inactive before month</div>
+                                    <div class="small text-muted">Outside employment dates or dates need correction</div>
                                 {% elif emp.current_month_payroll_finalized %}
                                     <span class="badge bg-success">Finalized</span>
                                     {% if emp.current_month_payroll_date %}<div class="small text-muted">{{ emp.current_month_payroll_date }}</div>{% endif %}
@@ -684,6 +684,13 @@
                         </div>
                     </div>
                     
+                    <div id="psLeavePayoutReview" class="alert alert-warning" style="display:none;">
+                        <strong>Final annual-leave payout</strong>
+                        <div id="psLeavePayoutSummary"></div>
+                        <label for="psLeavePayoutRate" class="small fw-bold mt-2">Reviewed daily remuneration rate (optional)</label>
+                        <input type="number" step="0.000001" min="0.000001" id="psLeavePayoutRate" class="form-control" placeholder="Use the calculated basic-pay rate" onchange="runPayslipEngine()">
+                        <small>The default uses basic pay. Review variable earnings, the preceding 13 weeks and contractual benefits with your payroll practitioner; enter the correct rate if needed. This is annual leave only, not notice or severance pay. Previewing does not consume leave.</small>
+                    </div>
                     <!-- NEW: DYNAMIC PAYSLIP PREVIEW AREA -->
                     <div id="payslipPreviewArea" style="display:none;" class="mt-4 border-top pt-4">
                         <div class="d-flex justify-content-end mb-3 gap-2">
@@ -728,6 +735,7 @@
                                     <tr><td>Overtime / Premium Pay <span id="bpSundaysWorked" class="small text-muted fst-italic"></span> <span class="sars-code">Code: 3607</span></td><td class="amount" id="bpOvertime"></td><td></td></tr>
                                     <tr id="bpReimbursableExpensesRow" style="display:none;"><td>Reimbursable Expenses (Non-taxable)</td><td class="amount text-success" id="bpReimbursableExpenses"></td><td></td></tr>
                                     <tr id="bpBonusRow" style="display:none;"><td>Bonus <span id="bpBonusTaxTreatment" class="small text-muted fst-italic"></span> <span class="sars-code" id="bpBonusCode"></span></td><td class="amount" id="bpBonus"></td><td></td></tr>
+                                    <tr id="bpLeavePayoutRow" style="display:none;"><td>Annual Leave Payout <span id="bpLeavePayoutDetail" class="small text-muted"></span> <span class="sars-code">Code: 3605</span></td><td class="amount" id="bpLeavePayout"></td><td></td></tr>
                                     <tr id="bpTransportRow" style="display:none;"><td>Transport Reimbursement (Tax Free) <span class="sars-code">Code: 3702</span></td><td class="amount text-success" id="bpTransport"></td><td></td></tr>
                                     <tr><td>PAYE Tax <span class="sars-code">Code: 4102</span></td><td></td><td class="amount" id="bpPaye"></td></tr>
                                     <tr><td>UIF (Employee 1%) <span class="sars-code">Code: 4141</span></td><td></td><td class="amount" id="bpUif"></td></tr>
@@ -1077,6 +1085,8 @@
         const bulkIrp5Modal = new bootstrap.Modal(document.getElementById('bulkIrp5Modal'));
         
         let currentPayslipData = null;
+        let payslipCalculationSequence = 0;
+        let payslipRateContext = '';
 
         // Initialize today's dates
         const td = new Date().toISOString().split('T')[0];
@@ -1275,13 +1285,20 @@
                         continue;
                     }
 
+                    if (!data.payslip.is_finalized && Number(data.raw.leave_payout_amount || 0) > 0) {
+                        const approved = confirm(`${data.payslip.name}: final annual leave payout R ${Number(data.raw.leave_payout_amount).toFixed(2)} (${data.raw.leave_payout_days} days). The default rate is based on basic pay. Confirm the rate and balance are correct before finalising. Cancel to review this employee individually.`);
+                        if (!approved) {
+                            failures.push(`${data.payslip.name}: final leave payout needs individual review.`);
+                            continue;
+                        }
+                    }
                     const saveRes = await fetch('/api/save_payslip', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify(data.raw)
                     });
                     const saveData = await saveRes.json();
-                    if(!saveRes.ok || saveData.message) {
+                    if(!saveRes.ok || (saveData.message && saveData.status !== 'success')) {
                         failures.push(`Employee ID ${id}: ${saveData.message || 'Unable to save payslip.'}`);
                         continue;
                     }
@@ -1675,6 +1692,14 @@
         }
 
         function setPayrollComplianceDisplay(p) {
+            setOptionalPayslipLine('bpLeavePayoutRow', 'bpLeavePayout', p && p.leave_payout_amount);
+            const payoutDays = Number(p && p.leave_payout_days || 0);
+            const payoutRate = Number(p && p.leave_payout_daily_rate || 0);
+            const payoutDetail = `${payoutDays.toFixed(2)} days @ R ${payoutRate.toFixed(6)} through ${(p && p.leave_payout_date) || ''}; balance after payout: ${Number(p && p.annual_leave_balance_after || 0).toFixed(2)} days`;
+            document.getElementById('bpLeavePayoutDetail').innerText = payoutDetail;
+            document.getElementById('psLeavePayoutReview').style.display = payoutDays > 0 ? '' : 'none';
+            document.getElementById('psLeavePayoutSummary').innerText = payoutDetail;
+            document.getElementById('psLeavePayoutRate').disabled = !!(p && p.is_finalized);
             const treatmentCode = (p && p.bonus_tax_treatment_code) ? String(p.bonus_tax_treatment_code) : ((p && p.bonus_tax_treatment) ? String(p.bonus_tax_treatment).toLowerCase() : 'annual');
             const isAnnual = treatmentCode === 'annual' || treatmentCode.includes('annual');
             const treatmentEl = document.getElementById('bpBonusTaxTreatment');
@@ -1739,6 +1764,11 @@
             if(uifAuditBox) uifAuditBox.style.display = 'none';
             document.getElementById('psReimbursableExpenses').value = 0;
             document.getElementById('psBonus').value = 0;
+            document.getElementById('psLeavePayoutRate').value = '';
+            document.getElementById('psLeavePayoutReview').style.display = 'none';
+            currentPayslipData = null;
+            payslipCalculationSequence++;
+            payslipRateContext = '';
             document.getElementById('psBonusTaxTreatment').value = 'current_period';
             document.getElementById('psLoanRepayment').value = 0;
             ['psReimbursableExpenses','psBonus','psBonusTaxTreatment','psLoanRepayment'].forEach(fieldId => { const el = document.getElementById(fieldId); if(el) el.disabled = false; });
@@ -1929,6 +1959,15 @@
         }
 
         function runPayslipEngine() {
+            const sequence = ++payslipCalculationSequence;
+            currentPayslipData = null;
+            document.getElementById('payslipPreviewArea').style.display = 'none';
+            const context = document.getElementById('psEmpId').value + ':' + document.getElementById('psDate').value.slice(0, 7);
+            if (context !== payslipRateContext) {
+                document.getElementById('psLeavePayoutRate').value = '';
+                document.getElementById('psLeavePayoutReview').style.display = 'none';
+            }
+            payslipRateContext = context;
             const btn = document.getElementById('btnRunEngine');
             btn.innerText = 'Calculating...'; btn.disabled = true;
             const data = {
@@ -1937,11 +1976,13 @@
                 reimbursable_expenses: parseFloat(document.getElementById('psReimbursableExpenses').value || 0),
                 bonus: parseFloat(document.getElementById('psBonus').value || 0),
                 bonus_tax_treatment: document.getElementById('psBonusTaxTreatment').value || 'current_period',
+                leave_payout_daily_rate_override: document.getElementById('psLeavePayoutRate').value || null,
                 loan_repayment: parseFloat(document.getElementById('psLoanRepayment').value || 0)
             };
             
             fetch('/generate_payslip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
             .then(r => r.json().then(data => ({ok: r.ok, data: data}))).then(({ok, data: res}) => {
+                if (sequence !== payslipCalculationSequence) return;
                 if(!ok || res.message) {
                     alert(res.message || 'Unable to generate payslip.');
                     btn.innerText = '⚙️ Calculate Statutory Taxes & Deductions';
@@ -2015,23 +2056,37 @@
                     document.getElementById('btnSaveLedger').disabled = false;
                     document.getElementById('btnSaveLedger').innerText = '💾 Save to Ledger & Lock';
                 }
+            }).catch(err => {
+                if (sequence === payslipCalculationSequence) alert(err.message || 'Unable to calculate payslip.');
+            }).finally(() => {
+                if (sequence === payslipCalculationSequence) {
+                    btn.disabled = false;
+                    if (!currentPayslipData) btn.innerText = 'Calculate';
+                }
             });
         }
 
         function savePayslipToLedger() {
             if(!currentPayslipData) return;
+            const toSave = currentPayslipData;
+            const saveSequence = payslipCalculationSequence;
             const btn = document.getElementById('btnSaveLedger');
             btn.innerText = "Saving & Locking..."; btn.disabled = true;
-            fetch('/api/save_payslip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(currentPayslipData.raw) })
+            fetch('/api/save_payslip', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(toSave.raw) })
             .then(r => r.json().then(data => ({ok: r.ok, data: data}))).then(({ok, data}) => {
-                if(!ok || data.message) {
+                if(!ok || (data.message && data.status !== 'success')) {
                     showPayrollNotification(data.message || 'Unable to save payslip.', 'error');
                     btn.innerText = '💾 Save to Ledger & Lock';
                     btn.disabled = false;
                     return;
                 }
-                const savedEmployeeId = currentPayslipData.raw.employee_id;
-                const savedPayrollDate = currentPayslipData.raw.date;
+                const savedEmployeeId = toSave.raw.employee_id;
+                const savedPayrollDate = toSave.raw.date;
+                if (saveSequence !== payslipCalculationSequence) {
+                    updateCurrentMonthPayrollCell(savedEmployeeId, savedPayrollDate);
+                    showPayrollNotification(`Payslip saved for ${toSave.payslip.name}, ${savedPayrollDate}.`, 'success');
+                    return;
+                }
 
                 // Finalisation recalculates statutory values server-side. Refresh from
                 // the locked ledger row immediately so the displayed final payslip is

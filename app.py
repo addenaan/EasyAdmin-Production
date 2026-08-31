@@ -2449,6 +2449,13 @@ def init_db():
         'leave_records': [('leave_type', 'TEXT DEFAULT "Annual Leave"'), ('notes', 'TEXT'), ('document_file', 'TEXT')],
         'expenses': [('invoice_file', 'TEXT')]
     }
+    loose_cols['payslips'].extend([
+        ('employment_start_date', 'TEXT'), ('payroll_start', 'TEXT'), ('payroll_cutoff', 'TEXT'),
+        ('salary_proration_note', 'TEXT'), ('leave_payout_date', 'TEXT'),
+        ('leave_payout_days', 'REAL DEFAULT 0'), ('leave_payout_daily_rate', 'REAL DEFAULT 0'),
+        ('leave_payout_amount', 'REAL DEFAULT 0'), ('leave_payout_rate_basis', 'TEXT'),
+        ('annual_leave_balance_before', 'REAL'), ('annual_leave_balance_after', 'REAL')
+    ])
     for t_name, cols in loose_cols.items():
         for c_name, c_type in cols:
             try: conn.execute(f'ALTER TABLE {t_name} ADD COLUMN {c_name} {c_type}')
@@ -3444,12 +3451,38 @@ def get_employee_inactive_date(emp):
         return None
 
 def get_employee_payroll_cutoff(emp, payroll_date_str):
-    month_start, month_end = get_month_start_end_from_date(payroll_date_str)
-    inactive_date = get_employee_inactive_date(emp)
-    if inactive_date and inactive_date < month_start:
-        return month_start, month_end, inactive_date, None
-    cutoff = min(month_end, inactive_date) if inactive_date else month_end
+    try:
+        month_start, month_end, inactive_date, payroll_start, cutoff = get_employee_payroll_period(emp, payroll_date_str)
+    except ValueError:
+        # Dashboard eligibility checks must not break the whole employee list.
+        month_start, month_end = get_month_start_end_from_date(payroll_date_str)
+        return month_start, month_end, get_employee_inactive_date(emp), None
     return month_start, month_end, inactive_date, cutoff
+
+def get_employee_payroll_period(emp, payroll_date_str):
+    """Inclusive intersection of the payroll month and recorded employment dates."""
+    record = dict(emp)
+    payroll_date = parse_date_safe(payroll_date_str)
+    start = parse_date_safe(record.get('start_date'))
+    inactive = parse_date_safe(record.get('inactive_date'))
+    if not payroll_date:
+        raise ValueError('A valid payroll date is required (YYYY-MM-DD).')
+    if not start:
+        raise ValueError('Set a valid employee start date before calculating payroll.')
+    if record.get('inactive_date') and not inactive:
+        raise ValueError('Correct the employee inactive date before calculating payroll.')
+    if inactive and inactive.date() < start.date():
+        raise ValueError('The inactive date cannot be before the employee start date.')
+    if str(record.get('status') or '').strip().lower() in {'resigned', 'terminated', 'inactive'} and not inactive:
+        raise ValueError('Set the inactive date (last paid day) for this employee before calculating payroll.')
+    month_start, month_end = get_month_start_end_from_date(payroll_date.strftime('%Y-%m-%d'))
+    start = datetime(start.year, start.month, start.day)
+    inactive = datetime(inactive.year, inactive.month, inactive.day) if inactive else None
+    payroll_start = max(month_start, start)
+    cutoff = min(month_end, inactive) if inactive else month_end
+    if payroll_start > cutoff:
+        cutoff = None
+    return month_start, month_end, inactive, payroll_start, cutoff
 
 def count_ordinary_days_in_range(start_dt, end_dt, emp_type):
     if not start_dt or not end_dt or end_dt < start_dt:
@@ -3464,19 +3497,23 @@ def count_ordinary_days_in_range(start_dt, end_dt, emp_type):
         current += timedelta(days=1)
     return count
 
-def prorate_monthly_salary_for_inactive_date(base_salary, emp_type, month_start, month_end, cutoff_dt):
-    if not cutoff_dt or cutoff_dt >= month_end:
-        return float(base_salary or 0.0), ''
+def prorate_monthly_salary_for_inactive_date(base_salary, emp_type, month_start, month_end, cutoff_dt, payroll_start=None):
+    payroll_start = max(month_start, payroll_start or month_start)
+    if not cutoff_dt or payroll_start > cutoff_dt:
+        return 0.0, '(No employment days in this payroll month)'
+    cutoff_dt = min(month_end, cutoff_dt)
+    if payroll_start == month_start and cutoff_dt == month_end:
+        return round(float(base_salary or 0.0), 2), ''
     total_days = count_ordinary_days_in_range(month_start, month_end, emp_type)
-    payable_days = count_ordinary_days_in_range(month_start, cutoff_dt, emp_type)
+    payable_days = count_ordinary_days_in_range(payroll_start, cutoff_dt, emp_type)
     if total_days <= 0:
         return 0.0, '(Inactive before payroll month)'
     prorated = float(base_salary or 0.0) * (payable_days / total_days)
-    return prorated, f'(Prorated: {payable_days}/{total_days} ordinary days to inactive date {cutoff_dt.strftime("%Y-%m-%d")})'
+    return round(prorated, 2), f'(Prorated: {payable_days}/{total_days} ordinary days, {payroll_start:%Y-%m-%d} to {cutoff_dt:%Y-%m-%d}, inclusive)'
 
 def get_contract_day_rules(emp_type):
     emp_type = emp_type or ''
-    if emp_type == 'Full-time (5 Days)':
+    if emp_type in ['Full-time', 'Full-time (5 Days)']:
         return {
             'ordinary_weekdays': {0, 1, 2, 3, 4},
             'saturday_multiplier': 1.5,
@@ -3715,7 +3752,7 @@ def employee_name_matches(booking_employee, employee_name):
 UIF_MONTHLY_HOURS_THRESHOLD = 24.0
 
 
-def get_employee_month_bookings(conn, company_id, employee_name, target_month, payroll_cutoff):
+def get_employee_month_bookings(conn, company_id, employee_name, target_month, payroll_cutoff, payroll_start=None):
     """Return this employee's qualifying bookings for one payroll month.
 
     The SQL narrows the result set for performance, while ``employee_name_matches``
@@ -3730,6 +3767,9 @@ def get_employee_month_bookings(conn, company_id, employee_name, target_month, p
     result = []
     for row in rows:
         row_dict = dict(row)
+        booking_date = parse_date_safe(row_dict.get('start'))
+        if not booking_date or (payroll_start and booking_date.date() < payroll_start.date()):
+            continue
         if not employee_name_matches(row_dict.get('employee'), employee_name):
             continue
         mobile_status = str(row_dict.get('mobile_status') or 'Scheduled').strip().lower()
@@ -4072,7 +4112,7 @@ def validate_booking_employees_available(conn, company_id, assignments, booking_
         return False, f"Cannot book employee on leave: {', '.join(on_leave)}"
     return True, ''
 
-def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str=None):
+def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str=None, conn=None):
     start = parse_date_safe(start_date_str)
     if not start:
         return 0.0
@@ -4080,8 +4120,15 @@ def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref
     if not now:
         now = datetime.now()
     cid = session.get('company_id')
-    conn = get_db_connection()
+    if conn is None:
+        owned = get_db_connection()
+        try:
+            return calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str, conn=owned)
+        finally:
+            owned.close()
     emp_record = conn.execute('SELECT additional_leave, inactive_date FROM employees WHERE id=? AND company_id=?', (employee_id, cid)).fetchone()
+    if not emp_record:
+        return 0.0
     add_leave_per_year = float(emp_record['additional_leave']) if emp_record and 'additional_leave' in dict(emp_record) and emp_record['additional_leave'] else 0.0
     inactive_dt = parse_date_safe(emp_record['inactive_date']) if emp_record and 'inactive_date' in dict(emp_record) else None
     if inactive_dt and inactive_dt < now:
@@ -4093,7 +4140,14 @@ def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref
     taken_rows = conn.execute('''SELECT date_taken, days FROM leave_records
                                  WHERE company_id=? AND employee_id=? AND leave_type="Annual Leave" AND date_taken <= ?
                                  ORDER BY date_taken ASC''', (cid, employee_id, now.strftime('%Y-%m-%d'))).fetchall()
-    total_taken = sum(float(r['days'] or 0.0) for r in taken_rows)
+    payout_rows = conn.execute('''SELECT leave_payout_date AS date_taken, leave_payout_days AS days
+                                  FROM payslips WHERE company_id=? AND employee_id=?
+                                  AND COALESCE(payslip_type, 'regular')='regular'
+                                  AND leave_payout_date>=? AND leave_payout_date<=?
+                                  AND leave_payout_days>0''',
+                               (cid, employee_id, start.strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d'))).fetchall()
+    debits = [dict(r) for r in list(taken_rows) + list(payout_rows)
+              if parse_date_safe(r['date_taken']) and parse_date_safe(r['date_taken']).date() >= start.date()]
 
     base_monthly_rate = 0.0
     if safe_type in ['Full-time', 'Full-time (5 Days)']: base_monthly_rate = 1.25
@@ -4102,11 +4156,14 @@ def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref
 
     valid_shift_dates = []
     if safe_type == 'Contract >25 Hrs':
-        bookings = conn.execute('SELECT start FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall()
+        bookings = conn.execute('SELECT * FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall()
         for b in bookings:
             try:
                 b_date = parse_date_safe(b['start'])
-                if b_date and start.date() <= b_date.date() <= now.date():
+                status = str(dict(b).get('mobile_status') or '').lower()
+                if (b_date and start.date() <= b_date.date() <= now.date()
+                        and employee_name_matches(b['employee'], emp_name)
+                        and status not in {'cancelled', 'canceled'}):
                     valid_shift_dates.append(b_date)
             except Exception:
                 pass
@@ -4118,35 +4175,98 @@ def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref
         amount = 0.0
         if safe_type == 'Contract >25 Hrs':
             next_month = add_months(award_month, 1)
-            shifts = sum(1 for d in valid_shift_dates if award_month.date() <= d.date() < next_month.date())
+            shifts = len({d.date() for d in valid_shift_dates if award_month.date() <= d.date() < next_month.date()})
             amount = (shifts / 17.0) + (add_leave_per_year / 12.0)
         else:
             amount = monthly_rate
 
-        # If employment ends during the award month, only award leave up to the last working day.
-        if inactive_dt and award_month.year == inactive_dt.year and award_month.month == inactive_dt.month and amount > 0:
-            month_start = datetime(award_month.year, award_month.month, 1)
-            month_end = datetime(award_month.year, award_month.month, calendar.monthrange(award_month.year, award_month.month)[1])
-            total_ordinary_days = count_ordinary_days_in_range(month_start, month_end, safe_type)
-            payable_ordinary_days = count_ordinary_days_in_range(month_start, inactive_dt, safe_type)
-            if total_ordinary_days > 0:
-                amount = amount * (payable_ordinary_days / total_ordinary_days)
+        # Keep the configured monthly accrual/expiry policy, but never award time
+        # outside employment. Actual contract shifts are already date-limited.
+        month_end = add_months(award_month, 1) - timedelta(days=1)
+        accrual_start = max(award_month, datetime(start.year, start.month, start.day))
+        accrual_end = min(month_end, inactive_dt) if inactive_dt else month_end
+        total_days = count_ordinary_days_in_range(award_month, month_end, safe_type)
+        fraction = count_ordinary_days_in_range(accrual_start, accrual_end, safe_type) / total_days if total_days else 0
+        if safe_type == 'Contract >25 Hrs':
+            amount = shifts / 17.0 + (add_leave_per_year / 12.0) * fraction
+        else:
+            amount *= fraction
 
         expiry_date = add_months(award_month, 18)
-        if now < expiry_date and amount > 0:
+        if amount > 0 and now.date() >= start.date():
             awards.append({'award_month': award_month, 'expiry_date': expiry_date, 'remaining': amount})
         award_month = add_months(award_month, 1)
 
-    for award in awards:
-        if total_taken <= 0:
-            break
-        used = min(award['remaining'], total_taken)
-        award['remaining'] -= used
-        total_taken -= used
-
-    valid_balance = sum(a['remaining'] for a in awards)
-    conn.close()
+    # Allocate usage when it happened, before expiring old awards. Subtracting all
+    # historical leave only from today's unexpired awards understates final leave.
+    debt = 0.0
+    available = []
+    events = [(a['award_month'], 0, a) for a in awards]
+    events += [(parse_date_safe(d['date_taken']), 1, d) for d in debits]
+    for event_date, event_type, item in sorted(events, key=lambda e: (e[0], e[1])):
+        if event_type == 0:
+            # Leave taken in advance is repaid by the next awards, not charged
+            # again against a later cycle after those awards have expired.
+            used = min(item['remaining'], debt)
+            item['remaining'] -= used
+            debt -= used
+            available.append(item)
+            continue
+        needed = max(0.0, float(item['days'] or 0))
+        for award in available:
+            if event_date < award['expiry_date']:
+                used = min(award['remaining'], needed)
+                award['remaining'] -= used
+                needed -= used
+        debt += needed
+    valid_balance = max(0.0, sum(a['remaining'] for a in awards if now < a['expiry_date']) - debt)
     return round(valid_balance, 2)
+
+
+def calculate_final_leave_payout(conn, emp, company_id, month_start, month_end, cutoff, data):
+    """Prepare a cash-out snapshot; previews never consume leave."""
+    inactive = get_employee_inactive_date(emp)
+    balance = calculate_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'],
+                                      cutoff.strftime('%Y-%m-%d'), conn=conn)
+    snapshot = {'leave_payout_date': None, 'leave_payout_days': 0.0,
+                'leave_payout_daily_rate': 0.0, 'leave_payout_amount': 0.0,
+                'leave_payout_rate_basis': '', 'annual_leave_balance_before': balance,
+                'annual_leave_balance_after': balance}
+    if not inactive or not month_start.date() <= inactive.date() <= month_end.date():
+        return snapshot
+    # One settlement per recorded employment start, even if the inactive date is
+    # later edited. A historical final settlement needs an explicit payroll review.
+    previous = conn.execute('''SELECT id FROM payslips WHERE company_id=? AND employee_id=?
+                               AND employment_start_date=? AND leave_payout_date IS NOT NULL
+                               AND COALESCE(payslip_type, 'regular')='regular' LIMIT 1''',
+                            (company_id, emp['id'], parse_date_safe(emp['start_date']).strftime('%Y-%m-%d'))).fetchone()
+    if previous:
+        return snapshot
+    days = max(0.0, float(balance))
+    base = safe_money(emp['gross_salary'])
+    emp_type = emp['emp_type'] or 'Full-time (5 Days)'
+    daily_contract = emp_type in ['Contract <25 Hrs', 'Contract >25 Hrs'] and base < 2000
+    # Monthly remuneration = 4 1/3 weeks. Leave units follow the existing leave
+    # scheme (five-day units for Shift Worker; six-day units for six-day contracts).
+    week_days = 6 if emp_type in ['Full-time (6 Days)', 'Contract >25 Hrs', 'Contract <25 Hrs'] else 5
+    rate = base if daily_contract else base / ((52.0 / 12.0) * week_days)
+    basis = 'Basic daily wage' if daily_contract else f'Basic monthly salary / (52/12 x {week_days})'
+    override = data.get('leave_payout_daily_rate_override')
+    if override not in (None, ''):
+        try:
+            rate = float(override)
+        except (ValueError, TypeError):
+            raise ValueError('Enter a valid reviewed annual-leave daily rate.')
+        if not 0 < rate < float('inf'):
+            raise ValueError('The reviewed annual-leave daily rate must be finite and greater than zero.')
+        basis = 'Payroll-reviewed daily remuneration rate'
+    rate = round(rate, 6)
+    if not 0 <= rate < float('inf') or (days > 0 and rate <= 0):
+        raise ValueError('A positive salary or reviewed daily rate is required to pay unused annual leave.')
+    snapshot.update(leave_payout_date=inactive.strftime('%Y-%m-%d'), leave_payout_days=days,
+                    leave_payout_daily_rate=round(rate, 6), leave_payout_amount=round(days * round(rate, 6), 2),
+                    leave_payout_rate_basis=basis, annual_leave_balance_after=round(balance - days, 2))
+    return snapshot
 
 def calculate_sick_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str=None):
     if emp_type in ['Supplier', 'Provider', 'Contract <25 Hrs']:
@@ -6180,19 +6300,20 @@ def _build_reports_payload(report_type, filters):
                 g['overtime'] += _report_money(d.get('overtime'))
                 g['transport'] += _report_money(d.get('transport'))
                 g['bonus'] += _report_money(d.get('bonus'))
+                g['leave_payout'] = g.get('leave_payout', 0.0) + _report_money(d.get('leave_payout_amount'))
                 g['reimbursable'] += _report_money(d.get('reimbursable_expenses'))
                 g['uif'] += _report_money(d.get('uif'))
                 g['paye'] += _report_money(d.get('paye'))
                 g['loan'] += _report_money(d.get('loan_repayment'))
                 g['net'] += _report_money(d.get('net_salary'))
             if report_type == 'payroll_summary':
-                columns = ['Employee', 'Employee No.', 'Payslips', 'Gross Salary', 'UIF', 'PAYE', 'Net Salary']
+                columns = ['Employee', 'Employee No.', 'Payslips', 'Gross Salary', 'Leave Payout', 'UIF', 'PAYE', 'Net Salary']
                 for g in sorted(grouped.values(), key=lambda x: x['employee'].lower()):
-                    rows.append([g['employee'], g['emp_number'], g['payslips'], _report_money(g['gross']), _report_money(g['uif']), _report_money(g['paye']), _report_money(g['net'])])
+                    rows.append([g['employee'], g['emp_number'], g['payslips'], _report_money(g['gross']), _report_money(g['leave_payout']), _report_money(g['uif']), _report_money(g['paye']), _report_money(g['net'])])
             elif report_type == 'employee_earnings':
-                columns = ['Employee', 'Employee No.', 'Payslips', 'Gross Salary', 'Overtime', 'Transport Allowance', 'Bonus', 'Reimbursable Expenses', 'Net Salary']
+                columns = ['Employee', 'Employee No.', 'Payslips', 'Gross Salary', 'Overtime', 'Transport Allowance', 'Bonus', 'Leave Payout', 'Reimbursable Expenses', 'Net Salary']
                 for g in sorted(grouped.values(), key=lambda x: x['employee'].lower()):
-                    rows.append([g['employee'], g['emp_number'], g['payslips'], _report_money(g['gross']), _report_money(g['overtime']), _report_money(g['transport']), _report_money(g['bonus']), _report_money(g['reimbursable']), _report_money(g['net'])])
+                    rows.append([g['employee'], g['emp_number'], g['payslips'], _report_money(g['gross']), _report_money(g['overtime']), _report_money(g['transport']), _report_money(g['bonus']), _report_money(g['leave_payout']), _report_money(g['reimbursable']), _report_money(g['net'])])
             else:
                 columns = ['Employee', 'Employee No.', 'Payslips', 'UIF', 'PAYE', 'Loan Repayments', 'Total Deductions']
                 for g in sorted(grouped.values(), key=lambda x: x['employee'].lower()):
@@ -6205,10 +6326,10 @@ def _build_reports_payload(report_type, filters):
                                    LEFT JOIN employees e ON e.id=p.employee_id AND e.company_id=p.company_id
                                    WHERE p.company_id=? AND p.date BETWEEN ? AND ?
                                    ORDER BY p.date ASC, e.name ASC""", (session['company_id'], filters['start_date'], filters['end_date'])).fetchall()
-            columns = ['Date', 'Employee', 'Employee No.', 'Type', 'Gross Salary', 'UIF', 'PAYE', 'Net Salary', 'Adjustment Reason']
+            columns = ['Date', 'Employee', 'Employee No.', 'Type', 'Gross Salary', 'Leave Payout', 'UIF', 'PAYE', 'Net Salary', 'Adjustment Reason']
             for p in pays:
                 d = dict(p)
-                rows.append([d.get('date') or '', d.get('employee_name') or '', d.get('emp_number') or '', d.get('payslip_type') or 'regular', _report_money(d.get('gross_salary')), _report_money(d.get('uif')), _report_money(d.get('paye')), _report_money(d.get('net_salary')), d.get('adjustment_reason') or ''])
+                rows.append([d.get('date') or '', d.get('employee_name') or '', d.get('emp_number') or '', d.get('payslip_type') or 'regular', _report_money(d.get('gross_salary')), _report_money(d.get('leave_payout_amount')), _report_money(d.get('uif')), _report_money(d.get('paye')), _report_money(d.get('net_salary')), d.get('adjustment_reason') or ''])
 
         elif report_type in ('leave_taken_report', 'leave_balance_report'):
             leave_rows = conn.execute("""SELECT lr.*, e.name AS employee_name, e.emp_number, e.additional_leave
@@ -7682,6 +7803,7 @@ def _staff_payslip_to_dict(row):
     is_adjustment = payslip_type.lower() == 'adjustment'
     title = 'Adjustment Payslip' if is_adjustment else 'Final Payslip'
     return {
+        **_saved_employment_snapshot(r),
         'id': r.get('id'),
         'employee_id': r.get('employee_id'),
         'date': payslip_date,
@@ -7723,6 +7845,8 @@ def _build_staff_payslip_pdf(row, employee, company):
         }
     except Exception:
         balances = {'annual': 'N/A', 'sick': 'N/A', 'family': 'N/A'}
+    if r.get('annual_leave_balance_after') is not None:
+        balances['annual'] = f"{float(r['annual_leave_balance_after']):g} Days"
     logo_path = None
     logo_file = comp.get('logo_file') or ''
     if logo_file:
@@ -13752,7 +13876,7 @@ def _build_admin_payslip_pdf_from_payload(data):
     except Exception:
         pass
     balances = {
-        'annual': p.get('leave') or 'N/A',
+        'annual': p.get('leave') if p.get('leave') is not None else 'N/A',
         'sick': p.get('sick_leave') or 'N/A',
         'family': p.get('family_leave') or 'N/A',
     }
@@ -14287,6 +14411,10 @@ def save_payslip():
     data = request.json or {}
     if not data.get('employee_id') or not data.get('date'):
         return jsonify({"message": "Employee and payroll date are required."}), 400
+    payroll_date = parse_date_safe(data.get('date'))
+    if not payroll_date:
+        return jsonify({'message': 'A valid payroll date is required.'}), 400
+    data['date'] = payroll_date.strftime('%Y-%m-%d')
     target_month = data['date'][:7]
     try:
         ensure_tax_tables_configured(get_sars_tax_year(data['date']))
@@ -14295,12 +14423,13 @@ def save_payslip():
 
     conn = get_db_connection()
     try:
-        employee = conn.execute("SELECT * FROM employees WHERE id=? AND company_id=?", (data['employee_id'], session['company_id'])).fetchone()
+        _begin_atomic_write(conn)
+        employee_sql = 'SELECT * FROM employees WHERE id=? AND company_id=?'
+        if getattr(conn, '_conn', None) is not None:
+            employee_sql += ' FOR UPDATE'
+        employee = conn.execute(employee_sql, (data['employee_id'], session['company_id'])).fetchone()
         if not employee:
             return jsonify({"message": "Employee not found."}), 404
-        _month_start, _month_end, _inactive_date, payroll_cutoff = get_employee_payroll_cutoff(employee, data['date'])
-        if payroll_cutoff is None:
-            return jsonify({"message": "Employee inactive before this payroll month. Payroll cannot be saved beyond the inactive date."}), 400
 
         # A finalized regular payslip is immutable through the normal Save to Ledger
         # workflow. This protects historical payroll from later booking/status changes.
@@ -14312,68 +14441,41 @@ def save_payslip():
                 "message": "Payslip already finalized; the existing ledger record was retained unchanged."
             })
 
-        bookings = get_employee_month_bookings(
-            conn, session['company_id'], employee['name'], target_month, payroll_cutoff
-        )
-        workday_hours = get_employee_workday_hours(employee)
-        uif_eligibility = determine_uif_eligibility(employee, bookings, workday_hours)
-
-        gross = safe_money(data.get('gross'))
-        overtime = safe_money(data.get('overtime'))
-        transport = safe_money(data.get('transport'))
-        bonus = safe_money(data.get('bonus'))
-        reimbursable = safe_money(data.get('reimbursable_expenses'))
-        loan_repayment = safe_money(data.get('loan_repayment'))
-        bonus_tax_treatment = normalize_bonus_tax_treatment(data.get('bonus_tax_treatment') or 'current_period')
-        period_taxable = gross + overtime
-        total_taxable = period_taxable + bonus
-
-        # Statutory amounts are recalculated on the server when finalising. Browser
-        # submitted PAYE/UIF/SDL values are never trusted as ledger source values.
-        paye = calculate_paye_with_bonus(period_taxable, bonus, bonus_tax_treatment, data['date'], employee['date_of_birth'])
-        uif = calculate_uif(total_taxable) if uif_eligibility['applicable'] else 0.0
-        company_row = conn.execute('SELECT sdl_applicable FROM companies WHERE id=?', (session['company_id'],)).fetchone()
-        sdl_applicable = bool(company_row and int(company_row['sdl_applicable'] or 0))
-        sdl = calculate_sdl(total_taxable, sdl_applicable)
-        net = total_taxable - uif - paye + transport + reimbursable - loan_repayment
-
-        conn.execute('''INSERT INTO payslips (
-                            company_id, employee_id, date, gross_salary, overtime, transport, bonus,
-                            reimbursable_expenses, loan_repayment, uif, paye, net_salary, payslip_type,
-                            created_at, uif_applicable, uif_monthly_hours, uif_booked_days, uif_eligibility_reason,
-                            bonus_tax_treatment, sdl, sdl_applicable
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'regular', ?, ?, ?, ?, ?, ?, ?, ?)''',
-                     (session['company_id'], data['employee_id'], data['date'], gross, overtime, transport, bonus,
-                      reimbursable, loan_repayment, uif, paye, net, datetime.now().isoformat(timespec='seconds'),
-                      1 if uif_eligibility['applicable'] else 0, uif_eligibility['monthly_hours'],
-                      uif_eligibility['booked_days'], uif_eligibility['reason'], bonus_tax_treatment, sdl,
-                      1 if sdl_applicable else 0))
+        company = conn.execute('SELECT * FROM companies WHERE id=?', (session['company_id'],)).fetchone()
+        # Reuse the draft engine. No client-submitted salary, leave balance, payout,
+        # tax or net amount can bypass employment-date checks or enter the ledger.
+        calculated = _calculate_draft_payslip(conn, employee, company, data)
+        raw = calculated['raw']
+        stored = {key: value for key, value in raw.items() if key != 'leave_payout_daily_rate_override'}
+        stored['gross_salary'] = stored.pop('gross')
+        stored['net_salary'] = stored.pop('net')
+        stored.update(company_id=session['company_id'], payslip_type='regular',
+                      created_at=datetime.now().isoformat(timespec='seconds'))
+        columns = list(stored)
+        conn.execute('INSERT INTO payslips (' + ', '.join(columns) + ') VALUES (' +
+                     ', '.join('?' for _ in columns) + ')', tuple(stored[key] for key in columns))
         conn.commit()
+    except (ValueError, TaxTableNotSetError) as exc:
+        conn.rollback()
+        return jsonify({'message': str(exc)}), 400
     finally:
         conn.close()
 
-    log_action('HR & Payroll', 'Saved Payslip', f"Saved payslip ledger for Employee ID {data['employee_id']} for {target_month}; {uif_eligibility['reason']}")
-    return jsonify({
-        "status": "success",
-        "paye": paye,
-        "uif": uif,
-        "sdl": sdl,
-        "sdl_applicable": sdl_applicable,
-        "bonus_tax_treatment": bonus_tax_treatment,
-        "net": net,
-        "uif_applicable": bool(uif_eligibility['applicable']),
-        "uif_monthly_hours": uif_eligibility['monthly_hours'],
-        "uif_booked_days": uif_eligibility['booked_days'],
-        "uif_eligibility_reason": uif_eligibility['reason']
-    })
+    log_action('HR & Payroll', 'Saved Payslip', f"Employee ID {data['employee_id']} for {target_month}; "
+               f"salary {raw['gross']:.2f}; annual leave {raw['leave_payout_days']} days, "
+               f"R{raw['leave_payout_amount']:.2f}; {raw['leave_payout_rate_basis']}")
+    return jsonify(dict(raw, status='success'))
 
 @app.route('/generate_payslip', methods=['POST'])
 def generate_payslip():
-    data = request.get_json()
+    if not session.get('can_payroll') and not session.get('is_superadmin'):
+        return jsonify({'message': 'Forbidden'}), 403
+    data = request.get_json(silent=True) or {}
+    payroll_date = parse_date_safe(data.get('date'))
+    if not data.get('employee_id') or not payroll_date:
+        return jsonify({'message': 'Employee and a valid payroll date are required.'}), 400
+    data['date'] = payroll_date.strftime('%Y-%m-%d')
     emp_id, date_str = data.get('employee_id'), data.get('date')
-    bonus_amount = safe_money(data.get('bonus'))
-    reimbursable_amount = safe_money(data.get('reimbursable_expenses'))
-    loan_repayment_amount = safe_money(data.get('loan_repayment'))
     target_month = date_str[:7] 
 
     conn = get_db_connection()
@@ -14394,29 +14496,46 @@ def generate_payslip():
         conn.close()
         return jsonify(payload)
 
-    tax_year = get_sars_tax_year(date_str)
     try:
-        ensure_tax_tables_configured(tax_year)
-    except TaxTableNotSetError as e:
-        conn.close()
+        ensure_tax_tables_configured(get_sars_tax_year(date_str))
+        return jsonify(_calculate_draft_payslip(conn, emp, company, data))
+    except (ValueError, TaxTableNotSetError) as e:
         return jsonify({"message": str(e)}), 400
-
-    month_start, month_end, inactive_date, payroll_cutoff = get_employee_payroll_cutoff(emp, date_str)
-    if payroll_cutoff is None:
+    finally:
         conn.close()
-        return jsonify({"message": "Employee inactive before this payroll month. Payroll cannot be generated beyond the inactive date."}), 400
+
+
+def _payroll_input_amount(value, label):
+    try:
+        amount = float(value or 0)
+    except (ValueError, TypeError):
+        raise ValueError(f'{label} must be a valid amount.')
+    if not 0 <= amount < float('inf'):
+        raise ValueError(f'{label} must be finite and non-negative.')
+    return round(amount, 2)
+
+
+def _calculate_draft_payslip(conn, emp, company, data):
+    emp_id, date_str = emp['id'], data['date']
+    target_month = date_str[:7]
+    bonus_amount = _payroll_input_amount(data.get('bonus'), 'Bonus')
+    reimbursable_amount = _payroll_input_amount(data.get('reimbursable_expenses'), 'Reimbursable expenses')
+    loan_repayment_amount = _payroll_input_amount(data.get('loan_repayment'), 'Loan repayment')
+    month_start, month_end, inactive_date, payroll_start, payroll_cutoff = get_employee_payroll_period(emp, date_str)
+    if payroll_cutoff is None:
+        raise ValueError('No employment days in this payroll month. Payroll cannot be generated or saved before the start date or after the inactive date.')
 
     bookings = get_employee_month_bookings(
-        conn, session['company_id'], emp['name'], target_month, payroll_cutoff
+        conn, session['company_id'], emp['name'], target_month, payroll_cutoff, payroll_start
     )
     
     days_worked = len(bookings)
-    base_salary = float(emp['gross_salary'] or 0)
+    base_salary = _payroll_input_amount(emp['gross_salary'], 'Employee salary')
     
     emp_type = emp['emp_type'] or ''
     is_daily_rate = emp_type in ['Contract <25 Hrs', 'Contract >25 Hrs'] and base_salary < 2000
     
-    payable_base_salary, inactive_salary_note = prorate_monthly_salary_for_inactive_date(base_salary, emp_type, month_start, month_end, payroll_cutoff)
+    payable_base_salary, inactive_salary_note = prorate_monthly_salary_for_inactive_date(base_salary, emp_type, month_start, month_end, payroll_cutoff, payroll_start)
     divisor = 26.0 if '(6 Days)' in emp_type else 22.0
     daily_rate = base_salary if is_daily_rate else (base_salary / divisor)
     workday_hours = get_employee_workday_hours(emp)
@@ -14489,17 +14608,25 @@ def generate_payslip():
             transport_amount += max(0, (2 - company_lifts) * transport_amount_per_lift)
 
     bonus_tax_treatment = normalize_bonus_tax_treatment(data.get('bonus_tax_treatment') or 'current_period')
+    settlement = calculate_final_leave_payout(conn, emp, session['company_id'], month_start, month_end, payroll_cutoff, data)
+    overtime_amount = round(overtime_amount, 2)
+    gross = round(gross, 2)
+    transport_amount = round(transport_amount, 2)
     period_taxable = gross + overtime_amount
-    total_taxable = period_taxable + bonus_amount
+    total_taxable = period_taxable + bonus_amount + settlement['leave_payout_amount']
     uif_eligibility = determine_uif_eligibility(emp, bookings, workday_hours)
     uif = calculate_uif(total_taxable) if uif_eligibility['applicable'] else 0.0
-    paye = calculate_paye_with_bonus(period_taxable, bonus_amount, bonus_tax_treatment, date_str, emp['date_of_birth'])
+    # Encashment is an annual payment (3605), regardless of the bonus selector.
+    # Combine annual components once so a bonus and cash-out share tax bands.
+    annual_payment = settlement['leave_payout_amount'] + (bonus_amount if bonus_tax_treatment == 'annual' else 0)
+    regular_income = period_taxable + (bonus_amount if bonus_tax_treatment != 'annual' else 0)
+    paye = calculate_paye_with_bonus(regular_income, annual_payment, 'annual', date_str, emp['date_of_birth'])
     sdl_applicable = bool(company and int(dict(company).get('sdl_applicable') or 0))
     sdl = calculate_sdl(total_taxable, sdl_applicable)
-    net = total_taxable - uif - paye + transport_amount + reimbursable_amount - loan_repayment_amount
+    net = round(total_taxable - uif - paye + transport_amount + reimbursable_amount - loan_repayment_amount, 2)
     
     benefit_ref_date = payroll_cutoff.strftime('%Y-%m-%d')
-    leave = calculate_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'], benefit_ref_date)
+    leave = settlement['annual_leave_balance_after']
     sick = calculate_sick_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'], benefit_ref_date)
     family = calculate_family_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'], benefit_ref_date)
     bcea_warning = get_bcea_hours_warning(
@@ -14511,10 +14638,11 @@ def generate_payslip():
         saturday_nonordinary_hours=booking_hours['saturday_nonordinary_hours']
     )
     
-    conn.close()
-
-    return jsonify({
+    return {
         "payslip": { 
+            **settlement,
+            "leave_payout_amount": f"R {settlement['leave_payout_amount']:.2f}",
+            "payroll_start": payroll_start.strftime('%Y-%m-%d'),
             "date": target_month, 
             "name": emp['name'], 
             "emp_num": emp['emp_number'] or 'N/A', 
@@ -14558,6 +14686,12 @@ def generate_payslip():
             "source": "Draft calculation - not saved to ledger"
         },
         "raw": {
+            **settlement,
+            "leave_payout_daily_rate_override": data.get('leave_payout_daily_rate_override'),
+            "employment_start_date": parse_date_safe(emp['start_date']).strftime('%Y-%m-%d'),
+            "payroll_start": payroll_start.strftime('%Y-%m-%d'),
+            "payroll_cutoff": payroll_cutoff.strftime('%Y-%m-%d'),
+            "salary_proration_note": days_worked_display,
             "employee_id": emp_id,
             "date": date_str,
             "gross": gross,
@@ -14577,7 +14711,7 @@ def generate_payslip():
             "paye": paye,
             "net": net
         }
-    })
+    }
 
 
 def _payslip_row_with_historical_adjustments(conn, ledger_row, company_id):
@@ -14641,6 +14775,14 @@ def _append_regular_payslip_adjustment_note(existing_note, reason, adjustments, 
     existing = (existing_note or '').strip()
     return (existing + "\n" + note).strip() if existing else note
 
+def _saved_employment_snapshot(row):
+    row = dict(row)
+    return {key: row.get(key) for key in (
+        'employment_start_date', 'payroll_start', 'payroll_cutoff', 'salary_proration_note',
+        'leave_payout_date', 'leave_payout_days', 'leave_payout_daily_rate', 'leave_payout_amount',
+        'leave_payout_rate_basis', 'annual_leave_balance_before', 'annual_leave_balance_after')}
+
+
 def build_saved_payslip_payload(conn, emp, company, ledger_row):
     """Return a payslip response payload using the saved finalized payslip ledger row."""
     company_id = session.get('company_id')
@@ -14675,14 +14817,18 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
         family = calculate_family_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'], benefit_ref_date)
     except Exception:
         leave, sick, family = 'N/A', 'N/A', 'N/A'
+    if ledger_row.get('annual_leave_balance_after') is not None:
+        leave = ledger_row['annual_leave_balance_after']
     return {
         "payslip": {
+            **_saved_employment_snapshot(ledger_row),
+            "leave_payout_amount": f"R {float(ledger_row.get('leave_payout_amount') or 0):.2f}",
             "date": target_month,
             "name": emp['name'],
             "emp_num": emp['emp_number'] or 'N/A',
             "id_num": emp['id_passport'] or 'N/A',
             "gross": f"R {gross:.2f}",
-            "days_worked_display": "(Saved to Ledger)",
+            "days_worked_display": ledger_row.get('salary_proration_note') or "(Saved to Ledger)",
             "overtime": f"R {overtime_amount:.2f}",
             "sundays_display": "",
             "bonus": f"R {bonus_amount:.2f}",
@@ -14720,6 +14866,7 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
             "sdl_applicable": bool(int(sdl_applicable_snapshot or 0)) if sdl_applicable_snapshot is not None else None
         },
         "raw": {
+            **_saved_employment_snapshot(ledger_row),
             "employee_id": emp['id'],
             "date": date_str,
             "gross": gross,
@@ -14820,7 +14967,7 @@ def save_adjustment_payslip():
             new_loan = float(regular['loan_repayment'] or 0) + loan_repayment
             new_uif = float(regular['uif'] or 0) + uif
             new_paye = float(regular['paye'] or 0) + paye
-            new_net = new_gross + new_overtime + new_bonus + new_transport + new_reimbursable - new_uif - new_paye - new_loan
+            new_net = new_gross + new_overtime + new_bonus + new_transport + new_reimbursable + float(dict(regular).get('leave_payout_amount') or 0) - new_uif - new_paye - new_loan
 
             try:
                 existing_adjustment_note = regular['adjustment_reason'] or ''
@@ -15009,7 +15156,7 @@ def build_ui19_data(conn, company_id, month_str, employee_ids=None):
         emp_dict = dict(emp)
         start_dt = parse_date_safe(emp_dict.get('start_date'))
         inactive_dt = parse_date_safe(emp_dict.get('inactive_date'))
-        ledger = conn.execute("""SELECT SUM(COALESCE(gross_salary,0) + COALESCE(overtime,0) + COALESCE(bonus,0)) AS gross,
+        ledger = conn.execute("""SELECT SUM(COALESCE(gross_salary,0) + COALESCE(overtime,0) + COALESCE(bonus,0) + COALESCE(leave_payout_amount,0)) AS gross,
                                         COUNT(*) AS payslip_count,
                                         MAX(uif_applicable) AS uif_applicable,
                                         MAX(uif_monthly_hours) AS uif_monthly_hours
@@ -15404,7 +15551,7 @@ def generate_emp201():
     cid = session['company_id']
     # EMP201 is based strictly on payslips saved to the payroll ledger.
     # Unsaved payslip previews/calculations are not included.
-    ledger = conn.execute('''SELECT SUM(gross_salary + overtime + COALESCE(bonus,0)) as total_taxable,
+    ledger = conn.execute('''SELECT SUM(COALESCE(gross_salary,0) + COALESCE(overtime,0) + COALESCE(bonus,0) + COALESCE(leave_payout_amount,0)) as total_taxable,
                                     SUM(paye) as total_paye,
                                     SUM(uif) as total_uif_emp,
                                     SUM(COALESCE(sdl,0)) as total_sdl,
@@ -15442,6 +15589,7 @@ def _payroll_tax_certificate_ledger_summary(conn, company_id, emp_id, start_date
                                 SUM(gross_salary) AS gross,
                                 SUM(overtime) AS overtime,
                                 SUM(transport) AS travel,
+                                SUM(COALESCE(leave_payout_amount,0)) AS leave_payout,
                                 SUM(CASE WHEN COALESCE(bonus_tax_treatment, 'annual')='annual' THEN COALESCE(bonus,0) ELSE 0 END) AS annual_bonus,
                                 SUM(CASE WHEN COALESCE(bonus_tax_treatment, 'annual')='annual' THEN 0 ELSE COALESCE(bonus,0) END) AS current_period_bonus,
                                 SUM(paye) AS paye,
@@ -15455,7 +15603,7 @@ def _payroll_tax_certificate_ledger_summary(conn, company_id, emp_id, start_date
     gross = float(ledger['gross'] or 0)
     overtime = float(ledger['overtime'] or 0)
     travel = float(ledger['travel'] or 0)
-    annual_bonus = float(ledger['annual_bonus'] or 0)
+    annual_bonus = float(ledger['annual_bonus'] or 0) + float(ledger['leave_payout'] or 0)
     current_period_bonus = float(ledger['current_period_bonus'] or 0)
     paye = float(ledger['paye'] or 0)
     uif_combined = float(ledger['uif_employee'] or 0) * 2.0

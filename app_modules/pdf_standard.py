@@ -252,6 +252,7 @@ def build_payslip_pdf(payslip, employee, company, logo_path=None, leave_balances
         ('Overtime / Premium Pay','Earning',f('overtime')),
         ('Reimbursable Expenses (Non-taxable)','Earning',f('reimbursable_expenses')),
         ('Bonus','Earning',f('bonus')),
+        (f"Annual Leave Payout ({f('leave_payout_days'):g} days @ R {f('leave_payout_daily_rate'):.6f})",'Earning - 3605',f('leave_payout_amount')),
         ('Transport Reimbursement (Tax Free)','Earning',f('transport')),
         ('PAYE Tax','Deduction',f('paye')),
         ('UIF (Employee)','Deduction',f('uif', p.get('uif_emp',0))),
@@ -269,6 +270,11 @@ def build_payslip_pdf(payslip, employee, company, logo_path=None, leave_balances
     tbl = Table(body, colWidths=[93*mm, 48*mm, 32*mm], repeatRows=1)
     tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),BLUE),('TEXTCOLOR',(0,0),(-1,0),WHITE),('GRID',(0,0),(-1,-1),0.35,BORDER),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),('LINEABOVE',(0,-1),(-1,-1),0.9,DARK),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold')]))
     story += [tbl]
+    employment_note = p.get('salary_proration_note') or p.get('days_worked_display')
+    if employment_note:
+        story += [Spacer(1,3*mm), _paragraph(employment_note, st['small'])]
+    if f('leave_payout_amount') > 0:
+        story += [Spacer(1,3*mm), _paragraph('Annual leave settled through ' + str(p.get('leave_payout_date') or '') + '. Remaining annual leave is shown after this payout.', st['small'])]
     if p.get('adjustment_reason'):
         story += [Spacer(1,4*mm), _paragraph('Adjustment reason', st['section']), _paragraph(p.get('adjustment_reason'), st['body'])]
     if leave_balances:
