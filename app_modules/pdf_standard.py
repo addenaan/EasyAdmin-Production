@@ -228,61 +228,187 @@ def build_table_report_pdf(payload, logo_path=None):
 
 
 def build_payslip_pdf(payslip, employee, company, logo_path=None, leave_balances=None, draft=False):
+    """Render the PDF with the same information hierarchy as the browser preview."""
     p = payslip or {}
     e = employee or {}
     c = company or {}
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14*mm, rightMargin=14*mm, topMargin=12*mm, bottomMargin=14*mm, title='Payslip')
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=4*mm, rightMargin=4*mm,
+                            topMargin=5*mm, bottomMargin=8*mm, title='Payslip')
     st = _styles()
     title = 'DRAFT PAYSLIP' if draft else ('ADJUSTMENT PAYSLIP' if str(p.get('payslip_type') or '').lower()=='adjustment' else 'PAYSLIP')
-    story = [_company_header_story(c, logo_path, title, 'Payroll period: ' + str(p.get('date') or p.get('period') or '')[:7], None), Spacer(1,3*mm)]
-    emp_rows = [
-        [_paragraph('Employee', st['body_bold']), _paragraph(e.get('name') or p.get('name') or '', st['body'])],
-        [_paragraph('Employee No.', st['body_bold']), _paragraph(e.get('emp_number') or p.get('emp_num') or '', st['body'])],
-        [_paragraph('ID / Passport', st['body_bold']), _paragraph(e.get('id_passport') or p.get('id_num') or '', st['body'])],
+    page_width = A4[0] - doc.leftMargin - doc.rightMargin
+
+    title_style = ParagraphStyle('PayslipPreviewTitle', parent=st['title'], fontSize=17,
+                                 leading=20, alignment=TA_RIGHT,
+                                 textColor=RED if draft else GREEN, spaceAfter=3*mm)
+    company_style = ParagraphStyle('PayslipPreviewCompany', parent=st['company'],
+                                   fontSize=21, leading=24, spaceAfter=5*mm)
+    detail_style = ParagraphStyle('PayslipPreviewDetail', parent=st['body'],
+                                  fontSize=8.5, leading=11, alignment=TA_RIGHT)
+    small_company_style = ParagraphStyle('PayslipPreviewCompanySmall', parent=st['small'],
+                                         fontSize=10.5, leading=17, textColor=GREY)
+
+    logo = _logo_flowable(logo_path, max_w=34*mm, max_h=18*mm)
+    left_bits = []
+    if logo:
+        left_bits += [logo, Spacer(1, 2*mm)]
+    left_bits.append(_paragraph(c.get('name') or 'Company', company_style))
+    company_lines = [
+        ('Reg No: ' + str(c.get('registration_number'))) if c.get('registration_number') else '',
+        c.get('address') or '',
+        ('Email: ' + str(c.get('contact_email'))) if c.get('contact_email') else '',
+        ('Tel: ' + str(c.get('contact_number'))) if c.get('contact_number') else '',
     ]
-    info = Table(emp_rows, colWidths=[38*mm, 135*mm])
-    info.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),LIGHT),('GRID',(0,0),(-1,-1),0.35,BORDER),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
-    story += [info, Spacer(1,4*mm)]
+    left_bits.extend(_paragraph(value, small_company_style) for value in company_lines if value)
+    period = str(p.get('date') or p.get('period') or '')[:7]
+    employee_name = e.get('name') or p.get('name') or ''
+    employee_number = e.get('emp_number') or p.get('emp_num') or ''
+    identity_number = e.get('id_passport') or p.get('id_num') or ''
+    right_bits = [
+        _paragraph(title, title_style),
+        Paragraph('<b>Date:</b> ' + escape(str(period)), detail_style),
+        Paragraph('<b>Employee:</b> ' + escape(str(employee_name)) +
+                  (' (' + escape(str(employee_number)) + ')' if employee_number else ''), detail_style),
+        Paragraph('<b>ID:</b> ' + escape(str(identity_number)), detail_style),
+    ]
+    no_padding = [('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),0),
+                  ('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),
+                  ('BOTTOMPADDING',(0,0),(-1,-1),0)]
+    left = Table([[item] for item in left_bits], colWidths=[page_width*0.61], style=no_padding)
+    right = Table([[item] for item in right_bits], colWidths=[page_width*0.37], style=no_padding)
+    header = Table([[left, right]], colWidths=[page_width*0.62, page_width*0.38])
+    header.setStyle(TableStyle(no_padding + [('LINEBELOW',(0,0),(-1,-1),0.35,BORDER),
+                                             ('BOTTOMPADDING',(0,0),(-1,-1),8*mm)]))
+    story = [header, Spacer(1, 7*mm)]
 
     def f(key, fallback=0):
         return _as_number(p.get(key, fallback), fallback)
-    rows = [
-        ('Calculated Gross','Earning',f('gross_salary', p.get('gross',0))),
-        ('Overtime / Premium Pay','Earning',f('overtime')),
-        ('Reimbursable Expenses (Non-taxable)','Earning',f('reimbursable_expenses')),
-        ('Bonus','Earning',f('bonus')),
-        (f"Annual Leave Payout ({f('leave_payout_days'):g} days @ R {f('leave_payout_daily_rate'):.6f})",'Earning - 3605',f('leave_payout_amount')),
-        ('Transport Reimbursement (Tax Free)','Earning',f('transport')),
-        ('PAYE Tax','Deduction',f('paye')),
-        ('UIF (Employee)','Deduction',f('uif', p.get('uif_emp',0))),
-        ('Loan Repayment','Deduction',f('loan_repayment')),
-        ('UIF (Employer)','Employer Contribution',f('uif', p.get('uif_er',0))),
-        ('SDL (Employer)','Employer Contribution',f('sdl')),
+
+    def preview_money(value):
+        return f"R {_as_number(value):.2f}"
+
+    desc_width = page_width * 0.64
+    earning_width = page_width * 0.17
+    deduction_width = page_width - desc_width - earning_width
+    note_style = ParagraphStyle('PayslipPreviewNote', parent=st['small'], fontSize=7,
+                                leading=8.5, alignment=TA_LEFT, textColor=GREY)
+    code_style = ParagraphStyle('PayslipPreviewCode', parent=note_style,
+                                fontName='Helvetica-Oblique', alignment=TA_RIGHT)
+    employer_label_style = ParagraphStyle('PayslipPreviewEmployerLabel', parent=st['body'],
+                                          fontName='Helvetica-Oblique', textColor=GREY)
+    employer_amount_style = ParagraphStyle('PayslipPreviewEmployerAmount', parent=st['right'],
+                                           fontName='Helvetica-Oblique', textColor=GREY)
+
+    def description_cell(label, note='', code='', employer=False):
+        label_text = escape(str(label))
+        if note:
+            label_text += ' <font color="#6c757d" size="7"><i>' + escape(str(note)) + '</i></font>'
+        usable_width = desc_width - 10
+        parts = [[Paragraph(label_text, employer_label_style if employer else st['body']),
+                  _paragraph(code, code_style)]]
+        cell = Table(parts, colWidths=[usable_width*0.73, usable_width*0.27])
+        cell.setStyle(TableStyle(no_padding + [('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
+        return cell
+
+    rows = []
+    gross_note = p.get('salary_proration_note') or p.get('days_worked_display') or ''
+    rows.append((description_cell('Calculated Gross', gross_note, 'Code: 3601'), f('gross_salary', p.get('gross',0)), None, 'normal'))
+    rows.append((description_cell('Overtime / Premium Pay', p.get('sundays_display') or '', 'Code: 3607'), f('overtime'), None, 'normal'))
+    optional_earnings = [
+        ('Reimbursable Expenses (Non-taxable)', '', '', f('reimbursable_expenses')),
     ]
-    body = [[_paragraph('Description', st['body_bold']), _paragraph('Type', st['body_bold']), _paragraph('Amount', st['body_bold'])]]
-    for label, typ, val in rows:
-        if val == 0 and label not in ('Calculated Gross','PAYE Tax','UIF (Employee)','UIF (Employer)'):
-            continue
-        body.append([_paragraph(label, st['body']), _paragraph(typ, st['small']), _paragraph(_money_text(val), st['right'])])
-    net_val = p.get('net') if p.get('net') not in (None,'') else p.get('net_salary')
-    body.append([_paragraph('NET PAY', st['body_bold']), '', _paragraph(_money_text(net_val), st['right'])])
-    tbl = Table(body, colWidths=[93*mm, 48*mm, 32*mm], repeatRows=1)
-    tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),BLUE),('TEXTCOLOR',(0,0),(-1,0),WHITE),('GRID',(0,0),(-1,-1),0.35,BORDER),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),('LINEABOVE',(0,-1),(-1,-1),0.9,DARK),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold')]))
-    story += [tbl]
-    employment_note = p.get('salary_proration_note') or p.get('days_worked_display')
-    if employment_note:
-        story += [Spacer(1,3*mm), _paragraph(employment_note, st['small'])]
-    if f('leave_payout_amount') > 0:
-        story += [Spacer(1,3*mm), _paragraph('Annual leave settled through ' + str(p.get('leave_payout_date') or '') + '. Remaining annual leave is shown after this payout.', st['small'])]
-    if p.get('adjustment_reason'):
-        story += [Spacer(1,4*mm), _paragraph('Adjustment reason', st['section']), _paragraph(p.get('adjustment_reason'), st['body'])]
+    bonus = f('bonus')
+    if bonus > 0:
+        treatment = str(p.get('bonus_tax_treatment_code') or p.get('bonus_tax_treatment') or 'annual').lower()
+        annual = 'annual' in treatment
+        optional_earnings.append(('Bonus', '(Annual / Once-off)' if annual else '(Current-period / Production)',
+                                  'Code: 3605' if annual else 'Included in Code: 3601', bonus))
+    leave_payout = f('leave_payout_amount')
+    if leave_payout > 0:
+        leave_detail = (f"{f('leave_payout_days'):.2f} days @ R {f('leave_payout_daily_rate'):.6f} "
+                        f"through {p.get('leave_payout_date') or ''}; balance after payout: "
+                        f"{f('annual_leave_balance_after'):.2f} days")
+        optional_earnings.append(('Annual Leave Payout', leave_detail, 'Code: 3605', leave_payout))
+    optional_earnings.append(('Transport Reimbursement (Tax Free)', '', 'Code: 3702', f('transport')))
+    for label, note, code, amount in optional_earnings:
+        if amount > 0:
+            rows.append((description_cell(label, note, code), amount, None, 'normal'))
+    rows.extend([
+        (description_cell('PAYE Tax', '', 'Code: 4102'), None, f('paye'), 'normal'),
+        (description_cell('UIF (Employee 1%)', '', 'Code: 4141'), None, f('uif', p.get('uif_emp',0)), 'normal'),
+    ])
+    if f('loan_repayment') > 0:
+        rows.append((description_cell('Loan Repayment'), None, f('loan_repayment'), 'normal'))
+    rows.append((description_cell('UIF (Employer 1%)', employer=True), f('uif', p.get('uif_er',0)), None, 'employer'))
+    if f('sdl') > 0 or p.get('sdl_applicable') in (True, 1, '1'):
+        rows.append((description_cell('SDL (Employer 1%)', '', 'Code: 4142', employer=True), f('sdl'), None, 'employer'))
+
+    body = [[_paragraph('Description', st['body_bold']), _paragraph('Earnings', st['right']),
+             _paragraph('Deductions', st['right'])]]
+    for description, earning, deduction, kind in rows:
+        amount_style = employer_amount_style if kind == 'employer' else st['right']
+        body.append([description,
+                     _paragraph(preview_money(earning), amount_style) if earning is not None else '',
+                     _paragraph(preview_money(deduction), amount_style) if deduction is not None else ''])
+    net_value = p.get('net') if p.get('net') not in (None,'') else p.get('net_salary')
+    net_style = ParagraphStyle('PayslipPreviewNet', parent=st['right'], fontName='Helvetica-Bold',
+                               fontSize=10.5, leading=12, textColor=GREEN)
+    body.append([_paragraph('NET PAY', st['body_bold']), _paragraph(preview_money(net_value), net_style), ''])
+    table = Table(body, colWidths=[desc_width, earning_width, deduction_width], repeatRows=1)
+    commands = [
+        ('BACKGROUND',(0,0),(-1,0),LIGHT), ('GRID',(0,0),(-1,-2),0.35,BORDER),
+        ('BOX',(0,0),(-1,-1),0.5,BORDER), ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+        ('LEFTPADDING',(0,0),(-1,-1),5), ('RIGHTPADDING',(0,0),(-1,-1),5),
+        ('TOPPADDING',(0,0),(-1,-2),11.4), ('BOTTOMPADDING',(0,0),(-1,-2),11.4),
+        ('SPAN',(1,-1),(2,-1)), ('ALIGN',(1,-1),(2,-1),'RIGHT'),
+        ('LINEABOVE',(0,-1),(-1,-1),0.75,DARK), ('TOPPADDING',(0,-1),(-1,-1),6),
+        ('BOTTOMPADDING',(0,-1),(-1,-1),6), ('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold'),
+    ]
+    for index, row in enumerate(rows, start=1):
+        if row[3] == 'employer':
+            commands += [('TEXTCOLOR',(0,index),(-1,index),GREY), ('FONTNAME',(0,index),(-1,index),'Helvetica-Oblique')]
+    table.setStyle(TableStyle(commands))
+    story.append(table)
+
+    def balance_text(value):
+        text = str(value if value not in (None, '') else 'N/A').strip()
+        if text.upper() == 'N/A':
+            return 'N/A'
+        text = re.sub(r'\s+Days(?:\s+left.*)?$', '', text, flags=re.IGNORECASE)
+        try:
+            text = f"{float(text):g}"
+        except (TypeError, ValueError):
+            pass
+        return text
+
     if leave_balances:
-        story += [Spacer(1,5*mm), _paragraph('Statutory Leave Balances', st['section'])]
-        leave_data = [[_paragraph('Annual Leave', st['body']), _paragraph(str(leave_balances.get('annual','N/A')), st['right'])],[_paragraph('Sick Leave',st['body']),_paragraph(str(leave_balances.get('sick','N/A')),st['right'])],[_paragraph('Family Responsibility Leave',st['body']),_paragraph(str(leave_balances.get('family','N/A')),st['right'])]]
-        leave_tbl = Table(leave_data, colWidths=[125*mm,48*mm])
-        leave_tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),LIGHT),('GRID',(0,0),(-1,-1),0.35,BORDER),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]))
-        story.append(leave_tbl)
+        leave_title = ParagraphStyle('PayslipPreviewLeaveTitle', parent=st['body'], fontSize=8,
+                                     leading=10, textColor=BLUE, spaceAfter=2*mm)
+        leave_body = ParagraphStyle('PayslipPreviewLeaveBody', parent=st['body'], fontSize=8.5, leading=14)
+        annual = balance_text(leave_balances.get('annual'))
+        sick = balance_text(leave_balances.get('sick'))
+        family = balance_text(leave_balances.get('family'))
+        annual_suffix = '' if annual == 'N/A' else ' Days'
+        sick_suffix = '' if sick == 'N/A' else ' Days left in 36-month cycle'
+        family_suffix = '' if family == 'N/A' else ' Days left in annual cycle'
+        leave_items = [
+            _paragraph('Statutory Leave Balances', leave_title),
+            Table([['']], colWidths=[page_width-10*mm], rowHeights=[0.1],
+                  style=[('LINEABOVE',(0,0),(-1,-1),0.35,BORDER),('LEFTPADDING',(0,0),(-1,-1),0),
+                         ('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)]),
+            Paragraph('Annual Leave Balance: <b>' + escape(annual) + '</b>' + annual_suffix, leave_body),
+            Paragraph('Sick Leave Balance: <b>' + escape(sick) + '</b>' + sick_suffix, leave_body),
+            Paragraph('Family Responsibility Leave: <b>' + escape(family) + '</b>' + family_suffix, leave_body),
+        ]
+        leave_inner = Table([[item] for item in leave_items], colWidths=[page_width-13*mm], style=no_padding)
+        leave_box = Table([[leave_inner]], colWidths=[page_width], cornerRadii=[4,4,4,4])
+        leave_box.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),LIGHT), ('BOX',(0,0),(-1,-1),0.4,BORDER),
+                                       ('LEFTPADDING',(0,0),(-1,-1),4.5*mm), ('RIGHTPADDING',(0,0),(-1,-1),4.5*mm),
+                                       ('TOPPADDING',(0,0),(-1,-1),4.5*mm), ('BOTTOMPADDING',(0,0),(-1,-1),7.5*mm)]))
+        story += [Spacer(1, 7.5*mm), leave_box]
+
+    # Adjustment reasons are internal audit data and must never appear on a payslip.
     doc.build(story)
     return validate_pdf_bytes(buf.getvalue())
 

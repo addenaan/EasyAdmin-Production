@@ -13877,8 +13877,8 @@ def _build_admin_payslip_pdf_from_payload(data):
         pass
     balances = {
         'annual': p.get('leave') if p.get('leave') is not None else 'N/A',
-        'sick': p.get('sick_leave') or 'N/A',
-        'family': p.get('family_leave') or 'N/A',
+        'sick': p.get('sick_leave') if p.get('sick_leave') not in (None, '') else 'N/A',
+        'family': p.get('family_leave') if p.get('family_leave') not in (None, '') else 'N/A',
     }
     logo_path = None
     if company.get('logo_file'):
