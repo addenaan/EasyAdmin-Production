@@ -3570,7 +3570,7 @@ def calculate_public_holiday_premium(daily_rate, is_daily_rate, ordinary_days_wo
     return (rate * ordinary_days) + (rate * 2.0 * nonordinary_days)
 
 
-def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_dates):
+def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_dates, deduplicate_workdays=False):
     """Classify booked work for payroll premiums and BCEA hour warnings.
 
     Sunday work, public-holiday work and other work outside the employee's
@@ -3578,6 +3578,12 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
     attract their own pay/agreement rules, but are not automatically counted
     against the BCEA 10-hour weekly overtime limit.  Only overtime explicitly
     captured on a booking is included in ``overtime_hours``.
+
+    Booking & Ops summaries set ``deduplicate_workdays`` so an employee's
+    configured daily hours are counted once when the employee serves multiple
+    bookings on the same calendar date. Payroll callers keep their existing
+    per-booking premium treatment. Explicit overtime is always summed per
+    booking because it is captured separately from profile workday hours.
     """
     rules = get_contract_day_rules(emp_type)
     public_holiday_dates = set(public_holiday_dates or [])
@@ -3589,6 +3595,7 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
     public_holiday_ordinary_days = 0
     public_holiday_nonordinary_days = 0
     explicit_overtime_hours = 0.0
+    counted_work_dates = set()
 
     for b in bookings:
         if b['start']:
@@ -3600,30 +3607,34 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
             is_saturday = weekday == 5
             is_ordinary_schedule_day = weekday in rules['ordinary_weekdays']
 
-            # Compliance hours follow the employee's ordinary work pattern. A public
-            # holiday that falls on an ordinary workday remains part of the ordinary
-            # work pattern for weekly-hours purposes, while its premium/pay treatment
-            # is tracked independently below. Likewise, an ordinary Sunday for a true
-            # shift worker is counted as ordinary hours and separately flagged for the
-            # applicable Sunday premium.
-            if is_ordinary_schedule_day:
-                ordinary_days += 1
-            else:
-                nonordinary_days += 1
+            count_work_date = not deduplicate_workdays or b_date_str not in counted_work_dates
+            if count_work_date:
+                counted_work_dates.add(b_date_str)
 
-            # Premium categories are deliberately separate from the overtime bucket.
-            # Public holidays override Sunday/Saturday premium classification so the
-            # same booking is not paid twice as two different premium day types.
-            if is_holiday:
-                public_holiday_days += 1
+                # Compliance hours follow the employee's ordinary work pattern. A public
+                # holiday that falls on an ordinary workday remains part of the ordinary
+                # work pattern for weekly-hours purposes, while its premium/pay treatment
+                # is tracked independently below. Likewise, an ordinary Sunday for a true
+                # shift worker is counted as ordinary hours and separately flagged for the
+                # applicable Sunday premium.
                 if is_ordinary_schedule_day:
-                    public_holiday_ordinary_days += 1
+                    ordinary_days += 1
                 else:
-                    public_holiday_nonordinary_days += 1
-            elif is_sunday and rules['sunday_multiplier'] > 1.0:
-                sunday_premium_days += 1
-            elif is_saturday and rules['saturday_multiplier'] > 1.0:
-                saturday_nonordinary_days += 1
+                    nonordinary_days += 1
+
+                # Premium categories are deliberately separate from the overtime bucket.
+                # Public holidays override Sunday/Saturday premium classification so the
+                # same work date is not classified as two different premium day types.
+                if is_holiday:
+                    public_holiday_days += 1
+                    if is_ordinary_schedule_day:
+                        public_holiday_ordinary_days += 1
+                    else:
+                        public_holiday_nonordinary_days += 1
+                elif is_sunday and rules['sunday_multiplier'] > 1.0:
+                    sunday_premium_days += 1
+                elif is_saturday and rules['saturday_multiplier'] > 1.0:
+                    saturday_nonordinary_days += 1
 
         try:
             explicit_overtime_hours += max(0.0, float(b['overtime_hours'] or 0.0))
@@ -3948,10 +3959,21 @@ def fetch_employee_bookings_between(conn, company_id, employee_name, start_date,
             bookings.append(row)
     return bookings
 
-def analyse_employee_hours_for_period(conn, company_id, employee, start_date, end_date, proposed_date=None, proposed_overtime=0, exclude_booking_id=None, include_proposed=False):
+def analyse_employee_hours_for_period(conn, company_id, employee, start_date, end_date, proposed_date=None, proposed_overtime=0, exclude_booking_id=None, include_proposed=False, deduplicate_workdays=False, exclude_cancelled=False):
     emp_name = employee['name']
     workday_hours = get_employee_workday_hours(employee)
     bookings = fetch_employee_bookings_between(conn, company_id, emp_name, start_date, end_date, exclude_booking_id)
+
+    if exclude_cancelled:
+        active_bookings = []
+        for booking in bookings:
+            try:
+                mobile_status = str(dict(booking).get('mobile_status') or 'Scheduled').strip().lower()
+            except Exception:
+                mobile_status = 'scheduled'
+            if mobile_status not in {'cancelled', 'canceled'}:
+                active_bookings.append(booking)
+        bookings = active_bookings
 
     proposed_date_only = as_date(proposed_date) if proposed_date else None
     if include_proposed and proposed_date_only and start_date.date() <= proposed_date_only <= end_date.date():
@@ -3962,7 +3984,10 @@ def analyse_employee_hours_for_period(conn, company_id, employee, start_date, en
         })
 
     public_holidays = get_public_holiday_dates_between(conn, start_date, end_date)
-    hours = analyse_booking_hours(bookings, employee['emp_type'], workday_hours, public_holidays)
+    hours = analyse_booking_hours(
+        bookings, employee['emp_type'], workday_hours, public_holidays,
+        deduplicate_workdays=deduplicate_workdays
+    )
     warning = get_bcea_hours_warning(
         hours['ordinary_hours'], hours['overtime_hours'], employee['emp_type'],
         total_hours=hours['total_hours'],
@@ -3987,12 +4012,15 @@ def is_employee_booked_on_date(conn, company_id, employee_name, target_date, exc
     target_name = (employee_name or '').strip().lower()
     if not target_name:
         return False
-    rows = conn.execute('''SELECT id, employee FROM bookings
+    rows = conn.execute('''SELECT id, employee, mobile_status FROM bookings
                            WHERE company_id=? AND substr(start, 1, 10)=?''',
                         (company_id, target_date_str)).fetchall()
     exclude_id = str(exclude_booking_id or '').strip()
     for row in rows:
         if exclude_id and str(row['id']) == exclude_id:
+            continue
+        mobile_status = str(row['mobile_status'] or 'Scheduled').strip().lower()
+        if mobile_status in {'cancelled', 'canceled'}:
             continue
         names = [n.strip().lower() for n in (row['employee'] or '').split(',') if n.strip()]
         if target_name in names:
@@ -4005,11 +4033,15 @@ def get_booking_staff_hours_summary(conn, company_id, employee, target_date, pro
     month_start, month_end = get_month_bounds(target_date_only)
 
     week_hours, week_warning = analyse_employee_hours_for_period(
-        conn, company_id, employee, week_start, week_end, target_date_only, proposed_overtime, exclude_booking_id, include_proposed
+        conn, company_id, employee, week_start, week_end, target_date_only,
+        proposed_overtime, exclude_booking_id, include_proposed,
+        deduplicate_workdays=True, exclude_cancelled=True
     )
 
     month_hours, _month_warning = analyse_employee_hours_for_period(
-        conn, company_id, employee, month_start, month_end, target_date_only, proposed_overtime, exclude_booking_id, include_proposed
+        conn, company_id, employee, month_start, month_end, target_date_only,
+        proposed_overtime, exclude_booking_id, include_proposed,
+        deduplicate_workdays=True, exclude_cancelled=True
     )
 
     # The month colour reflects the worst weekly BCEA status in the payroll month, because BCEA limits are weekly.
@@ -4020,7 +4052,9 @@ def get_booking_staff_hours_summary(conn, company_id, employee, target_date, pro
         proposed_for_this_week = target_date_only if current_week_start.date() <= target_date_only <= current_week_end.date() else None
         _, week_check = analyse_employee_hours_for_period(
             conn, company_id, employee, current_week_start, current_week_end,
-            proposed_for_this_week, proposed_overtime if proposed_for_this_week else 0, exclude_booking_id, include_proposed
+            proposed_for_this_week, proposed_overtime if proposed_for_this_week else 0,
+            exclude_booking_id, include_proposed,
+            deduplicate_workdays=True, exclude_cancelled=True
         )
         if week_check['status'] == 'red':
             worst_status = 'red'
