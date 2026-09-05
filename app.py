@@ -20,7 +20,7 @@ import html
 from urllib.parse import quote, unquote
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 import smtplib
 from email.message import EmailMessage
@@ -32,6 +32,7 @@ from app_modules.pagination import get_page_args, like_filter, pagination_meta
 from app_modules.jobs import job_manager
 from app_modules.db_compat import connect_database, is_postgres_enabled, table_exists as compat_table_exists, table_columns as compat_table_columns
 from app_modules.pdf_standard import validate_pdf_bytes as _standard_validate_pdf_bytes, build_table_report_pdf as _standard_table_pdf, build_payslip_pdf as _standard_payslip_pdf, build_irp5_pdf as _standard_irp5_pdf
+from app_modules import cashbook_ai
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -1829,6 +1830,31 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE companies ADD COLUMN sdl_applicable INTEGER DEFAULT 0')
     except sqlite3.OperationalError: pass
+    try: conn.execute('ALTER TABLE companies ADD COLUMN cashbook_ai_enabled INTEGER DEFAULT 0')
+    except Exception: pass
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS system_ai_settings (
+        provider TEXT PRIMARY KEY,
+        enabled INTEGER DEFAULT 0,
+        project_label TEXT DEFAULT 'Easy Admin Production',
+        project_id TEXT,
+        service_account_label TEXT DEFAULT 'easyadmin-production',
+        model TEXT DEFAULT 'gpt-5.4-mini',
+        last_tested_at TEXT,
+        last_test_status TEXT,
+        last_test_message TEXT,
+        updated_by TEXT,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""INSERT OR IGNORE INTO system_ai_settings
+                    (provider, enabled, project_label, service_account_label, model)
+                    VALUES ('openai', 0, 'Easy Admin Production', 'easyadmin-production', 'gpt-5.4-mini')""")
+    for sql in [
+        'ALTER TABLE system_ai_settings ADD COLUMN project_id TEXT',
+        "ALTER TABLE system_ai_settings ADD COLUMN service_account_label TEXT DEFAULT 'easyadmin-production'"
+    ]:
+        try: conn.execute(sql)
+        except Exception: pass
 
     conn.execute("""CREATE TABLE IF NOT EXISTS industry_template_uploads (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2361,7 +2387,34 @@ def init_db():
         notes TEXT,
         cash_flow_section TEXT DEFAULT 'operating',
         status TEXT DEFAULT 'draft',
-        linked_journal_id INTEGER
+        linked_journal_id INTEGER,
+        ai_suggested_account_id INTEGER,
+        ai_confidence REAL,
+        ai_reason TEXT,
+        ai_model TEXT,
+        ai_suggested_at TEXT,
+        ai_run_id INTEGER,
+        ai_review_status TEXT,
+        ai_reviewed_by TEXT,
+        ai_reviewed_at TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS accounting_ai_allocation_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        batch_id INTEGER NOT NULL,
+        requested_by TEXT,
+        status TEXT DEFAULT 'running',
+        model TEXT,
+        response_id TEXT,
+        line_count INTEGER DEFAULT 0,
+        allocated_count INTEGER DEFAULT 0,
+        skipped_count INTEGER DEFAULT 0,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0,
+        total_tokens INTEGER DEFAULT 0,
+        error_message TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        completed_at TEXT
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS accounting_transaction_files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2408,6 +2461,19 @@ def init_db():
     except Exception: pass
     try: conn.execute("ALTER TABLE accounting_cashbook_lines ADD COLUMN vat_amount REAL DEFAULT 0")
     except Exception: pass
+    for sql in [
+        'ALTER TABLE accounting_cashbook_lines ADD COLUMN ai_suggested_account_id INTEGER',
+        'ALTER TABLE accounting_cashbook_lines ADD COLUMN ai_confidence REAL',
+        'ALTER TABLE accounting_cashbook_lines ADD COLUMN ai_reason TEXT',
+        'ALTER TABLE accounting_cashbook_lines ADD COLUMN ai_model TEXT',
+        'ALTER TABLE accounting_cashbook_lines ADD COLUMN ai_suggested_at TEXT',
+        'ALTER TABLE accounting_cashbook_lines ADD COLUMN ai_run_id INTEGER',
+        'ALTER TABLE accounting_cashbook_lines ADD COLUMN ai_review_status TEXT',
+        'ALTER TABLE accounting_cashbook_lines ADD COLUMN ai_reviewed_by TEXT',
+        'ALTER TABLE accounting_cashbook_lines ADD COLUMN ai_reviewed_at TEXT'
+    ]:
+        try: conn.execute(sql)
+        except Exception: pass
 
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_accounting_accounts_company ON accounting_accounts(company_id, account_code)')
     except sqlite3.OperationalError: pass
@@ -2419,6 +2485,8 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_accounting_cashbook_lines_batch ON accounting_cashbook_lines(company_id, batch_id, status)')
     except sqlite3.OperationalError: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_accounting_ai_runs_company_batch ON accounting_ai_allocation_runs(company_id, batch_id, created_at)')
+    except Exception: pass
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_accounting_transaction_files_link ON accounting_transaction_files(company_id, linked_type, linked_id)')
     except sqlite3.OperationalError: pass
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_accounting_bank_reconciliations_company ON accounting_bank_reconciliations(company_id, bank_account_id, recon_date)')
@@ -4745,6 +4813,8 @@ RATE_LIMIT_RULES = {
     'export_franchise_reports_csv': (60, 300),
     'admin_franchise_groups_save': (20, 300),
     'admin_franchise_groups_delete': (10, 300),
+    'admin_ai_config_test': (10, 300),
+    'accounting_cashbook_ai_allocate': (5, 300),
 }
 RATE_LIMIT_PATH_PREFIXES = [
     ('/api/attachments/upload', 30, 300),
@@ -5048,7 +5118,7 @@ def restrict_access():
     if path.startswith('/admin/'):
         if not session.get('is_company_admin'):
             return "Access Denied: Admin privileges required.", 403
-        if path in ['/admin/companies', '/admin/companies/save', '/admin/switch_company', '/admin/tax_config', '/admin/holidays']:
+        if path in ['/admin/companies', '/admin/companies/save', '/admin/switch_company', '/admin/tax_config', '/admin/holidays'] or path.startswith('/admin/ai-config'):
             return "Access Denied: Superadmin privileges required.", 403
         return 
 
@@ -10019,6 +10089,138 @@ def get_audit_logs():
         'page_size': limit
     })
 
+def _system_ai_settings(conn):
+    row = conn.execute("SELECT * FROM system_ai_settings WHERE provider='openai'").fetchone()
+    if not row:
+        conn.execute("""INSERT INTO system_ai_settings
+                        (provider, enabled, project_label, service_account_label, model)
+                        VALUES ('openai', 0, 'Easy Admin Production', 'easyadmin-production', ?)""",
+                     (cashbook_ai.DEFAULT_MODEL,))
+        conn.commit()
+        row = conn.execute("SELECT * FROM system_ai_settings WHERE provider='openai'").fetchone()
+    data = dict(row) if row else {}
+    try:
+        model = cashbook_ai.configured_model(data.get('model'))
+    except cashbook_ai.CashbookAIError:
+        model = cashbook_ai.DEFAULT_MODEL
+    return {
+        'provider': 'openai',
+        'enabled': bool(data.get('enabled')),
+        'project_label': data.get('project_label') or 'Easy Admin Production',
+        'project_id': data.get('project_id') or '',
+        'service_account_label': data.get('service_account_label') or 'easyadmin-production',
+        'model': model,
+        'configured': cashbook_ai.is_configured(),
+        'key_fingerprint': cashbook_ai.key_fingerprint(),
+        'last_tested_at': data.get('last_tested_at'),
+        'last_test_status': data.get('last_test_status') or 'not_tested',
+        'last_test_message': data.get('last_test_message') or '',
+        'updated_by': data.get('updated_by') or '',
+        'updated_at': data.get('updated_at'),
+    }
+
+
+def _cashbook_ai_company_status(conn, company_id):
+    settings = _system_ai_settings(conn)
+    company = conn.execute('SELECT cashbook_ai_enabled, can_accounting FROM companies WHERE id=?', (company_id,)).fetchone()
+    company_data = dict(company) if company else {}
+    tenant_enabled = bool(company_data.get('cashbook_ai_enabled')) and bool(company_data.get('can_accounting'))
+    settings['tenant_enabled'] = tenant_enabled
+    settings['available'] = bool(tenant_enabled and settings['enabled'] and settings['configured'])
+    if not tenant_enabled:
+        settings['availability_message'] = 'AI cash-book allocation is not enabled for this company.'
+    elif not settings['enabled']:
+        settings['availability_message'] = 'AI cash-book allocation is disabled globally by the Super Admin.'
+    elif not settings['configured']:
+        settings['availability_message'] = 'The Easy Admin OpenAI service account is not configured on the server.'
+    else:
+        settings['availability_message'] = 'AI suggestions are available. Suggestions are saved as drafts and require review.'
+    return settings
+
+
+@app.route('/admin/ai-config', methods=['GET', 'POST'])
+def admin_ai_config():
+    if not session.get('is_superadmin'):
+        return "Forbidden", 403
+    conn = get_db_connection()
+    try:
+        if request.method == 'GET':
+            return jsonify({'status': 'success', 'configuration': _system_ai_settings(conn)})
+
+        data = request.get_json(silent=True) or {}
+        enabled = 1 if data.get('enabled') else 0
+        project_label = ' '.join(str(data.get('project_label') or 'Easy Admin Production').split())[:120]
+        project_id = str(data.get('project_id') or '').strip()[:120]
+        service_account_label = ' '.join(str(data.get('service_account_label') or 'easyadmin-production').split())[:120]
+        try:
+            model = cashbook_ai.configured_model(data.get('model'))
+        except cashbook_ai.CashbookAIError as exc:
+            return jsonify({'status': 'error', 'message': str(exc)}), 400
+        if project_id and not re.fullmatch(r'[A-Za-z0-9._:-]+', project_id):
+            return jsonify({'status': 'error', 'message': 'The OpenAI project ID contains invalid characters.'}), 400
+        if enabled and not cashbook_ai.is_configured():
+            return jsonify({
+                'status': 'error',
+                'message': 'Set OPENAI_API_KEY in the server environment before enabling the Easy Admin AI account.'
+            }), 400
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute("""UPDATE system_ai_settings
+                        SET enabled=?, project_label=?, project_id=?, service_account_label=?, model=?, updated_by=?, updated_at=?
+                        WHERE provider='openai'""",
+                     (enabled, project_label, project_id, service_account_label, model, session.get('username'), now))
+        conn.commit()
+        result = _system_ai_settings(conn)
+    finally:
+        conn.close()
+    log_action(
+        'System Admin',
+        'Updated AI Configuration',
+        f"OpenAI project {project_label}; model {model}; globally enabled: {bool(enabled)}.",
+        record_type='system_ai_settings',
+        record_id=None,
+    )
+    return jsonify({'status': 'success', 'configuration': result, 'message': 'AI configuration saved.'})
+
+
+@app.route('/admin/ai-config/test', methods=['POST'])
+def admin_ai_config_test():
+    if not session.get('is_superadmin'):
+        return "Forbidden", 403
+    conn = get_db_connection()
+    try:
+        settings = _system_ai_settings(conn)
+    finally:
+        conn.close()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        tested = cashbook_ai.test_model_access(settings.get('model'))
+        test_status = 'success'
+        test_message = f"Connected to OpenAI and confirmed access to {tested['model']}."
+        http_status = 200
+    except cashbook_ai.CashbookAIError as exc:
+        test_status = 'failed'
+        test_message = str(exc)
+        http_status = 400
+    conn = get_db_connection()
+    try:
+        conn.execute("""UPDATE system_ai_settings
+                        SET last_tested_at=?, last_test_status=?, last_test_message=?, updated_by=?, updated_at=?
+                        WHERE provider='openai'""",
+                     (now, test_status, test_message, session.get('username'), now))
+        conn.commit()
+        result = _system_ai_settings(conn)
+    finally:
+        conn.close()
+    log_action(
+        'System Admin',
+        'Tested AI Connection',
+        f"OpenAI model {settings.get('model')}; result: {test_status}.",
+        result=test_status,
+        record_type='system_ai_settings',
+    )
+    return jsonify({'status': test_status, 'configuration': result, 'message': test_message}), http_status
+
+
 @app.route('/admin/switch_company', methods=['POST'])
 def switch_company():
     if not session.get('is_superadmin'): return "Forbidden", 403
@@ -10074,6 +10276,7 @@ def save_company():
     c_ci = 1 if request.form.get('can_invoicing') == 'true' else 0
     c_ca = 1 if request.form.get('can_accounting') == 'true' else 0
     c_cfr = 1 if request.form.get('can_franchise_reports') == 'true' else 0
+    c_cashbook_ai = 1 if c_ca and request.form.get('cashbook_ai_enabled') == 'true' else 0
     c_gcal = 1 if request.form.get('google_calendar_sync') == 'true' else 0
     c_sdl = 1 if request.form.get('sdl_applicable') == 'true' else 0
     website_integration_field_present = 'website_integration_enabled' in request.form
@@ -10112,11 +10315,11 @@ def save_company():
     try:
         if c_id:
             if filename:
-                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, sdl_applicable=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, cashbook_ai_enabled=?, google_calendar_sync=?, sdl_applicable=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_cashbook_ai, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
             else:
-                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, google_calendar_sync=?, sdl_applicable=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, cashbook_ai_enabled=?, google_calendar_sync=?, sdl_applicable=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_cashbook_ai, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
         else:
-            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports, google_calendar_sync, sdl_applicable, address, contact_email, contact_number, registration_number, vat_number, industry_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry))
+            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports, cashbook_ai_enabled, google_calendar_sync, sdl_applicable, address, contact_email, contact_number, registration_number, vat_number, industry_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_cashbook_ai, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry))
             target_company_id = getattr(cur, 'lastrowid', None)
             if not target_company_id:
                 row = conn.execute('SELECT id FROM companies WHERE name=? ORDER BY id DESC LIMIT 1', (c_name,)).fetchone()
@@ -10180,6 +10383,18 @@ def save_company():
         except Exception:
             pass
 
+    try:
+        log_action(
+            'System Admin',
+            'Updated Tenant AI Access',
+            f"Company: {c_name}; AI Cash Book Allocation: {'enabled' if c_cashbook_ai else 'disabled'}.",
+            record_type='company',
+            record_id=target_company_id,
+            company_id=target_company_id,
+        )
+    except Exception:
+        pass
+
     logo_file = dict(saved_company).get('logo_file') if saved_company else filename
     integration = ((website_result or {}).get('integration') if website_result else None)
     integration_summary = _website_integration_public_summary(integration)
@@ -10199,6 +10414,7 @@ def save_company():
         "logo_url": _safe_logo_url(logo_file) if logo_file else '',
         "website_integration": integration_summary,
         "website_integration_credentials": credentials,
+        "cashbook_ai_enabled": bool(c_cashbook_ai),
     })
 
 @app.route('/admin/companies/<int:company_id>/website-integration/rotate-secret', methods=['POST'])
@@ -18692,10 +18908,14 @@ def _cash_flow_data(conn, company_id, start_date, end_date):
 @app.route('/accounting')
 def accounting_index():
     conn = get_db_connection()
-    ensure_accounting_posting_defaults(conn, _current_company_id())
-    conn.commit()
-    conn.close()
-    return render_template('accounting_index.html', session=session)
+    try:
+        company_id = _current_company_id()
+        ensure_accounting_posting_defaults(conn, company_id)
+        conn.commit()
+        ai_status = _cashbook_ai_company_status(conn, company_id)
+    finally:
+        conn.close()
+    return render_template('accounting_index.html', session=session, cashbook_ai=ai_status)
 
 
 @app.route('/api/accounting/bootstrap', methods=['POST'])
@@ -19490,7 +19710,10 @@ def accounting_cashbook_save(batch_id):
             except Exception:
                 conn.close()
                 return jsonify({'status': 'error', 'message': f'Cash book line {idx} has an invalid line ID.'}), 400
-            line_row = conn.execute("SELECT id FROM accounting_cashbook_lines WHERE id=? AND batch_id=? AND company_id=? AND status!='posted'", (line_id, batch_id, cid)).fetchone()
+            line_row = conn.execute("""SELECT id, ai_suggested_account_id, ai_suggested_at
+                                       FROM accounting_cashbook_lines
+                                       WHERE id=? AND batch_id=? AND company_id=? AND status!='posted'""",
+                                    (line_id, batch_id, cid)).fetchone()
             if not line_row:
                 conn.close()
                 return jsonify({'status': 'error', 'message': f'Cash book line {idx} was not found or has already been posted.'}), 400
@@ -19498,6 +19721,18 @@ def accounting_cashbook_save(batch_id):
                             SET line_no=?, transaction_date=?, description=?, debit=?, credit=?, allocated_account_id=?, vat_amount=?, notes=?, cash_flow_section=?, status=CASE WHEN ? IS NULL THEN 'draft' ELSE 'allocated' END
                             WHERE id=? AND batch_id=? AND company_id=? AND status!='posted' ''',
                          (line_no, transaction_date, description, debit, credit, account_id, vat_amount, notes, cash_flow_section, account_id, line_id, batch_id, cid))
+            if dict(line_row).get('ai_suggested_at'):
+                suggested_id = dict(line_row).get('ai_suggested_account_id')
+                if account_id and suggested_id and int(account_id) == int(suggested_id):
+                    review_status = 'accepted'
+                elif account_id:
+                    review_status = 'changed'
+                else:
+                    review_status = 'cleared'
+                conn.execute('''UPDATE accounting_cashbook_lines
+                                SET ai_review_status=?, ai_reviewed_by=?, ai_reviewed_at=?
+                                WHERE id=? AND batch_id=? AND company_id=?''',
+                             (review_status, session.get('username'), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), line_id, batch_id, cid))
 
         if request.content_type and 'multipart/form-data' in request.content_type:
             upload = request.files.get(f'cashbook_file_{raw_line_id}')
@@ -19524,6 +19759,223 @@ def accounting_cashbook_save(batch_id):
     return jsonify(payload)
 
 
+def _cashbook_ai_history(conn, company_id, exclude_batch_id, limit=1500):
+    limit = max(1, min(int(limit or 1500), 3000))
+    return [dict(row) for row in conn.execute('''SELECT l.description, l.debit, l.credit, l.allocated_account_id,
+                                                        a.account_code, a.account_name
+                                                 FROM accounting_cashbook_lines l
+                                                 JOIN accounting_accounts a ON a.id=l.allocated_account_id AND a.company_id=l.company_id
+                                                 WHERE l.company_id=? AND l.batch_id<>? AND l.status='posted'
+                                                   AND l.allocated_account_id IS NOT NULL AND COALESCE(l.description, '')<>''
+                                                 ORDER BY l.transaction_date DESC, l.id DESC
+                                                 LIMIT ?''', (company_id, exclude_batch_id, limit)).fetchall()]
+
+
+@app.route('/api/accounting/cashbook/batches/<int:batch_id>/ai-allocate', methods=['POST'])
+def accounting_cashbook_ai_allocate(batch_id):
+    cid = _current_company_id()
+    conn = get_db_connection()
+    run_id = None
+    try:
+        feature = _cashbook_ai_company_status(conn, cid)
+        if not feature.get('tenant_enabled'):
+            return jsonify({'status': 'error', 'message': 'AI cash-book allocation is not enabled for this company.'}), 403
+        if not feature.get('enabled'):
+            return jsonify({'status': 'error', 'message': 'AI cash-book allocation is disabled globally by the Super Admin.'}), 403
+        if not feature.get('configured'):
+            return jsonify({'status': 'error', 'message': 'The Easy Admin OpenAI service account is not configured on the server.'}), 503
+
+        batch = conn.execute('SELECT * FROM accounting_cashbook_batches WHERE id=? AND company_id=?', (batch_id, cid)).fetchone()
+        if not batch:
+            return jsonify({'status': 'error', 'message': 'Cash book batch not found.'}), 404
+        batch_data = dict(batch)
+        if str(batch_data.get('status')) == 'posted':
+            return jsonify({'status': 'error', 'message': 'Posted cash book batches cannot be changed by AI.'}), 400
+
+        running = conn.execute("""SELECT created_at FROM accounting_ai_allocation_runs
+                                  WHERE company_id=? AND batch_id=? AND status='running'
+                                  ORDER BY id DESC LIMIT 1""", (cid, batch_id)).fetchone()
+        if running:
+            try:
+                running_at = datetime.fromisoformat(str(running['created_at']).replace('Z', '+00:00'))
+                if running_at.tzinfo is not None:
+                    running_at = running_at.astimezone(timezone.utc).replace(tzinfo=None)
+                if datetime.now(timezone.utc).replace(tzinfo=None) - running_at < timedelta(minutes=10):
+                    return jsonify({'status': 'error', 'message': 'An AI allocation review is already running for this cash book batch.'}), 409
+            except Exception:
+                pass
+
+        max_lines = cashbook_ai.max_lines_per_run()
+        transactions = [dict(row) for row in conn.execute('''SELECT id AS line_id, transaction_date, description, debit, credit
+                                                              FROM accounting_cashbook_lines
+                                                              WHERE company_id=? AND batch_id=? AND status!='posted'
+                                                                AND allocated_account_id IS NULL
+                                                              ORDER BY line_no, id LIMIT ?''',
+                                                           (cid, batch_id, max_lines)).fetchall()]
+        if not transactions:
+            return jsonify({'status': 'error', 'message': 'This batch has no unallocated draft lines for AI to review.'}), 400
+        accounts = [dict(row) for row in conn.execute('''SELECT id, account_code, account_name, account_type, report_section,
+                                                                cash_flow_category, is_cash_equivalent
+                                                         FROM accounting_accounts
+                                                         WHERE company_id=? AND active=1
+                                                         ORDER BY account_code, account_name''', (cid,)).fetchall()]
+        history = _cashbook_ai_history(conn, cid, batch_id)
+        cur = conn.execute('''INSERT INTO accounting_ai_allocation_runs
+                              (company_id, batch_id, requested_by, status, model, line_count)
+                              VALUES (?, ?, ?, 'running', ?, ?)''',
+                           (cid, batch_id, session.get('username'), feature.get('model'), len(transactions)))
+        run_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        ai_result = cashbook_ai.suggest_allocations(
+            model=feature.get('model'),
+            bank_account_id=int(batch_data['bank_account_id']),
+            accounts=accounts,
+            transactions=transactions,
+            history=history,
+        )
+    except cashbook_ai.CashbookAIError as exc:
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn = get_db_connection()
+        try:
+            if run_id:
+                conn.execute('''UPDATE accounting_ai_allocation_runs
+                                SET status='failed', error_message=?, completed_at=?
+                                WHERE id=? AND company_id=? AND batch_id=?''',
+                             (str(exc)[:500], now, run_id, cid, batch_id))
+                conn.commit()
+        finally:
+            conn.close()
+        log_action(
+            'Accounting',
+            'AI Cash Book Allocation Failed',
+            f'Batch {batch_id}; run {run_id}; {str(exc)[:300]}',
+            result='failure',
+            record_type='cashbook_batch',
+            record_id=batch_id,
+        )
+        return jsonify({'status': 'error', 'message': str(exc)}), 502
+
+    conn = get_db_connection()
+    try:
+        batch_now = conn.execute('SELECT status, bank_account_id FROM accounting_cashbook_batches WHERE id=? AND company_id=?', (batch_id, cid)).fetchone()
+        if not batch_now or str(batch_now['status']) == 'posted':
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute('''UPDATE accounting_ai_allocation_runs
+                            SET status='cancelled', error_message=?, completed_at=?
+                            WHERE id=? AND company_id=?''',
+                         ('Batch was posted or removed before suggestions could be saved.', now, run_id, cid))
+            conn.commit()
+            return jsonify({'status': 'error', 'message': 'The batch changed while AI was reviewing it. No AI suggestions were saved.'}), 409
+
+        active_accounts = {
+            int(row['id']): dict(row)
+            for row in conn.execute('''SELECT id, cash_flow_category FROM accounting_accounts
+                                       WHERE company_id=? AND active=1 AND id<>?''',
+                                    (cid, batch_now['bank_account_id'])).fetchall()
+        }
+        requested_lines = {int(item['line_id']): item for item in transactions}
+        requested_line_ids = set(requested_lines)
+        current_lines = {
+            int(row['id']): dict(row)
+            for row in conn.execute('''SELECT id, transaction_date, description, debit, credit,
+                                              allocated_account_id, status
+                                       FROM accounting_cashbook_lines
+                                       WHERE company_id=? AND batch_id=?''', (cid, batch_id)).fetchall()
+        }
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        allocated_count = 0
+        no_suggestion_count = 0
+        changed_during_review_count = 0
+        saved_count = 0
+        for suggestion in ai_result.get('allocations') or []:
+            line_id = int(suggestion.get('line_id') or 0)
+            line = current_lines.get(line_id)
+            if line_id not in requested_line_ids or not line or line.get('allocated_account_id') or line.get('status') == 'posted':
+                continue
+            requested_line = requested_lines[line_id]
+            line_changed = (
+                str(line.get('transaction_date') or '') != str(requested_line.get('transaction_date') or '')
+                or str(line.get('description') or '') != str(requested_line.get('description') or '')
+                or _money_float(line.get('debit')) != _money_float(requested_line.get('debit'))
+                or _money_float(line.get('credit')) != _money_float(requested_line.get('credit'))
+            )
+            if line_changed:
+                changed_during_review_count += 1
+                continue
+            account_id = suggestion.get('account_id')
+            account = active_accounts.get(int(account_id)) if account_id else None
+            confidence = float(suggestion.get('confidence') or 0)
+            reason = str(suggestion.get('reason') or '')[:300]
+            if account:
+                cash_flow_section = (account.get('cash_flow_category') or 'operating').strip()
+                if cash_flow_section not in ['operating', 'investing', 'financing', 'non_cash']:
+                    cash_flow_section = 'operating'
+                conn.execute('''UPDATE accounting_cashbook_lines
+                                SET allocated_account_id=?, cash_flow_section=?, status='allocated',
+                                    ai_suggested_account_id=?, ai_confidence=?, ai_reason=?, ai_model=?,
+                                    ai_suggested_at=?, ai_run_id=?, ai_review_status='pending',
+                                    ai_reviewed_by=NULL, ai_reviewed_at=NULL
+                                WHERE id=? AND company_id=? AND batch_id=? AND status!='posted'
+                                  AND allocated_account_id IS NULL''',
+                             (int(account_id), cash_flow_section, int(account_id), confidence, reason,
+                              ai_result.get('model'), now, run_id, line_id, cid, batch_id))
+                allocated_count += 1
+            else:
+                conn.execute('''UPDATE accounting_cashbook_lines
+                                SET ai_suggested_account_id=NULL, ai_confidence=?, ai_reason=?, ai_model=?,
+                                    ai_suggested_at=?, ai_run_id=?, ai_review_status='no_suggestion',
+                                    ai_reviewed_by=NULL, ai_reviewed_at=NULL
+                                WHERE id=? AND company_id=? AND batch_id=? AND status!='posted'
+                                  AND allocated_account_id IS NULL''',
+                             (confidence, reason, ai_result.get('model'), now, run_id, line_id, cid, batch_id))
+                no_suggestion_count += 1
+            saved_count += 1
+
+        remaining = conn.execute('''SELECT COUNT(*) FROM accounting_cashbook_lines
+                                    WHERE company_id=? AND batch_id=? AND status!='posted'
+                                      AND allocated_account_id IS NULL''', (cid, batch_id)).fetchone()[0]
+        usage = ai_result.get('usage') or {}
+        conn.execute('''UPDATE accounting_ai_allocation_runs
+                        SET status='completed', model=?, response_id=?, allocated_count=?, skipped_count=?,
+                            input_tokens=?, output_tokens=?, total_tokens=?, completed_at=?
+                        WHERE id=? AND company_id=? AND batch_id=?''',
+                     (ai_result.get('model'), ai_result.get('response_id'), allocated_count,
+                      no_suggestion_count + changed_during_review_count,
+                      int(usage.get('input_tokens') or 0), int(usage.get('output_tokens') or 0),
+                      int(usage.get('total_tokens') or 0), now, run_id, cid, batch_id))
+        conn.commit()
+        payload = _cashbook_batch_payload(conn, cid, batch_id)
+    finally:
+        conn.close()
+
+    log_action(
+        'Accounting',
+        'Generated AI Cash Book Allocations',
+        f'Batch {batch_id}; run {run_id}; reviewed {saved_count}; suggested {allocated_count}; no suggestion {no_suggestion_count}; changed during review {changed_during_review_count}; remaining {remaining}.',
+        record_type='cashbook_batch',
+        record_id=batch_id,
+    )
+    payload.update({
+        'status': 'success',
+        'message': f'AI reviewed {saved_count} line(s) and suggested {allocated_count} allocation(s). Review them and select Save Allocations before posting.',
+        'ai_summary': {
+            'run_id': run_id,
+            'processed_count': saved_count,
+            'allocated_count': allocated_count,
+            'no_suggestion_count': no_suggestion_count,
+            'changed_during_review_count': changed_during_review_count,
+            'remaining_unallocated_count': int(remaining or 0),
+            'model': ai_result.get('model'),
+            'requires_review': True,
+        },
+    })
+    return jsonify(payload)
+
+
 @app.route('/api/accounting/cashbook/batches/<int:batch_id>/post', methods=['POST'])
 def accounting_cashbook_post(batch_id):
     cid = _current_company_id()
@@ -19535,6 +19987,15 @@ def accounting_cashbook_post(batch_id):
     if str(batch['status']) == 'posted':
         conn.close()
         return jsonify({'status': 'error', 'message': 'Cash book batch already posted.'}), 400
+    pending_ai_reviews = conn.execute('''SELECT COUNT(*) FROM accounting_cashbook_lines
+                                         WHERE company_id=? AND batch_id=? AND status!='posted'
+                                           AND ai_review_status='pending' ''', (cid, batch_id)).fetchone()[0]
+    if pending_ai_reviews:
+        conn.close()
+        return jsonify({
+            'status': 'error',
+            'message': f'Review the {pending_ai_reviews} AI-suggested allocation(s) and select Save Allocations before posting.'
+        }), 400
     bank = conn.execute('SELECT * FROM accounting_accounts WHERE id=? AND company_id=? AND active=1 AND is_cash_equivalent=1', (batch['bank_account_id'], cid)).fetchone()
     if not bank:
         conn.close()

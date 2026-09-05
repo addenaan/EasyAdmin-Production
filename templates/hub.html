@@ -233,6 +233,9 @@
                 <div class="col-md-3 mt-2">
                     <button class="btn btn-outline-secondary w-100 fw-bold" onclick="window.location.href='/admin/file_browser'">📁 File Browser</button>
                 </div>
+                <div class="col-md-3 mt-2">
+                    <button class="btn btn-outline-info w-100 fw-bold" onclick="openAIConfigModal()">✨ AI Configuration</button>
+                </div>
             </div>
         </div>
         
@@ -618,6 +621,70 @@
     {% endif %}
 
     {% if session.get('is_superadmin') %}
+    <div class="modal fade" id="aiConfigModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">Easy Admin AI Configuration</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light">
+                    <div class="alert alert-info small">
+                        Easy Admin uses a dedicated OpenAI project service account. The API key is read from the protected server environment and is never stored or displayed here.
+                    </div>
+                    <div class="card border-0 shadow-sm mb-3">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+                                <div>
+                                    <div class="fw-bold">Connection Status</div>
+                                    <div id="aiConnectionMessage" class="small text-muted">Loading...</div>
+                                </div>
+                                <span id="aiConnectionBadge" class="badge bg-secondary">Not configured</span>
+                            </div>
+                            <div id="aiConnectionDetails" class="small text-muted mt-2"></div>
+                        </div>
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">OpenAI Project Name</label>
+                            <input id="aiProjectLabel" class="form-control" maxlength="120" placeholder="Easy Admin Production">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">OpenAI Project ID</label>
+                            <input id="aiProjectId" class="form-control font-monospace" maxlength="120" placeholder="proj_...">
+                            <div class="form-text">Non-secret reference used for administration and auditing.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">Service Account Name</label>
+                            <input id="aiServiceAccountLabel" class="form-control" maxlength="120" placeholder="easyadmin-production">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">OpenAI Model</label>
+                            <input id="aiModel" class="form-control font-monospace" maxlength="100" placeholder="gpt-5.4-mini">
+                        </div>
+                        <div class="col-12">
+                            <div class="form-check form-switch border rounded bg-white p-3 ps-5">
+                                <input class="form-check-input border-success" type="checkbox" id="aiGlobalEnabled">
+                                <label class="form-check-label fw-bold" for="aiGlobalEnabled">Enable Easy Admin AI globally</label>
+                                <div class="small text-muted">Individual tenants must also be enabled in Tenants → Edit Company. AI suggestions are drafts and never post cash-book entries.</div>
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <div class="alert alert-secondary small mb-0">
+                                <strong>Server secret required:</strong> <code>OPENAI_API_KEY</code>. Add the service-account key in the Render environment settings, then redeploy or restart the service.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="btn btn-outline-primary fw-bold" id="aiTestButton" onclick="testAIConnection()">Test Connection</button>
+                    <button type="button" class="btn btn-primary fw-bold" id="aiSaveButton" onclick="saveAIConfiguration()">Save Configuration</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="modal fade" id="companiesModal" tabindex="-1">
         <div class="modal-dialog modal-xl">
             <div class="modal-content">
@@ -738,7 +805,7 @@
                             <div class="form-check form-switch"><input class="form-check-input border-warning" type="checkbox" id="compAppFinance"><label class="form-check-label small fw-bold">Finance</label></div>
                         </div>
                         <div class="col-md-2 col-6">
-                            <div class="form-check form-switch"><input class="form-check-input border-dark" type="checkbox" id="compAppAccounting"><label class="form-check-label small fw-bold">Accounting</label></div>
+                            <div class="form-check form-switch"><input class="form-check-input border-dark" type="checkbox" id="compAppAccounting" onchange="syncCompanyAIAvailability()"><label class="form-check-label small fw-bold">Accounting</label></div>
                         </div>
                         <div class="col-md-2 col-6">
                             <div class="form-check form-switch"><input class="form-check-input border-success" type="checkbox" id="compAppPayroll"><label class="form-check-label small fw-bold">HR & Payroll</label></div>
@@ -749,6 +816,13 @@
                     </div>
                     
                     <h6 class="fw-bold text-dark border-bottom pb-2 mt-4">Integrations</h6>
+                    <div class="border rounded p-3 bg-light mb-3">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input border-info" type="checkbox" id="compCashbookAi">
+                            <label class="form-check-label fw-bold text-info" for="compCashbookAi">Enable AI Cash Book Allocation</label>
+                            <p id="compCashbookAiHelp" class="small text-muted mb-0">Allows this tenant to request reviewable AI account-allocation suggestions. Accounting access is required.</p>
+                        </div>
+                    </div>
                     <div class="form-check form-switch mb-3">
                         <input class="form-check-input border-dark" type="checkbox" id="compGoogleSync">
                         <label class="form-check-label fw-bold text-dark" for="compGoogleSync">Enable Google Calendar Sync</label>
@@ -1068,6 +1142,7 @@
             /^\/admin\/industry_templates\/upload$/,
             /^\/admin\/tenant_setup(?:\/|$)/,
             /^\/admin\/franchise_groups(?:\/|$)/,
+            /^\/admin\/ai-config(?:\/|$)/,
             /^\/admin\/(?:export|import)_full_database$/
         ];
 
@@ -1482,6 +1557,108 @@
             adminFetch('/admin/holidays/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({year: year}) }).then(() => loadHolidays());
         }
 
+        // --- EASY ADMIN AI CONFIGURATION ---
+        const aiConfigModal = new bootstrap.Modal(document.getElementById('aiConfigModal'));
+
+        function renderAIConfiguration(config) {
+            config = config || {};
+            document.getElementById('aiProjectLabel').value = config.project_label || 'Easy Admin Production';
+            document.getElementById('aiProjectId').value = config.project_id || '';
+            document.getElementById('aiServiceAccountLabel').value = config.service_account_label || 'easyadmin-production';
+            document.getElementById('aiModel').value = config.model || 'gpt-5.4-mini';
+            document.getElementById('aiGlobalEnabled').checked = !!config.enabled;
+
+            const badge = document.getElementById('aiConnectionBadge');
+            const message = document.getElementById('aiConnectionMessage');
+            if(!config.configured) {
+                badge.className = 'badge bg-secondary';
+                badge.textContent = 'Not configured';
+                message.textContent = 'OPENAI_API_KEY is not set on the Easy Admin server.';
+            } else if(config.last_test_status === 'success') {
+                badge.className = 'badge bg-success';
+                badge.textContent = 'Connected';
+                message.textContent = config.last_test_message || 'The service-account connection was tested successfully.';
+            } else if(config.last_test_status === 'failed') {
+                badge.className = 'badge bg-danger';
+                badge.textContent = 'Test failed';
+                message.textContent = config.last_test_message || 'The last connection test failed.';
+            } else {
+                badge.className = 'badge bg-warning text-dark';
+                badge.textContent = 'Not tested';
+                message.textContent = 'A server key is present. Select Test Connection to verify the model and permissions.';
+            }
+            const details = [];
+            if(config.key_fingerprint) details.push(`Key fingerprint: ${escapeHtml(config.key_fingerprint)}`);
+            if(config.last_tested_at) details.push(`Last tested: ${escapeHtml(config.last_tested_at)}`);
+            details.push(`Global status: ${config.enabled ? 'Enabled' : 'Disabled'}`);
+            document.getElementById('aiConnectionDetails').innerHTML = details.join(' &middot; ');
+        }
+
+        function loadAIConfiguration() {
+            return adminFetch('/admin/ai-config')
+                .then(async response => ({ok: response.ok, data: await response.json()}))
+                .then(({ok, data}) => {
+                    if(!ok || data.status === 'error') throw new Error(data.message || 'Could not load AI configuration.');
+                    renderAIConfiguration(data.configuration);
+                    return data.configuration;
+                });
+        }
+
+        function openAIConfigModal() {
+            aiConfigModal.show();
+            loadAIConfiguration().catch(error => {
+                document.getElementById('aiConnectionMessage').textContent = error.message || 'Could not load AI configuration.';
+            });
+        }
+
+        function aiConfigurationPayload() {
+            return {
+                project_label: document.getElementById('aiProjectLabel').value.trim(),
+                project_id: document.getElementById('aiProjectId').value.trim(),
+                service_account_label: document.getElementById('aiServiceAccountLabel').value.trim(),
+                model: document.getElementById('aiModel').value.trim(),
+                enabled: document.getElementById('aiGlobalEnabled').checked
+            };
+        }
+
+        function saveAIConfiguration(silent=false) {
+            const button = document.getElementById('aiSaveButton');
+            button.disabled = true;
+            return adminFetch('/admin/ai-config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(aiConfigurationPayload())
+            }).then(async response => ({ok: response.ok, data: await response.json()}))
+              .then(({ok, data}) => {
+                  if(!ok || data.status === 'error') throw new Error(data.message || 'Could not save AI configuration.');
+                  renderAIConfiguration(data.configuration);
+                  if(!silent) alert(data.message || 'AI configuration saved.');
+                  return data.configuration;
+              }).catch(error => {
+                  if(!silent) alert(error.message || 'Could not save AI configuration.');
+                  throw error;
+              }).finally(() => { button.disabled = false; });
+        }
+
+        function testAIConnection() {
+            const button = document.getElementById('aiTestButton');
+            button.disabled = true;
+            button.textContent = 'Testing...';
+            saveAIConfiguration(true)
+                .then(() => adminFetch('/admin/ai-config/test', {method: 'POST'}))
+                .then(async response => ({ok: response.ok, data: await response.json()}))
+                .then(({ok, data}) => {
+                    renderAIConfiguration(data.configuration);
+                    if(!ok || data.status !== 'success') throw new Error(data.message || 'OpenAI connection test failed.');
+                    alert(data.message || 'OpenAI connection test succeeded.');
+                })
+                .catch(error => alert(error.message || 'OpenAI connection test failed.'))
+                .finally(() => {
+                    button.disabled = false;
+                    button.textContent = 'Test Connection';
+                });
+        }
+
         // --- COMPANY LOGIC ---
         const companiesModal = new bootstrap.Modal(document.getElementById('companiesModal'));
         const companyFormModal = new bootstrap.Modal(document.getElementById('companyFormModal'));
@@ -1501,6 +1678,7 @@
             if(c.can_invoicing) apps.push('invoicing quotes');
             if(c.can_finance) apps.push('finance');
             if(c.can_accounting) apps.push('accounting');
+            if(c.cashbook_ai_enabled) apps.push('ai cash book');
             if(c.can_payroll) apps.push('hr payroll');
             if(c.can_franchise_reports) apps.push('franchise reports');
             return [c.id, c.name, c.industry_template, apps.join(' '), c.website_integration_enabled ? 'website integration enabled' : 'website integration disabled'].filter(Boolean).join(' ').toLowerCase();
@@ -1519,6 +1697,7 @@
                 if(c.can_invoicing) apps.push('Invoicing');
                 if(c.can_finance) apps.push('Finance');
                 if(c.can_accounting) apps.push('Accounting');
+                if(c.cashbook_ai_enabled) apps.push('AI Cash Book');
                 if(c.can_payroll) apps.push('Payroll');
                 if(c.can_franchise_reports) apps.push('Franchise Reports');
                 tbody.innerHTML += `
@@ -1595,6 +1774,17 @@
             if (wrap) wrap.style.display = policy === 'none' ? 'none' : '';
         }
 
+        function syncCompanyAIAvailability() {
+            const accountingEnabled = document.getElementById('compAppAccounting').checked;
+            const aiToggle = document.getElementById('compCashbookAi');
+            const help = document.getElementById('compCashbookAiHelp');
+            aiToggle.disabled = !accountingEnabled;
+            if(!accountingEnabled) aiToggle.checked = false;
+            if(help) help.textContent = accountingEnabled
+                ? 'Allows this tenant to request reviewable AI account-allocation suggestions. Suggestions never post the cash book.'
+                : 'Enable the Accounting application before enabling AI Cash Book Allocation.';
+        }
+
         function openCompanyForm(company) {
             companiesModal.hide();
             document.getElementById('companyFormTitle').innerText = company ? "Edit Company" : "New Company";
@@ -1631,6 +1821,8 @@
             document.getElementById('compAppAccounting').checked = company ? company.can_accounting : false;
             document.getElementById('compAppPayroll').checked = company ? company.can_payroll : false;
             document.getElementById('compAppFranchiseReports').checked = company ? !!company.can_franchise_reports : false;
+            document.getElementById('compCashbookAi').checked = company ? !!company.cashbook_ai_enabled : false;
+            syncCompanyAIAvailability();
             
             document.getElementById('compGoogleSync').checked = company ? company.google_calendar_sync : false;
             currentCompanyWebsiteIntegration = company && company.website_integration_key_id ? {
@@ -1684,6 +1876,7 @@
             fd.append('can_accounting', document.getElementById('compAppAccounting').checked);
             fd.append('can_payroll', document.getElementById('compAppPayroll').checked);
             fd.append('can_franchise_reports', document.getElementById('compAppFranchiseReports').checked);
+            fd.append('cashbook_ai_enabled', document.getElementById('compCashbookAi').checked);
             
             fd.append('google_calendar_sync', document.getElementById('compGoogleSync').checked);
             fd.append('website_integration_enabled', document.getElementById('compWebsiteIntegration').checked);

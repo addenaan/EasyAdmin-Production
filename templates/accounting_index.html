@@ -228,6 +228,11 @@
                                 <div id="cashbookMappingPreview" class="table-responsive mt-2 d-none"></div>
                             </div>
                             <div id="cashbookActiveBatch" class="alert alert-light border d-none"></div>
+                            {% if cashbook_ai.get('tenant_enabled') %}
+                            <div id="cashbookAIStatus" class="alert alert-info small py-2">
+                                <strong>AI allocation:</strong> {{ cashbook_ai.get('availability_message') }}
+                            </div>
+                            {% endif %}
                             <div class="table-responsive" style="max-height:560px; overflow:auto;">
                                 <table class="table table-bordered table-sm align-middle cashbook-table">
                                     <thead class="table-light">
@@ -260,6 +265,9 @@
                                 <div id="cashbookAllocationStatus" class="small-muted">No cash book batch loaded.</div>
                                 <div>
                                     <button class="btn btn-outline-primary fw-bold me-2" onclick="insertCashbookRow()">Insert Row</button>
+                                    {% if cashbook_ai.get('tenant_enabled') %}
+                                    <button id="cashbookAIButton" class="btn btn-outline-info fw-bold me-2" onclick="requestAICashbookAllocations()" {% if not cashbook_ai.get('available') %}disabled title="{{ cashbook_ai.get('availability_message') }}"{% endif %}>✨ Suggest with AI</button>
+                                    {% endif %}
                                     <button class="btn btn-outline-secondary fw-bold me-2" onclick="saveCashbookAllocations()">Save Allocations</button>
                                     <button class="btn btn-success fw-bold" onclick="postCashbookBatch()">Post Cash Book</button>
                                 </div>
@@ -457,6 +465,8 @@ let cashbookNewLineCounter = 0;
 let cashbookCsvHeaders = [];
 let cashbookDetectedMapping = {};
 let cashbookMappingRequired = false;
+const cashbookAIAvailable = {{ 'true' if cashbook_ai.get('available') else 'false' }};
+const cashbookAIAvailabilityMessage = {{ cashbook_ai.get('availability_message', '')|tojson }};
 const accountFormModal = new bootstrap.Modal(document.getElementById('accountFormModal'));
 const accountingDocPreviewModal = new bootstrap.Modal(document.getElementById('accountingDocPreviewModal'));
 const accountTypes = { asset: 'Assets', liability: 'Liabilities', equity: 'Equity', income: 'Income', cost_of_sales: 'Cost of Sales', expense: 'Expenses' };
@@ -972,9 +982,13 @@ function cashbookNumberInputValue(v) {
 function cashbookLineRowHtml(line={}) {
     const posted = line.status === 'posted';
     const lineId = line.id || `new_${++cashbookNewLineCounter}`;
-    const statusText = posted ? 'posted' : (line.allocated_account_id ? 'allocated' : 'draft');
-    const statusClass = posted ? 'success' : (line.allocated_account_id ? 'primary' : 'warning text-dark');
-    return `<tr data-line-id="${esc(lineId)}">
+    const aiPending = line.ai_review_status === 'pending' && line.ai_suggested_account_id;
+    const aiNoSuggestion = line.ai_review_status === 'no_suggestion' && line.ai_suggested_at && !line.allocated_account_id;
+    const confidence = Math.round(Number(line.ai_confidence || 0) * 100);
+    const statusText = posted ? 'posted' : (aiPending ? `AI ${confidence}%` : (aiNoSuggestion ? 'AI unsure' : (line.allocated_account_id ? 'allocated' : 'draft')));
+    const statusClass = posted ? 'success' : (aiPending ? 'info text-dark' : (aiNoSuggestion ? 'secondary' : (line.allocated_account_id ? 'primary' : 'warning text-dark')));
+    const statusTitle = line.ai_reason ? ` title="${esc(line.ai_reason)}"` : '';
+    return `<tr data-line-id="${esc(lineId)}" data-ai-review-status="${esc(line.ai_review_status || '')}" data-ai-suggested-account-id="${esc(line.ai_suggested_account_id || '')}" data-ai-confidence="${esc(line.ai_confidence || '')}">
         <td><input type="date" class="form-control form-control-sm cashbook-date" value="${esc(line.transaction_date || '')}" ${posted ? 'disabled' : ''} oninput="updateCashbookAllocationStatus()"></td>
         <td><input class="form-control form-control-sm cashbook-description" value="${esc(line.description || '')}" ${posted ? 'disabled' : ''}></td>
         <td><input type="number" step="0.01" min="0" class="form-control form-control-sm money cashbook-debit" value="${cashbookNumberInputValue(line.debit)}" ${posted ? 'disabled' : ''} oninput="cashbookAmountChanged(this)" placeholder="0.00"></td>
@@ -983,7 +997,7 @@ function cashbookLineRowHtml(line={}) {
         <td><select class="form-select form-select-sm cashbook-account" ${posted ? 'disabled' : ''} onchange="cashbookAccountChanged(this)">${accountOptionsHtml(line.allocated_account_id || '')}</select></td>
         <td>${accountingFileCell(line.transaction_file, 'cashbook-line-file', posted)}</td>
         <td><input class="form-control form-control-sm cashbook-notes" value="${esc(line.notes || '')}" ${posted ? 'disabled' : ''}></td>
-        <td><span class="badge bg-${statusClass}">${statusText}</span></td>
+        <td><span class="badge bg-${statusClass}"${statusTitle}>${statusText}</span></td>
     </tr>`;
 }
 
@@ -1024,9 +1038,15 @@ function updateCashbookRowBadge(tr) {
     const debit = Number(tr.querySelector('.cashbook-debit')?.value || 0) || 0;
     const credit = Number(tr.querySelector('.cashbook-credit')?.value || 0) || 0;
     const accountId = tr.querySelector('.cashbook-account')?.value || '';
+    const aiPending = tr.dataset.aiReviewStatus === 'pending';
+    const aiSuggestedAccountId = tr.dataset.aiSuggestedAccountId || '';
+    const aiConfidence = Math.round(Number(tr.dataset.aiConfidence || 0) * 100);
     if(debit > 0 && credit > 0) {
         status.className = 'badge bg-danger';
         status.innerText = 'invalid';
+    } else if(aiPending && accountId && String(accountId) === String(aiSuggestedAccountId)) {
+        status.className = 'badge bg-info text-dark';
+        status.innerText = `AI ${aiConfidence}%`;
     } else if(accountId) {
         status.className = 'badge bg-primary';
         status.innerText = 'allocated';
@@ -1114,8 +1134,50 @@ function saveCashbookAllocations() {
         });
 }
 
+function requestAICashbookAllocations() {
+    if(!cashbookAIAvailable) return alert(cashbookAIAvailabilityMessage || 'AI cash-book allocation is not available.');
+    if(!cashbookBatchId) return alert('Upload or open a cash book batch first.');
+    if(cashbookBatchStatus === 'posted') return alert('Posted cash book batches cannot be changed by AI.');
+    const button = document.getElementById('cashbookAIButton');
+    const statusBox = document.getElementById('cashbookAIStatus');
+    if(button) {
+        button.disabled = true;
+        button.textContent = 'Reviewing...';
+    }
+    if(statusBox) statusBox.innerHTML = '<strong>AI allocation:</strong> Reviewing unallocated draft lines. Nothing will be posted.';
+
+    // Save the screen first so the model never overwrites a user's existing allocation.
+    fetch(`/api/accounting/cashbook/batches/${cashbookBatchId}/save`, {method:'POST', body:cashbookSaveFormData()})
+        .then(async response => ({ok: response.ok, data: await response.json()}))
+        .then(({ok, data}) => {
+            if(!ok || data.status === 'error') throw new Error(data.message || 'Could not save the current cash-book draft.');
+            return fetch(`/api/accounting/cashbook/batches/${cashbookBatchId}/ai-allocate`, {method:'POST'});
+        })
+        .then(async response => ({ok: response.ok, data: await response.json()}))
+        .then(({ok, data}) => {
+            if(!ok || data.status === 'error') throw new Error(data.message || 'AI allocation could not be completed.');
+            cashbookLines = data.lines || [];
+            renderCashbookBatch(data.batch, cashbookLines);
+            loadCashbookBatches();
+            if(statusBox) statusBox.innerHTML = `<strong>AI allocation:</strong> ${esc(data.message || 'Suggestions saved for review.')}`;
+            alert(data.message || 'AI suggestions were saved. Review them and select Save Allocations before posting.');
+        })
+        .catch(error => {
+            if(statusBox) statusBox.innerHTML = `<strong>AI allocation:</strong> ${esc(error.message || 'The review failed. No AI allocations were changed.')}`;
+            alert(error.message || 'AI allocation could not be completed.');
+        })
+        .finally(() => {
+            if(button) {
+                button.disabled = false;
+                button.textContent = '✨ Suggest with AI';
+            }
+        });
+}
+
 function postCashbookBatch() {
     if(!cashbookBatchId) return alert('Upload or open a cash book batch first.');
+    const pendingAI = cashbookRows().filter(tr => tr.dataset.aiReviewStatus === 'pending').length;
+    if(pendingAI) return alert(`Review the ${pendingAI} AI-suggested allocation(s) and select Save Allocations before posting.`);
     if(!confirm('Post this cash book batch? Bank statement Debit lines will credit the bank account and debit the allocated account. Credit lines will debit the bank account and credit the allocated account. Any VAT amount entered will be posted to the VAT Control account and only the net balance will be posted to the selected account.')) return;
     fetch(`/api/accounting/cashbook/batches/${cashbookBatchId}/save`, {method:'POST', body:cashbookSaveFormData()})
         .then(r => r.json()).then(data => {

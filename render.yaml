@@ -13,6 +13,14 @@ services:
         value: production
       - key: DATABASE_URL
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: EASYADMIN_OPENAI_MODEL
+        value: gpt-5.4-mini
+      - key: EASYADMIN_AI_MAX_LINES_PER_RUN
+        value: "100"
+      - key: EASYADMIN_OPENAI_TIMEOUT_SECONDS
+        value: "60"
       - key: UPLOAD_FOLDER
         value: /var/data/uploads
       - key: MAX_CONTENT_LENGTH
