@@ -16963,6 +16963,91 @@ def save_quote():
     log_action('Invoicing', 'Created Quote', f"Generated Quote {quote_number} for {client_name}")
     return jsonify({"status": "success", "quote_id": q_id, "quote_number": quote_number})
 
+
+@app.route('/api/quote/<int:q_id>', methods=['PUT'])
+def edit_quote(q_id):
+    data = request.json or {}
+    conn = get_db_connection()
+    cid = session['company_id']
+
+    quote_row = conn.execute(
+        "SELECT * FROM quotes WHERE id=? AND company_id=?",
+        (q_id, cid)
+    ).fetchone()
+    if not quote_row:
+        conn.close()
+        return jsonify({"status": "error", "message": "Quote not found."}), 404
+
+    current_status = quote_row['status'] or 'Pending'
+    if current_status != 'Pending':
+        conn.close()
+        return jsonify({"status": "error", "message": "Only pending quotes can be edited."}), 400
+
+    if quote_is_expired(quote_row):
+        conn.execute("UPDATE quotes SET status='Expired' WHERE id=? AND company_id=?", (q_id, cid))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "error", "message": "This quote has expired and can no longer be edited."}), 400
+
+    try:
+        client = resolve_client_from_payload(conn, cid, data, id_key='client_id', name_key='client_name')
+    except ValueError as exc:
+        conn.close()
+        return jsonify({"status": "error", "message": str(exc)}), 400
+
+    items = [normalise_billing_item(item) for item in (data.get('items') or [])]
+    items = [item for item in items if (item.get('description') or '').strip()]
+    if not items:
+        conn.close()
+        return jsonify({"status": "error", "message": "Add at least one quote line item with a description."}), 400
+
+    zero_items = [item for item in items if float(item.get('amount') or 0) <= 0]
+    if zero_items:
+        conn.close()
+        return jsonify({"status": "error", "message": "Each quote line with a description must have a quantity and unit price greater than zero."}), 400
+
+    client_id = client['id']
+    client_name = client_display_name(client)
+    subtotal = round(sum(float(item.get('amount') or 0) for item in items), 2)
+    vat_amount = round(subtotal * 0.15, 2) if bool(data.get('apply_vat', False)) else 0.0
+    total = round(subtotal + vat_amount, 2)
+    quote_ref = _billing_document_formatted_number(conn, cid, 'quote', quote_row)
+
+    try:
+        _begin_atomic_write(conn)
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE quotes
+               SET client_id=?, client_name=?, date=?, valid_until=?, subtotal=?, vat_amount=?, total=?
+               WHERE id=? AND company_id=? AND COALESCE(status, 'Pending')='Pending'""",
+            (client_id, client_name, data.get('date'), data.get('valid_until'), subtotal, vat_amount, total, q_id, cid)
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            conn.close()
+            return jsonify({"status": "error", "message": "The quote status changed before the edit was saved. Refresh the quote list and try again."}), 409
+        cursor.execute("DELETE FROM quote_items WHERE quote_id=?", (q_id,))
+        for item in items:
+            cursor.execute(
+                """INSERT INTO quote_items
+                   (quote_id, service_date, description, quantity, unit_price, amount)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (q_id, item.get('service_date'), item['description'], item.get('quantity', 1), item.get('unit_price', item['amount']), item['amount'])
+            )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        raise
+
+    conn.close()
+    log_action('Invoicing', 'Edited Quote', f"Updated Quote {quote_ref} for {client_name}")
+    return jsonify({"status": "success", "quote_id": q_id, "quote_number": quote_ref})
+
+
 @app.route('/api/quote/<int:q_id>')
 def get_quote(q_id):
     conn = get_db_connection()
