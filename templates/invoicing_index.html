@@ -675,6 +675,141 @@
         </div>
     </div>
 
+    <div class="modal fade" id="quoteBookingConversionModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title fw-bold" id="quoteBookingConversionTitle">Convert Quote - Step 1: Booking Schedule</h5>
+                    <button type="button" class="btn-close btn-close-white" id="quoteBookingCloseButton" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-light" style="min-height: 400px;">
+                    <div class="alert alert-info border-primary shadow-sm py-2 mb-3">
+                        <div class="fw-bold">Create the booking before the invoice</div>
+                        <div class="small">The selected quote will only be converted after this booking has been created and linked to the new invoice.</div>
+                    </div>
+
+                    <div id="quoteBookingStep1">
+                        <div class="bg-white border rounded p-3 shadow-sm mb-3">
+                            <div class="small text-muted fw-bold mb-1">Accepted Quote</div>
+                            <div class="fw-bold text-primary fs-5" id="quoteBookingQuoteReference">Loading quote...</div>
+                        </div>
+                        <div class="row g-3">
+                            <div class="col-md-12">
+                                <label class="small fw-bold text-muted">Client</label>
+                                <input type="text" id="quoteBookingClient" class="form-control border-primary bg-light" readonly>
+                                <div class="form-text small">The booking client is fixed to the client on the accepted quote.</div>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="small fw-bold">Booking Date <span class="text-danger">*</span></label>
+                                <input type="date" id="quoteBookingDate" class="form-control border-dark" required>
+                                <div class="form-text small" id="quoteBookingDateHelp">Defaults to the first service date on the quote, when available.</div>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="small fw-bold">Booking Time <span class="text-danger">*</span></label>
+                                <input type="time" id="quoteBookingTime" class="form-control border-dark" value="08:00" required>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="quoteBookingStep2" style="display:none;">
+                        <div class="alert alert-light border shadow-sm small">
+                            Select all employees for this job. They will be stored together on one grouped booking so the quote has one booking reference.
+                        </div>
+                        <input type="text" id="quoteBookingEmployeeSearch" class="form-control border-primary mb-3" placeholder="Search employees..." oninput="filterQuoteBookingEmployees()">
+                        <div class="list-group shadow-sm border mb-4" style="max-height: 230px; overflow-y: auto;">
+                            {% for e in bookable_employees|default([]) %}
+                            <label class="list-group-item list-group-item-action quote-booking-employee-row py-2">
+                                <span class="form-check mb-0">
+                                    <input class="form-check-input quote-booking-employee border-dark" type="checkbox" value="{{ e.name|e }}">
+                                    <span class="form-check-label fw-bold ms-1">{{ e.name }}</span>
+                                </span>
+                            </label>
+                            {% endfor %}
+                            {% if not bookable_employees|default([]) %}
+                            <div class="p-3 text-center text-muted">No active employees are available for booking.</div>
+                            {% endif %}
+                        </div>
+                        <div class="bg-white border border-dark rounded p-3 shadow-sm">
+                            <h6 class="fw-bold text-dark border-bottom pb-2">Shared Booking Logistics</h6>
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label class="small fw-bold text-primary mb-1">Company Transport</label>
+                                    <select id="quoteBookingTransport" class="form-select border-primary">
+                                        <option value="">No Transport Required</option>
+                                        <option value="Pickup">Pickup Only</option>
+                                        <option value="Drop Off">Drop Off Only</option>
+                                        <option value="Pickup & Drop Off">Pickup & Drop Off</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="small fw-bold text-warning text-dark mb-1">Additional Overtime Hours</label>
+                                    <input type="number" id="quoteBookingOvertime" class="form-control border-warning" value="0" min="0" step="0.5">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="quoteBookingStep3" style="display:none;">
+                        <div class="mb-3">
+                            <label class="small fw-bold">Services <span class="text-danger">*</span></label>
+                            <select id="quoteBookingServices" class="form-select border-primary" multiple size="4" onchange="updateQuoteBookingReview()">
+                                {% for s in services %}<option value="{{ s.name|e }}">{{ s.name }}</option>{% endfor %}
+                            </select>
+                            <div class="form-text small">Exact service matches from the quote are selected automatically. Hold Ctrl/Cmd to change multiple selections.</div>
+                        </div>
+
+                        {% if booking_custom_fields|default([]) %}
+                        <div class="bg-white border rounded p-3 mb-3 shadow-sm" id="quoteBookingCustomFieldsSection">
+                            <h6 class="fw-bold text-primary border-bottom pb-2 mb-3">Additional Booking Details</h6>
+                            <div class="row g-3">
+                                {% for f in booking_custom_fields|default([]) %}
+                                <div class="col-md-6">
+                                    <label class="small fw-bold">{{ f.field_label }}{% if f.required %} <span class="text-danger">*</span>{% endif %}</label>
+                                    {% if f.field_type == 'textarea' %}
+                                        <textarea class="form-control quote-booking-custom-field" rows="2" data-field-key="{{ f.field_key|e }}" data-required="{{ 1 if f.required else 0 }}"></textarea>
+                                    {% elif f.field_type == 'checkbox' %}
+                                        <div class="form-check mt-2">
+                                            <input class="form-check-input quote-booking-custom-field" type="checkbox" data-field-key="{{ f.field_key|e }}" data-required="0">
+                                            <label class="form-check-label small">Yes</label>
+                                        </div>
+                                    {% elif f.field_type == 'dropdown' %}
+                                        <select class="form-select quote-booking-custom-field" data-field-key="{{ f.field_key|e }}" data-required="{{ 1 if f.required else 0 }}">
+                                            <option value="">Select...</option>
+                                            {% for opt in f.options %}<option value="{{ opt|e }}">{{ opt }}</option>{% endfor %}
+                                            {% if not f.options %}<option value="" disabled>No options configured</option>{% endif %}
+                                        </select>
+                                    {% else %}
+                                        <input type="{{ 'time' if f.field_type == 'time' else 'date' if f.field_type == 'date' else 'number' if f.field_type == 'number' else 'text' }}" class="form-control quote-booking-custom-field" data-field-key="{{ f.field_key|e }}" data-required="{{ 1 if f.required else 0 }}">
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        <div class="mb-3">
+                            <label class="small fw-bold">Booking Notes (Optional)</label>
+                            <textarea id="quoteBookingNotes" class="form-control" rows="3" placeholder="Gate codes, site instructions or other booking notes..."></textarea>
+                        </div>
+
+                        <div class="bg-white border rounded p-3 shadow-sm">
+                            <h6 class="fw-bold text-success border-bottom pb-2 mb-2">Booking & Invoice Review</h6>
+                            <div id="quoteBookingReview" class="small text-muted">Complete the booking details to review the conversion.</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer d-flex justify-content-between bg-dark">
+                    <button type="button" class="btn btn-outline-light" id="quoteBookingCancelButton" data-bs-dismiss="modal">Cancel</button>
+                    <div>
+                        <button type="button" class="btn btn-secondary fw-bold" id="quoteBookingBackButton" style="display:none;" onclick="quoteBookingBack()">Back</button>
+                        <button type="button" class="btn btn-primary fw-bold ms-2" id="quoteBookingNextButton" onclick="quoteBookingNext()">Next</button>
+                        <button type="button" class="btn btn-success fw-bold ms-2" id="quoteBookingFinishButton" style="display:none;" onclick="finishQuoteBookingConversion()">Create Booking & Invoice</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
 
     <div class="modal fade" id="docModal" tabindex="-1">
         <div class="modal-dialog modal-lg">
@@ -923,6 +1058,8 @@
         const clientProfileModal = new bootstrap.Modal(document.getElementById('clientProfileModal'));
         const serviceMarginsModal = new bootstrap.Modal(document.getElementById('serviceMarginsModal'));
         const paymentModal = new bootstrap.Modal(document.getElementById('paymentModal'));
+        const quoteBookingConversionModalElement = document.getElementById('quoteBookingConversionModal');
+        const quoteBookingConversionModal = new bootstrap.Modal(quoteBookingConversionModalElement);
 
         const invoiceAdditionalInfo = {{ inv_info | tojson | safe }};
         const invoicePrefix = "{{ inv_prefix }}";
@@ -948,6 +1085,13 @@
         let currentDocType = "";
         let currentDocId = null;
         let editingQuoteId = null;
+        let quoteBookingConversionQuoteId = null;
+        let quoteBookingConversionStep = 1;
+        let quoteBookingConversionClientId = "";
+        let quoteBookingConversionClientName = "";
+        let quoteBookingConversionReference = "";
+        let quoteBookingConversionOpening = false;
+        let quoteBookingConversionSubmitting = false;
         
         let currentStmtEmail = "";
         let currentStmtClient = "";
@@ -2255,20 +2399,281 @@
             }
         }
 
-        function convertQuoteToInvoice(id) {
-            if(!confirm('Convert this accepted quote to a tax invoice? This will create a new invoice and mark the quote as Converted.')) return;
-            fetch('/api/quote/' + id + '/convert_to_invoice', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
-            })
-            .then(r => r.json().then(data => ({ok: r.ok, data})).catch(() => ({ok: false, data: {status:'error', message:'Server returned an invalid response.'}})))
-            .then(({ok, data}) => {
-                if(!ok || data.status === 'error') return alert(data.message || 'Could not convert quote.');
-                alert(data.message || ('Quote converted to invoice #' + data.invoice_id + '.'));
-                refreshInvoicingLists();
-            })
-            .catch(err => alert('Could not convert quote: ' + err.message));
+        function quoteBookingLocalDate() {
+            const today = new Date();
+            const year = today.getFullYear();
+            const month = String(today.getMonth() + 1).padStart(2, '0');
+            const day = String(today.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
         }
+
+        function normaliseQuoteBookingMatch(value) {
+            return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        }
+
+        function resetQuoteBookingConversionWizard() {
+            quoteBookingConversionStep = 1;
+            quoteBookingConversionClientId = '';
+            quoteBookingConversionClientName = '';
+            quoteBookingConversionReference = '';
+            document.getElementById('quoteBookingQuoteReference').textContent = 'Loading quote...';
+            document.getElementById('quoteBookingClient').value = '';
+            document.getElementById('quoteBookingDate').value = quoteBookingLocalDate();
+            document.getElementById('quoteBookingTime').value = '08:00';
+            document.getElementById('quoteBookingDateHelp').textContent = 'Defaults to the first service date on the quote, when available.';
+            document.getElementById('quoteBookingEmployeeSearch').value = '';
+            document.querySelectorAll('.quote-booking-employee-row').forEach(row => { row.style.display = ''; });
+            document.querySelectorAll('.quote-booking-employee').forEach(field => { field.checked = false; });
+            document.getElementById('quoteBookingTransport').value = '';
+            document.getElementById('quoteBookingOvertime').value = '0';
+            document.getElementById('quoteBookingNotes').value = '';
+            document.querySelectorAll('.quote-booking-custom-field').forEach(field => {
+                if(field.type === 'checkbox') field.checked = false;
+                else field.value = '';
+                field.classList.remove('is-invalid');
+            });
+            const services = document.getElementById('quoteBookingServices');
+            Array.from(services.options).forEach(option => { option.selected = false; });
+            services.classList.remove('is-invalid');
+            document.getElementById('quoteBookingReview').textContent = 'Complete the booking details to review the conversion.';
+            const finishButton = document.getElementById('quoteBookingFinishButton');
+            finishButton.disabled = false;
+            finishButton.textContent = 'Create Booking & Invoice';
+            setQuoteBookingConversionStep(1);
+        }
+
+        function setQuoteBookingConversionStep(step) {
+            quoteBookingConversionStep = Math.max(1, Math.min(3, Number(step) || 1));
+            document.getElementById('quoteBookingStep1').style.display = quoteBookingConversionStep === 1 ? 'block' : 'none';
+            document.getElementById('quoteBookingStep2').style.display = quoteBookingConversionStep === 2 ? 'block' : 'none';
+            document.getElementById('quoteBookingStep3').style.display = quoteBookingConversionStep === 3 ? 'block' : 'none';
+            document.getElementById('quoteBookingBackButton').style.display = quoteBookingConversionStep > 1 ? 'inline-block' : 'none';
+            document.getElementById('quoteBookingNextButton').style.display = quoteBookingConversionStep < 3 ? 'inline-block' : 'none';
+            document.getElementById('quoteBookingFinishButton').style.display = quoteBookingConversionStep === 3 ? 'inline-block' : 'none';
+            const stepTitle = quoteBookingConversionStep === 1
+                ? 'Step 1: Booking Schedule'
+                : (quoteBookingConversionStep === 2 ? 'Step 2: Assign Staff & Logistics' : 'Step 3: Services & Review');
+            const referencePrefix = quoteBookingConversionReference ? `${quoteBookingConversionReference} - ` : 'Convert Quote - ';
+            document.getElementById('quoteBookingConversionTitle').textContent = referencePrefix + stepTitle;
+            if(quoteBookingConversionStep === 3) updateQuoteBookingReview();
+        }
+
+        function filterQuoteBookingEmployees() {
+            const term = normaliseQuoteBookingMatch(document.getElementById('quoteBookingEmployeeSearch').value);
+            document.querySelectorAll('.quote-booking-employee-row').forEach(row => {
+                row.style.display = normaliseQuoteBookingMatch(row.textContent).includes(term) ? '' : 'none';
+            });
+        }
+
+        function selectedQuoteBookingEmployees() {
+            return Array.from(document.querySelectorAll('.quote-booking-employee:checked'))
+                .map(field => String(field.value || '').trim())
+                .filter(Boolean);
+        }
+
+        function selectedQuoteBookingServices() {
+            return Array.from(document.getElementById('quoteBookingServices').selectedOptions)
+                .map(option => String(option.value || '').trim())
+                .filter(Boolean);
+        }
+
+        function quoteBookingNext() {
+            if(quoteBookingConversionStep === 1) {
+                const date = document.getElementById('quoteBookingDate').value;
+                const time = document.getElementById('quoteBookingTime').value;
+                if(!quoteBookingConversionClientName) return alert('The quote client could not be identified. Refresh the page and try again.');
+                if(!date || !time) return alert('Booking Date and Booking Time are required.');
+                setQuoteBookingConversionStep(2);
+                return;
+            }
+            if(quoteBookingConversionStep === 2) {
+                if(selectedQuoteBookingEmployees().length === 0) return alert('Please select at least one employee.');
+                const overtime = Number(document.getElementById('quoteBookingOvertime').value || 0);
+                if(!Number.isFinite(overtime) || overtime < 0) return alert('Additional Overtime Hours must be zero or greater.');
+                setQuoteBookingConversionStep(3);
+            }
+        }
+
+        function quoteBookingBack() {
+            if(quoteBookingConversionStep > 1 && !quoteBookingConversionSubmitting) {
+                setQuoteBookingConversionStep(quoteBookingConversionStep - 1);
+            }
+        }
+
+        function collectQuoteBookingCustomFields() {
+            const values = {};
+            let firstMissing = null;
+            document.querySelectorAll('.quote-booking-custom-field').forEach(field => {
+                const key = field.dataset.fieldKey;
+                if(!key) return;
+                const value = field.type === 'checkbox' ? (field.checked ? 'Yes' : '') : String(field.value || '').trim();
+                field.classList.remove('is-invalid');
+                if(field.dataset.required === '1' && !value && !firstMissing) {
+                    firstMissing = field;
+                    field.classList.add('is-invalid');
+                }
+                values[key] = value;
+            });
+            if(firstMissing) {
+                const label = firstMissing.closest('.col-md-6')?.querySelector('label')?.textContent || 'Required field';
+                alert(label.replace('*', '').trim() + ' is required.');
+                firstMissing.focus();
+                return null;
+            }
+            return values;
+        }
+
+        function updateQuoteBookingReview() {
+            const employeeNames = selectedQuoteBookingEmployees();
+            const serviceNames = selectedQuoteBookingServices();
+            const transportSelect = document.getElementById('quoteBookingTransport');
+            const transportText = transportSelect.options[transportSelect.selectedIndex]?.textContent || 'No Transport Required';
+            const overtime = Number(document.getElementById('quoteBookingOvertime').value || 0);
+            document.getElementById('quoteBookingReview').innerHTML = `
+                <div class="row g-2">
+                    <div class="col-md-6"><span class="fw-bold text-dark">Client:</span> ${escapeJsHtml(quoteBookingConversionClientName)}</div>
+                    <div class="col-md-6"><span class="fw-bold text-dark">Date & Time:</span> ${escapeJsHtml(document.getElementById('quoteBookingDate').value)} ${escapeJsHtml(document.getElementById('quoteBookingTime').value)}</div>
+                    <div class="col-md-12"><span class="fw-bold text-dark">Employees:</span> ${escapeJsHtml(employeeNames.join(', ') || 'None selected')}</div>
+                    <div class="col-md-12"><span class="fw-bold text-dark">Services:</span> ${escapeJsHtml(serviceNames.join(', ') || 'None selected')}</div>
+                    <div class="col-md-6"><span class="fw-bold text-dark">Transport:</span> ${escapeJsHtml(transportText)}</div>
+                    <div class="col-md-6"><span class="fw-bold text-dark">Additional overtime:</span> ${Number.isFinite(overtime) ? overtime : 0} hours</div>
+                </div>
+                <div class="mt-2 text-success fw-bold">The booking and linked invoice will be created together when you finish.</div>`;
+        }
+
+        async function convertQuoteToInvoice(id) {
+            if(quoteBookingConversionOpening || quoteBookingConversionSubmitting) return;
+            quoteBookingConversionOpening = true;
+            resetQuoteBookingConversionWizard();
+            quoteBookingConversionQuoteId = id;
+            try {
+                const response = await fetch('/api/quote/' + encodeURIComponent(id), {cache: 'no-store'});
+                const data = await response.json().catch(() => ({status: 'error', message: 'Server returned an invalid response.'}));
+                if(!response.ok || data.status === 'error') throw new Error(data.message || 'Could not load quote.');
+
+                const quote = data.quote || {};
+                if(String(quote.status || 'Pending') !== 'Accepted') throw new Error('Only accepted quotes can be converted to invoices.');
+
+                quoteBookingConversionReference = String(quote.formatted_num || ('Quote #' + id));
+                quoteBookingConversionClientId = String(quote.client_id || '');
+                const clientOption = Array.from(document.querySelectorAll('#quoteClient option')).find(option =>
+                    quoteBookingConversionClientId && String(option.value) === quoteBookingConversionClientId
+                );
+                quoteBookingConversionClientName = String(
+                    clientOption?.dataset.clientName || quote.client_name || data.client_full_name || ''
+                ).trim();
+
+                document.getElementById('quoteBookingQuoteReference').textContent = quoteBookingConversionReference;
+                document.getElementById('quoteBookingClient').value = quoteBookingConversionClientName;
+
+                const items = Array.isArray(data.items) ? data.items : [];
+                const quotedServiceDate = items
+                    .map(item => String(item.service_date || '').slice(0, 10))
+                    .find(value => /^\d{4}-\d{2}-\d{2}$/.test(value));
+                document.getElementById('quoteBookingDate').value = quotedServiceDate || quoteBookingLocalDate();
+                document.getElementById('quoteBookingDateHelp').textContent = quotedServiceDate
+                    ? 'Defaulted from the first dated line on the quote. Change it if the booking date differs.'
+                    : 'No service date was supplied on the quote, so today was selected. Change it if required.';
+
+                const serviceSelect = document.getElementById('quoteBookingServices');
+                serviceSelect.innerHTML = '';
+                (quoteServices || []).forEach(service => {
+                    const name = String(service?.name || '').trim();
+                    if(!name) return;
+                    serviceSelect.appendChild(new Option(name, name));
+                });
+                const quoteDescriptions = new Set(items.map(item => normaliseQuoteBookingMatch(item.description)).filter(Boolean));
+                Array.from(serviceSelect.options).forEach(option => {
+                    option.selected = quoteDescriptions.has(normaliseQuoteBookingMatch(option.value));
+                });
+
+                setQuoteBookingConversionStep(1);
+                quoteBookingConversionModal.show();
+            } catch(err) {
+                quoteBookingConversionQuoteId = null;
+                alert('Could not start quote conversion: ' + err.message);
+            } finally {
+                quoteBookingConversionOpening = false;
+            }
+        }
+
+        async function finishQuoteBookingConversion() {
+            if(quoteBookingConversionSubmitting || !quoteBookingConversionQuoteId) return;
+            const employees = selectedQuoteBookingEmployees();
+            const services = selectedQuoteBookingServices();
+            const date = document.getElementById('quoteBookingDate').value;
+            const time = document.getElementById('quoteBookingTime').value;
+            const overtime = Number(document.getElementById('quoteBookingOvertime').value || 0);
+            if(!quoteBookingConversionClientName || !date || !time) return alert('Client, Booking Date and Booking Time are required.');
+            if(employees.length === 0) return alert('Please select at least one employee.');
+            if(services.length === 0) {
+                document.getElementById('quoteBookingServices').classList.add('is-invalid');
+                return alert('Please select at least one service.');
+            }
+            document.getElementById('quoteBookingServices').classList.remove('is-invalid');
+            if(!Number.isFinite(overtime) || overtime < 0) return alert('Additional Overtime Hours must be zero or greater.');
+            const customFields = collectQuoteBookingCustomFields();
+            if(customFields === null) return;
+
+            const booking = {
+                client_id: quoteBookingConversionClientId || null,
+                client: quoteBookingConversionClientName,
+                date: date,
+                time: time,
+                booking_type: services.join(', '),
+                booking_notes: document.getElementById('quoteBookingNotes').value || '',
+                employee: employees.join(', '),
+                transport: document.getElementById('quoteBookingTransport').value || '',
+                overtime_hours: overtime,
+                custom_fields: customFields,
+                project_id: null
+            };
+            const quoteId = quoteBookingConversionQuoteId;
+            const finishButton = document.getElementById('quoteBookingFinishButton');
+            const closeButton = document.getElementById('quoteBookingCloseButton');
+            const cancelButton = document.getElementById('quoteBookingCancelButton');
+            quoteBookingConversionSubmitting = true;
+            finishButton.disabled = true;
+            finishButton.textContent = 'Creating...';
+            closeButton.disabled = true;
+            cancelButton.disabled = true;
+
+            try {
+                const response = await fetch('/api/quote/' + encodeURIComponent(quoteId) + '/convert_to_invoice', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({booking: booking})
+                });
+                const data = await response.json().catch(() => ({status: 'error', message: 'Server returned an invalid response.'}));
+                if(!response.ok || data.status === 'error') throw new Error(data.message || 'Could not create the booking and invoice.');
+
+                const invoiceId = data.invoice_id;
+                if(quoteBookingConversionModalElement.classList.contains('show')) {
+                    await new Promise(resolve => {
+                        quoteBookingConversionModalElement.addEventListener('hidden.bs.modal', resolve, {once: true});
+                        quoteBookingConversionModal.hide();
+                    });
+                }
+                await refreshInvoicingLists();
+                alert(data.message || ('Booking created and quote converted to invoice #' + invoiceId + '.'));
+                if(invoiceId) viewInvoice(invoiceId, false);
+            } catch(err) {
+                alert('Could not create the booking and invoice: ' + err.message);
+            } finally {
+                quoteBookingConversionSubmitting = false;
+                finishButton.disabled = false;
+                finishButton.textContent = 'Create Booking & Invoice';
+                closeButton.disabled = false;
+                cancelButton.disabled = false;
+            }
+        }
+
+        quoteBookingConversionModalElement.addEventListener('hidden.bs.modal', function() {
+            if(!quoteBookingConversionSubmitting) {
+                quoteBookingConversionQuoteId = null;
+                resetQuoteBookingConversionWizard();
+            }
+        });
 
         // --- PDF GENERATOR & EMAIL LOGIC ---
         function downloadDocPDF() {

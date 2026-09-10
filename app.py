@@ -16327,6 +16327,13 @@ def invoicing_index():
     comp = conn.execute("SELECT * FROM companies WHERE id=?", (cid,)).fetchone()
     clients = prepare_client_options(conn.execute("SELECT * FROM clients WHERE company_id=? ORDER BY name ASC, surname ASC, id ASC", (cid,)).fetchall())
     services, website_integration = _services_with_website_details(conn, cid)
+    bookable_employees = conn.execute('''SELECT id, name, emp_type, status
+                                         FROM employees
+                                         WHERE company_id=?
+                                           AND (emp_type != 'Supplier' OR emp_type IS NULL)
+                                           AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active'
+                                         ORDER BY name ASC''', (cid,)).fetchall()
+    booking_custom_fields = get_tenant_custom_fields(conn, cid, 'booking', visible_only=True)
     projects = conn.execute('''SELECT p.*, c.name AS client_name, c.surname AS client_surname, c.company_name AS client_company_name, c.id AS linked_client_id
                                FROM projects p
                                LEFT JOIN clients c ON c.id=p.client_id AND c.company_id=p.company_id
@@ -16405,6 +16412,8 @@ def invoicing_index():
         company=dict(comp),
         clients=clients,
         services=services,
+        bookable_employees=[dict(employee) for employee in bookable_employees],
+        booking_custom_fields=booking_custom_fields,
         projects=[dict(p) for p in projects],
         invoices=formatted_invoices,
         quotes=formatted_quotes,
@@ -17340,76 +17349,386 @@ def update_quote_status(q_id):
 
 @app.route('/api/quote/<int:q_id>/convert_to_invoice', methods=['POST'])
 def convert_quote_to_invoice(q_id):
+    data = request.get_json(silent=True) or {}
+    booking_data = data.get('booking')
+    if not isinstance(booking_data, dict):
+        return jsonify({
+            "status": "error",
+            "message": "Complete the booking details before converting this quote to an invoice."
+        }), 400
+
     conn = get_db_connection()
     cid = session['company_id']
+
+    # Keep the normal quote-list expiry maintenance outside the conversion
+    # transaction. The conversion itself is revalidated below while holding a
+    # write transaction (and a row lock on PostgreSQL).
     refresh_expired_quotes(conn, cid)
-    q = conn.execute("SELECT * FROM quotes WHERE id=? AND company_id=?", (q_id, cid)).fetchone()
-    if not q:
-        conn.close()
-        return jsonify({"status": "error", "message": "Quote not found."}), 404
-
-    if (q['status'] or 'Pending') == 'Expired' or quote_is_expired(q):
-        conn.execute("UPDATE quotes SET status='Expired' WHERE id=? AND company_id=?", (q_id, cid))
-        conn.commit()
-        conn.close()
-        return jsonify({"status": "error", "message": "Expired quotes cannot be converted. Create a new quote first."}), 400
-
-    if (q['status'] or 'Pending') != 'Accepted':
-        conn.close()
-        return jsonify({"status": "error", "message": "Only accepted quotes can be converted to invoices."}), 400
-
-    q_dict = dict(q)
-    existing_invoice_id = q_dict.get('converted_invoice_id')
-    if existing_invoice_id:
-        existing_invoice_ref = _invoice_formatted_number(conn, cid, existing_invoice_id)
-        conn.close()
-        return jsonify({"status": "error", "message": f"This quote has already been converted to invoice {existing_invoice_ref}."}), 400
-
-    items = conn.execute("SELECT * FROM quote_items WHERE quote_id=?", (q_id,)).fetchall()
-    if not items:
-        conn.close()
-        return jsonify({"status": "error", "message": "This quote has no line items to invoice."}), 400
-
-    invoice_date = today_iso()
-    due_date = invoice_date
-    subtotal = float(q['subtotal'] or 0)
-    vat_amount = float(q['vat_amount'] or 0)
-    total = float(q['total'] or 0)
-    amount_due_now, balance_remaining = calculate_invoice_due_now(total, total)
-
-    invoice_number = allocate_billing_document_number(conn, cid, 'invoice')
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO invoices
-        (company_id, client_id, client_name, date, due_date, subtotal, vat_amount, total, status, discount_percent, discount_amount, amount_due_now, balance_remaining, invoice_number)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (cid, dict(q).get('client_id'), q['client_name'], invoice_date, due_date, subtotal, vat_amount, total, 'Unpaid', 0, 0, amount_due_now, balance_remaining, invoice_number))
-    inv_id = cur.lastrowid
-
-    for item in items:
-        quantity = item['quantity'] if 'quantity' in item.keys() and item['quantity'] else 1
-        unit_price = item['unit_price'] if 'unit_price' in item.keys() and item['unit_price'] is not None else item['amount']
-        cur.execute("INSERT INTO invoice_items (invoice_id, booking_id, service_date, description, quantity, unit_price, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (inv_id, None, item['service_date'], item['description'], quantity, unit_price, item['amount']))
-
-    conn.execute("UPDATE quotes SET status='Converted', converted_invoice_id=?, converted_date=? WHERE id=? AND company_id=?",
-                 (inv_id, invoice_date, q_id, cid))
-    quote_number = _billing_document_formatted_number(conn, cid, 'quote', q)
-
-    accounting_result = _auto_post_invoice_to_accounting_if_enabled(conn, cid, inv_id)
-
     conn.commit()
+
+    def conversion_error(message, status_code=400):
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        return jsonify({"status": "error", "message": message}), status_code
+
+    try:
+        _begin_atomic_write(conn)
+        quote_sql = "SELECT * FROM quotes WHERE id=? AND company_id=?"
+        if is_postgres_enabled():
+            quote_sql += " FOR UPDATE"
+        q = conn.execute(quote_sql, (q_id, cid)).fetchone()
+        if not q:
+            return conversion_error("Quote not found.", 404)
+
+        q_dict = dict(q)
+        quote_status = str(q_dict.get('status') or 'Pending').strip() or 'Pending'
+        existing_invoice_id = q_dict.get('converted_invoice_id')
+        if existing_invoice_id or quote_status == 'Converted':
+            existing_invoice_ref = _invoice_formatted_number(conn, cid, existing_invoice_id) if existing_invoice_id else ''
+            suffix = f" {existing_invoice_ref}" if existing_invoice_ref else ''
+            return conversion_error(f"This quote has already been converted to invoice{suffix}.", 409)
+
+        if quote_status == 'Expired':
+            return conversion_error("Expired quotes cannot be converted. Create a new quote first.")
+        if quote_status != 'Accepted':
+            return conversion_error("Only accepted quotes can be converted to invoices.")
+        if quote_is_expired(q):
+            conn.execute(
+                """UPDATE quotes SET status='Expired'
+                   WHERE id=? AND company_id=? AND COALESCE(status, 'Pending')='Accepted'
+                     AND COALESCE(converted_invoice_id, 0)=0""",
+                (q_id, cid)
+            )
+            conn.commit()
+            conn.close()
+            return jsonify({"status": "error", "message": "Expired quotes cannot be converted. Create a new quote first."}), 400
+
+        items = conn.execute("SELECT * FROM quote_items WHERE quote_id=?", (q_id,)).fetchall()
+        if not items:
+            return conversion_error("This quote has no line items to invoice.")
+
+        quote_client = get_document_client(conn, cid, q)
+        if not quote_client:
+            return conversion_error("The quote client could not be found for this company.")
+        quote_client_id = int(quote_client['id'])
+        submitted_client_id = booking_data.get('client_id')
+        if submitted_client_id not in (None, '', 0, '0'):
+            try:
+                submitted_client_id = int(submitted_client_id)
+            except (TypeError, ValueError):
+                return conversion_error("The booking client is invalid.")
+            if submitted_client_id != quote_client_id:
+                return conversion_error("The booking client must match the accepted quote client.")
+        elif str(booking_data.get('client') or '').strip():
+            submitted_client = find_client_by_display_name(conn, cid, booking_data.get('client'))
+            if not submitted_client or int(submitted_client['id']) != quote_client_id:
+                return conversion_error("The booking client must match the accepted quote client.")
+
+        booking_date_value = str(booking_data.get('date') or '').strip()
+        booking_time_value = str(booking_data.get('time') or '').strip()
+        try:
+            booking_datetime = datetime.strptime(
+                f"{booking_date_value}T{booking_time_value}",
+                '%Y-%m-%dT%H:%M'
+            )
+        except (TypeError, ValueError):
+            return conversion_error("Enter a valid booking date and time.")
+        booking_date_value = booking_datetime.strftime('%Y-%m-%d')
+        booking_time_value = booking_datetime.strftime('%H:%M')
+        booking_start = f"{booking_date_value}T{booking_time_value}"
+
+        booking_type = _normalise_service_selection(booking_data.get('booking_type'))
+        if not booking_type:
+            return conversion_error("Please select at least one service for the booking.")
+
+        # The browser only offers this tenant's configured services, but enforce
+        # that boundary again on the server so a modified request cannot attach
+        # another tenant's or an arbitrary service name to the new booking.
+        configured_service_rows = conn.execute(
+            "SELECT name FROM services WHERE company_id=? ORDER BY name ASC",
+            (cid,)
+        ).fetchall()
+        configured_services = {
+            str(row['name'] or '').strip().lower(): str(row['name'] or '').strip()
+            for row in configured_service_rows
+            if str(row['name'] or '').strip()
+        }
+        selected_services = []
+        seen_service_names = set()
+        invalid_services = []
+        for raw_service_name in booking_type.split(','):
+            service_name = str(raw_service_name or '').strip()
+            service_key = service_name.lower()
+            if not service_name or service_key in seen_service_names:
+                continue
+            seen_service_names.add(service_key)
+            canonical_name = configured_services.get(service_key)
+            if not canonical_name:
+                invalid_services.append(service_name)
+            else:
+                selected_services.append(canonical_name)
+        if invalid_services:
+            return conversion_error(
+                "One or more selected services are not available for this company: "
+                + ', '.join(invalid_services)
+            )
+        if not selected_services:
+            return conversion_error("Please select at least one configured service for the booking.")
+        booking_type = ', '.join(selected_services)
+
+        employee_names = _split_booking_employee_names(booking_data.get('employee'))
+        if not employee_names:
+            return conversion_error("Please select at least one employee for the booking.")
+        booking_employee = ', '.join(employee_names)
+
+        try:
+            overtime_hours = float(booking_data.get('overtime_hours', 0) or 0)
+        except (TypeError, ValueError):
+            return conversion_error("Enter a valid overtime value for the booking.")
+        if overtime_hours < 0 or overtime_hours != overtime_hours or abs(overtime_hours) == float('inf'):
+            return conversion_error("Booking overtime hours cannot be negative or invalid.")
+
+        custom_fields = booking_data.get('custom_fields') or {}
+        if not isinstance(custom_fields, dict):
+            return conversion_error("The booking custom-field values are invalid.")
+        booking_custom_fields = get_tenant_custom_fields(conn, cid, 'booking', visible_only=True)
+        valid_custom, custom_message = validate_custom_field_payload(booking_custom_fields, custom_fields)
+        if not valid_custom:
+            return conversion_error(custom_message)
+
+        try:
+            project_id = normalise_booking_project_id(conn, cid, booking_data.get('project_id'))
+        except ValueError as exc:
+            return conversion_error(str(exc))
+        if project_id is not None:
+            return conversion_error("Quote conversion creates a standard booking and cannot be linked to a project.")
+
+        is_available, availability_message = validate_booking_employees_available(
+            conn,
+            cid,
+            [{"employee": booking_employee}],
+            booking_datetime,
+        )
+        if not is_available:
+            return conversion_error(availability_message)
+
+        booking_client_name = client_display_name(quote_client)
+        booking_transport = str(booking_data.get('transport') or '').strip()
+        booking_notes = str(booking_data.get('booking_notes') or '').strip()
+        cur = conn.cursor()
+        cur.execute(
+            '''INSERT INTO bookings
+               (company_id, client_id, title, start, employee, google_event_id,
+                booking_type, transport, booking_notes, overtime_hours, is_invoiced, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)''',
+            (
+                cid,
+                quote_client_id,
+                booking_client_name,
+                booking_start,
+                booking_employee,
+                None,
+                booking_type,
+                booking_transport,
+                booking_notes,
+                overtime_hours,
+                project_id,
+            )
+        )
+        booking_id = cur.lastrowid
+        if not booking_id:
+            raise RuntimeError('The booking could not be created.')
+        save_custom_field_values(conn, cid, 'booking', booking_id, custom_fields)
+
+        invoice_date = today_iso()
+        due_date = invoice_date
+        subtotal = float(q['subtotal'] or 0)
+        vat_amount = float(q['vat_amount'] or 0)
+        total = float(q['total'] or 0)
+        amount_due_now, balance_remaining = calculate_invoice_due_now(total, total)
+        invoice_status = 'Paid' if total <= 0 else 'Unpaid'
+        invoice_number = allocate_billing_document_number(conn, cid, 'invoice')
+        cur.execute(
+            '''INSERT INTO invoices
+               (company_id, client_id, client_name, date, due_date, subtotal,
+                vat_amount, total, status, discount_percent, discount_amount,
+                amount_due_now, balance_remaining, invoice_type, project_id, invoice_number)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                cid,
+                quote_client_id,
+                q['client_name'],
+                invoice_date,
+                due_date,
+                subtotal,
+                vat_amount,
+                total,
+                invoice_status,
+                0,
+                0,
+                amount_due_now,
+                balance_remaining,
+                'standard',
+                None,
+                invoice_number,
+            )
+        )
+        inv_id = cur.lastrowid
+        if not inv_id:
+            raise RuntimeError('The invoice could not be created.')
+
+        for item in items:
+            quantity = item['quantity'] if 'quantity' in item.keys() and item['quantity'] else 1
+            unit_price = item['unit_price'] if 'unit_price' in item.keys() and item['unit_price'] is not None else item['amount']
+            cur.execute(
+                '''INSERT INTO invoice_items
+                   (invoice_id, booking_id, project_id, service_date, description,
+                    quantity, unit_price, amount)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                (
+                    inv_id,
+                    booking_id,
+                    None,
+                    item['service_date'],
+                    item['description'],
+                    quantity,
+                    unit_price,
+                    item['amount'],
+                )
+            )
+
+        cur.execute(
+            "UPDATE bookings SET is_invoiced=1 WHERE id=? AND company_id=? AND COALESCE(is_invoiced, 0)=0",
+            (booking_id, cid)
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError('The new booking could not be marked as invoiced.')
+
+        # This compare-and-set is the final double-conversion guard. If another
+        # request converted the quote first, every booking/invoice write above
+        # is rolled back together.
+        cur.execute(
+            '''UPDATE quotes
+               SET status='Converted', converted_invoice_id=?, converted_date=?
+               WHERE id=? AND company_id=?
+                 AND COALESCE(status, 'Pending')='Accepted'
+                 AND COALESCE(converted_invoice_id, 0)=0''',
+            (inv_id, invoice_date, q_id, cid)
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            latest = conn.execute(
+                "SELECT converted_invoice_id FROM quotes WHERE id=? AND company_id=?",
+                (q_id, cid)
+            ).fetchone()
+            latest_invoice_id = dict(latest).get('converted_invoice_id') if latest else None
+            latest_invoice_ref = _invoice_formatted_number(conn, cid, latest_invoice_id) if latest_invoice_id else ''
+            suffix = f" {latest_invoice_ref}" if latest_invoice_ref else ''
+            conn.close()
+            return jsonify({
+                "status": "error",
+                "message": f"This quote has already been converted to invoice{suffix}."
+            }), 409
+
+        quote_number = _billing_document_formatted_number(conn, cid, 'quote', q)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        app.logger.exception('Atomic quote-to-booking invoice conversion failed for quote %s.', q_id)
+        return jsonify({
+            "status": "error",
+            "message": "The booking and invoice could not be created. No conversion records were saved."
+        }), 500
+
+    # Automatic Accounting deliberately runs after the core transaction. A
+    # missing Accounting setup must not undo a valid booking and invoice.
+    raw_conn = getattr(conn, '_conn', None)
+    if raw_conn is not None and not raw_conn.autocommit:
+        raw_conn.autocommit = True
+    try:
+        accounting_result = _auto_post_invoice_to_accounting_if_enabled(conn, cid, inv_id)
+    except Exception as exc:
+        app.logger.exception('Automatic Accounting failed for converted invoice %s.', inv_id)
+        accounting_result = {
+            'posted': False,
+            'journal_id': None,
+            'message': f'Invoice was created but could not be posted to Accounting automatically: {exc}'
+        }
     conn.close()
+
+    # Calendar creation is also post-commit so an external Google outage cannot
+    # leave a partial invoice transaction. If its database link cannot be saved,
+    # remove the new event as compensation where possible.
+    if session.get('comp_google_calendar'):
+        google_id = None
+        try:
+            google_id = create_google_event(
+                booking_client_name,
+                booking_date_value,
+                booking_time_value,
+                booking_employee,
+                booking_type,
+                booking_transport,
+                session['company_name'],
+                cid,
+            )
+            if google_id:
+                calendar_conn = get_db_connection()
+                try:
+                    update_cursor = calendar_conn.execute(
+                        "UPDATE bookings SET google_event_id=? WHERE id=? AND company_id=?",
+                        (google_id, booking_id, cid)
+                    )
+                    if update_cursor.rowcount != 1:
+                        raise RuntimeError('The booking calendar link could not be saved.')
+                    calendar_conn.commit()
+                except Exception:
+                    calendar_conn.rollback()
+                    raise
+                finally:
+                    calendar_conn.close()
+        except Exception as exc:
+            if google_id:
+                try:
+                    delete_google_event(google_id, cid)
+                except Exception:
+                    pass
+            app.logger.warning(
+                'Google Calendar sync failed after quote conversion for booking %s: %s',
+                booking_id,
+                _format_google_calendar_error(exc),
+            )
+
+    try:
+        notify_staff_booking_event_async(
+            cid,
+            booking_id,
+            'booking_new',
+            'New booking assigned',
+            'You have a new booking scheduled{date}.',
+        )
+    except Exception:
+        app.logger.exception('Staff notification enqueue failed for converted-quote booking %s.', booking_id)
+
     if accounting_result.get('posted'):
         log_action('Accounting', 'Auto Posted Converted Invoice', f"Converted Invoice {invoice_number} automatically posted to Accounting Journal #{accounting_result.get('journal_id')}.")
     else:
         log_action('Accounting', 'Converted Invoice Auto Post Skipped/Failed', f"Converted Invoice {invoice_number}: {accounting_result.get('message')}")
+    log_action('Booking & Ops', 'Created Booking', f"Client: {booking_client_name}, Date: {booking_date_value}")
     log_action('Invoicing', 'Converted Quote to Invoice', f"Converted Quote {quote_number} to Invoice {invoice_number}")
     response_message = 'Quote converted to invoice and automatically posted to Accounting.' if accounting_result.get('posted') else 'Quote converted to invoice. ' + (accounting_result.get('message') or '')
     return jsonify({
         "status": "success",
         "invoice_id": inv_id,
         "invoice_number": invoice_number,
+        "booking_id": booking_id,
         "message": response_message,
         "accounting_posted": bool(accounting_result.get('posted')),
         "accounting_journal_id": accounting_result.get('journal_id'),
