@@ -41,6 +41,37 @@ def _env_float(name, default, minimum=0.05, maximum=30.0):
     return max(minimum, min(maximum, value))
 
 
+def _is_postgres_connection_error(exc):
+    """Return True when psycopg2 reports a broken server/network session."""
+    try:
+        import psycopg2
+        if isinstance(exc, (psycopg2.InterfaceError, psycopg2.OperationalError)):
+            return True
+    except ImportError:
+        pass
+    sqlstate = str(getattr(exc, 'pgcode', '') or '')
+    if sqlstate.startswith('08'):
+        return True
+    message = str(exc or '').lower()
+    return any(marker in message for marker in (
+        'ssl error',
+        'server closed the connection unexpectedly',
+        'connection already closed',
+        'connection not open',
+        'connection reset by peer',
+        'terminating connection',
+        'could not receive data from server',
+        'could not send data to server',
+        'unexpected eof',
+    ))
+
+
+def _is_retryable_read_sql(sql):
+    """Limit automatic reconnect retries to statements that cannot duplicate writes."""
+    translated = translate_sql(sql).lstrip()
+    return bool(re.match(r'^(?:SELECT|SHOW|EXPLAIN)\b', translated, re.I))
+
+
 def _get_postgres_pool(dsn):
     global _POSTGRES_POOL, _POSTGRES_POOL_DSN
     with _POSTGRES_POOL_LOCK:
@@ -67,9 +98,9 @@ def _checkout_postgres_connection(dsn):
     pool = _get_postgres_pool(dsn)
     deadline = time.monotonic() + _env_float('EASYADMIN_DB_POOL_WAIT_SECONDS', 3.0)
     while True:
+        raw_conn = None
         try:
             raw_conn = pool.getconn()
-            break
         except Exception as exc:
             # psycopg2's ThreadedConnectionPool raises immediately when all
             # connections are busy.  Wait briefly so a request does not fail
@@ -77,26 +108,36 @@ def _checkout_postgres_connection(dsn):
             if time.monotonic() >= deadline or 'pool exhausted' not in str(exc).lower():
                 raise
             time.sleep(0.025)
-    try:
-        if raw_conn.closed:
-            pool.putconn(raw_conn, close=True)
-            return _checkout_postgres_connection(dsn)
-        # A previous explicit employee/import transaction may have temporarily
-        # disabled autocommit.  Every checkout starts from the app's normal
-        # autocommit state.
-        if not raw_conn.autocommit:
-            try:
-                raw_conn.rollback()
-            except Exception:
-                pass
-            raw_conn.autocommit = True
-        return raw_conn, pool
-    except Exception:
+            continue
         try:
-            pool.putconn(raw_conn, close=True)
+            if raw_conn.closed:
+                raise RuntimeError('PostgreSQL pooled connection is closed.')
+            # A previous explicit employee/import transaction may have temporarily
+            # disabled autocommit.  Every checkout starts from the app's normal
+            # autocommit state.
+            if not raw_conn.autocommit:
+                try:
+                    raw_conn.rollback()
+                except Exception:
+                    pass
+                raw_conn.autocommit = True
+            # The local ``closed`` flag cannot detect a server-side idle timeout.
+            # Validate the SSL session before giving a pooled connection to a
+            # request, and discard it immediately when the health check fails.
+            with raw_conn.cursor() as health_cursor:
+                health_cursor.execute('SELECT 1')
+            return raw_conn, pool
         except Exception:
-            pass
-        raise
+            try:
+                pool.putconn(raw_conn, close=True)
+            except Exception:
+                try:
+                    raw_conn.close()
+                except Exception:
+                    pass
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.025)
 
 
 def _close_postgres_pool():
@@ -126,15 +167,25 @@ def is_postgres_enabled():
 
 
 def _normalise_postgres_url(url):
-    """Ensure Supabase/PostgreSQL URLs use SSL unless explicitly configured."""
+    """Apply safe SSL, timeout, and TCP keepalive defaults to PostgreSQL URLs."""
     if not url:
         return url
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     parts = urlsplit(url)
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
-    if "sslmode" not in {k.lower(): v for k, v in query.items()}:
-        query["sslmode"] = "require"
+    existing_keys = {key.lower() for key in query}
+    defaults = {
+        'sslmode': 'require',
+        'connect_timeout': '10',
+        'keepalives': '1',
+        'keepalives_idle': '30',
+        'keepalives_interval': '10',
+        'keepalives_count': '3',
+    }
+    for key, value in defaults.items():
+        if key not in existing_keys:
+            query[key] = value
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
@@ -256,6 +307,8 @@ class PgCursor:
                     self.lastrowid = None
             return self
         except Exception as exc:
+            if _is_postgres_connection_error(exc):
+                self.connection._discard_broken_connection()
             raise sqlite3.OperationalError(str(exc)) from exc
 
     def executemany(self, sql, seq_of_params):
@@ -289,8 +342,10 @@ class PgCursor:
 class PgConnection:
     def __init__(self, dsn):
         normalised_dsn = _normalise_postgres_url(dsn)
+        self._dsn = normalised_dsn
         self._conn, self._pool = _checkout_postgres_connection(normalised_dsn)
         self._closed = False
+        self._broken = False
         self._open_cursors = []
         # The legacy app catches migration/introspection errors in many places.
         # Autocommit avoids leaving PostgreSQL transactions in an aborted state.
@@ -298,8 +353,18 @@ class PgConnection:
         self.row_factory = None
 
     def execute(self, sql, params=None):
-        cur = self.cursor()
-        return cur.execute(sql, params)
+        try:
+            cur = self.cursor()
+            return cur.execute(sql, params)
+        except sqlite3.OperationalError:
+            # A connection may disappear in the small window after the checkout
+            # health check. Reconnect and retry one read-only statement only;
+            # writes are never retried because their server outcome may be unknown.
+            if self._broken and _is_retryable_read_sql(sql):
+                self._reconnect()
+                cur = self.cursor()
+                return cur.execute(sql, params)
+            raise
 
     def executemany(self, sql, seq_of_params):
         cur = self.cursor()
@@ -319,6 +384,32 @@ class PgConnection:
             self._conn.rollback()
         except Exception:
             pass
+
+    def _discard_broken_connection(self):
+        if self._closed:
+            return
+        self._broken = True
+        self._closed = True
+        for cursor in list(self._open_cursors):
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        self._open_cursors.clear()
+        try:
+            self._pool.putconn(self._conn, close=True)
+        except Exception:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def _reconnect(self):
+        self._conn, self._pool = _checkout_postgres_connection(self._dsn)
+        self._closed = False
+        self._broken = False
+        self._open_cursors = []
+        self._conn.autocommit = True
 
     def close(self):
         if self._closed:
