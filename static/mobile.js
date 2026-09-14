@@ -4,6 +4,7 @@
         currentTab: 'dashboard',
         deferredPrompt: null,
         routeData: [],
+        routeSettings: null,
     };
 
     const $ = (id) => document.getElementById(id);
@@ -220,41 +221,88 @@
             return;
         }
         state.routeData = [];
+        state.routeSettings = null;
         openSheet('Daily Route Planner', 'Booking & Ops', `<div class="route-planner-mobile">
             <label>Select Date<input id="mobileRouteDate" type="date" value="${safe(mobileRouteDateValue())}"></label>
+            <label>Plan Route For<select id="mobileRouteEmployee"><option value="">All bookings</option></select></label>
             <label>Starting Point (e.g., Office Address)<input id="mobileRouteStart" type="text" value="${safe(getRememberedRouteStart())}" placeholder="Enter office or starting address"></label>
             <button class="primary-btn" type="button" data-route-load>Load bookings</button>
+            <div id="mobileRouteStatus"></div>
             <div class="route-bookings-box">
                 <div class="detail-label">Bookings on Route</div>
                 <div id="mobileRouteList" class="route-stop-list">Select a date and tap Load bookings.</div>
             </div>
             <label class="route-checkbox-row">
                 <input id="mobileOptimizeRoute" type="checkbox">
-                <span><strong>Auto-Optimize geographical route</strong><br><small>Leave unchecked to keep the chronological booking order.</small></span>
+                <span><strong>Optimize same-time stops by travel route</strong><br><small>Earlier appointment times remain first. Easy Admin uses area ordering if optimisation is unavailable.</small></span>
             </label>
             <button class="primary-btn route-maps-btn" type="button" data-route-open-maps>📍 Open in Google Maps</button>
         </div>`);
     }
 
-    async function loadMobileRouteBookings() {
+    function mobileRouteSettings() {
         const dateEl = $('mobileRouteDate');
+        const employeeEl = $('mobileRouteEmployee');
+        const startEl = $('mobileRouteStart');
+        const optimizeEl = $('mobileOptimizeRoute');
+        return {
+            date: dateEl ? dateEl.value : '',
+            employee: employeeEl ? employeeEl.value : '',
+            start_point: startEl ? startEl.value.trim() : '',
+            optimize: Boolean(optimizeEl && optimizeEl.checked),
+        };
+    }
+
+    function populateMobileRouteEmployees(employees) {
+        const select = $('mobileRouteEmployee');
+        if (!select) return;
+        const selected = select.value;
+        const options = ['<option value="">All bookings</option>'];
+        (Array.isArray(employees) ? employees : []).forEach((employee) => {
+            options.push(`<option value="${safe(employee)}">${safe(employee)}</option>`);
+        });
+        select.innerHTML = options.join('');
+        if (Array.from(select.options).some((option) => option.value === selected)) select.value = selected;
+    }
+
+    function renderMobileRouteStatus(data) {
+        const container = $('mobileRouteStatus');
+        if (!container) return;
+        const optimization = data.optimization || {};
+        const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+        let html = '';
+        if (optimization.message) {
+            html += `<div class="notice ${optimization.status === 'fallback' ? 'warning' : ''}">${safe(optimization.message)}</div>`;
+        }
+        if (warnings.length) {
+            html += `<div class="notice error"><strong>Scheduling conflict</strong><br>${warnings.map((item) => safe(item.message)).join('<br>')}</div>`;
+        }
+        container.innerHTML = html;
+    }
+
+    async function loadMobileRouteBookings() {
         const list = $('mobileRouteList');
-        const date = dateEl ? dateEl.value : '';
-        if (!date) {
+        const settings = mobileRouteSettings();
+        if (!settings.date) {
             showToast('Please select a date.', 'error');
             return;
         }
+        rememberRouteStart(settings.start_point);
         if (list) list.innerHTML = '<div class="loading-card">Loading bookings...</div>';
         try {
             const data = await api('/daily_route', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ date })
+                body: JSON.stringify(settings)
             });
             state.routeData = Array.isArray(data.route) ? data.route : [];
+            state.routeSettings = JSON.stringify(settings);
+            populateMobileRouteEmployees(data.employees);
+            renderMobileRouteStatus(data);
             renderMobileRouteList();
         } catch (err) {
             state.routeData = [];
+            state.routeSettings = null;
             if (list) list.innerHTML = empty(err.message);
         }
     }
@@ -268,10 +316,13 @@
         }
         list.innerHTML = state.routeData.map((booking, index) => {
             const hasAddress = booking.address && booking.address !== 'No address on file';
+            const conflictBadge = booking.conflict ? '<span class="badge danger">Conflict</span>' : '';
             return `<div class="route-stop-card">
                 <div class="route-stop-main">
-                    <div class="item-title">${safe(booking.time || '')} · ${safe(booking.client || 'Client')}</div>
+                    <div class="item-title">${index + 1}. ${safe(booking.time || '')} · ${safe(booking.client || 'Client')} ${conflictBadge}</div>
+                    <div class="item-meta">Area: ${safe(booking.area || 'Area not available')} · Employee: ${safe(booking.employee || 'Unassigned')}</div>
                     <div class="item-meta ${hasAddress ? '' : 'route-missing-address'}">📍 ${safe(hasAddress ? booking.address : 'Missing address')}</div>
+                    ${hasAddress ? `<div class="quick-actions"><button class="action-btn" type="button" data-route-navigate="${index}">Navigate</button></div>` : ''}
                 </div>
                 <button class="action-btn route-remove-btn" type="button" data-route-remove="${index}">Remove</button>
             </div>`;
@@ -284,13 +335,27 @@
         renderMobileRouteList();
     }
 
+    function openMobileRouteStop(index) {
+        if (!Number.isInteger(index) || index < 0 || index >= state.routeData.length) return;
+        const booking = state.routeData[index];
+        if (!booking.address || booking.address === 'No address on file') return;
+        const mapUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(booking.address)}&travelmode=driving`;
+        window.open(mapUrl, '_blank', 'noopener');
+    }
+
     function openMobileRouteInMaps() {
-        const startEl = $('mobileRouteStart');
-        const optimizeEl = $('mobileOptimizeRoute');
-        const startPoint = startEl ? startEl.value.trim() : '';
-        const optimize = Boolean(optimizeEl && optimizeEl.checked);
+        const settings = mobileRouteSettings();
+        const startPoint = settings.start_point;
         if (!startPoint) {
             showToast('Please enter a starting point.', 'error');
+            return;
+        }
+        if (!state.routeSettings) {
+            showToast('Tap Load bookings before opening the route.', 'error');
+            return;
+        }
+        if (state.routeSettings !== JSON.stringify(settings)) {
+            showToast('Route options changed. Tap Load bookings again.', 'error');
             return;
         }
         rememberRouteStart(startPoint);
@@ -307,11 +372,10 @@
         const destination = encodeURIComponent(validStops[validStops.length - 1].address);
         let waypointsParam = '';
         if (validStops.length > 1) {
-            const intermediateStops = validStops.slice(0, -1).map((booking) => encodeURIComponent(booking.address));
-            const optimizeFlag = optimize ? 'optimize:true|' : '';
-            waypointsParam = `&waypoints=${optimizeFlag}${intermediateStops.join('|')}`;
+            const intermediateStops = validStops.slice(0, -1).map((booking) => booking.address);
+            waypointsParam = `&waypoints=${encodeURIComponent(intermediateStops.join('|'))}`;
         }
-        const mapUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}${waypointsParam}`;
+        const mapUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}${waypointsParam}&travelmode=driving`;
         window.open(mapUrl, '_blank', 'noopener');
     }
 
@@ -469,9 +533,11 @@
             const routeLoadEl = event.target.closest('[data-route-load]');
             const routeMapsEl = event.target.closest('[data-route-open-maps]');
             const routeRemoveEl = event.target.closest('[data-route-remove]');
+            const routeNavigateEl = event.target.closest('[data-route-navigate]');
             if (routeLoadEl) return loadMobileRouteBookings();
             if (routeMapsEl) return openMobileRouteInMaps();
             if (routeRemoveEl) return removeMobileRouteStop(Number(routeRemoveEl.dataset.routeRemove));
+            if (routeNavigateEl) return openMobileRouteStop(Number(routeNavigateEl.dataset.routeNavigate));
             if (statusEl) return updateBookingStatus(statusEl.dataset.bookingStatusId, statusEl.dataset.status);
             if (notesEl) return saveNotes(notesEl.dataset.saveNotes);
             if (bookingUploadEl) return uploadFiles('booking', bookingUploadEl.dataset.uploadBooking, 'bookingFilesInput');

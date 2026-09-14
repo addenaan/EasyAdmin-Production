@@ -13429,24 +13429,245 @@ def export_bookings_range():
     response.headers['Content-Disposition'] = f'attachment; filename=Bookings_{start_date}_to_{end_date}.csv'
     return response
 
+def _normalise_route_text(value):
+    return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
+
+
+def _route_employee_names(value):
+    return [name.strip() for name in str(value or '').split(',') if name.strip()]
+
+
+def _route_time_label(start_value):
+    value = str(start_value or '')
+    if 'T' in value:
+        time_value = value.split('T', 1)[1]
+    elif ' ' in value:
+        time_value = value.split(' ', 1)[1]
+    else:
+        time_value = value
+    return time_value[:5]
+
+
+def _fallback_daily_route_order(route, start_point=''):
+    """Keep appointment times fixed, then keep suburbs/areas together within each time."""
+    time_groups = {}
+    for stop in route:
+        time_groups.setdefault(stop.get('time') or '', []).append(stop)
+
+    start_key = _normalise_route_text(start_point)
+    ordered = []
+    for time_key in sorted(time_groups):
+        area_groups = {}
+        for stop in time_groups[time_key]:
+            area_key = _normalise_route_text(stop.get('area'))
+            if area_key == 'area not available':
+                area_key = ''
+            area_groups.setdefault(area_key, []).append(stop)
+
+        def area_sort_key(area_key):
+            is_missing = 1 if not area_key else 0
+            is_start_area = 0 if area_key and area_key in start_key else 1
+            return is_missing, is_start_area, area_key
+
+        for area_key in sorted(area_groups, key=area_sort_key):
+            area_stops = sorted(
+                area_groups[area_key],
+                key=lambda stop: (
+                    1 if stop.get('address') == 'No address on file' else 0,
+                    _normalise_route_text(stop.get('address')),
+                    _normalise_route_text(stop.get('client')),
+                    int(stop.get('id') or 0),
+                ),
+            )
+            ordered.extend(area_stops)
+    return ordered
+
+
+def _daily_route_conflicts(route):
+    assignments = {}
+    by_id = {stop.get('id'): stop for stop in route}
+    for stop in route:
+        for employee_name in stop.get('employees') or []:
+            key = (stop.get('time') or '', _normalise_route_text(employee_name))
+            entry = assignments.setdefault(key, {'name': employee_name, 'booking_ids': []})
+            if stop.get('id') not in entry['booking_ids']:
+                entry['booking_ids'].append(stop.get('id'))
+
+    warnings = []
+    for (time_value, _), entry in sorted(assignments.items()):
+        if len(entry['booking_ids']) < 2:
+            continue
+        message = f"{entry['name']} is assigned to {len(entry['booking_ids'])} bookings at {time_value}."
+        warnings.append({
+            'employee': entry['name'],
+            'time': time_value,
+            'booking_ids': entry['booking_ids'],
+            'message': message,
+        })
+        for booking_id in entry['booking_ids']:
+            if booking_id in by_id:
+                by_id[booking_id]['conflict'] = True
+    return warnings
+
+
+def _google_route_order(stops, origin, api_key):
+    """Optimise intermediate stops while keeping the final fallback stop as the destination."""
+    valid_stops = [stop for stop in stops if stop.get('address') != 'No address on file']
+    missing_stops = [stop for stop in stops if stop.get('address') == 'No address on file']
+    if len(valid_stops) < 3:
+        return stops, False
+    if len(valid_stops) > 25:
+        raise ValueError('A same-time group has more than 25 addressed bookings.')
+
+    destination = valid_stops[-1]
+    intermediate_stops = valid_stops[:-1]
+    request_body = {
+        'origin': {'address': origin},
+        'destination': {'address': destination['address']},
+        'intermediates': [{'address': stop['address']} for stop in intermediate_stops],
+        'travelMode': 'DRIVE',
+        'routingPreference': 'TRAFFIC_AWARE',
+        'optimizeWaypointOrder': True,
+    }
+    request_data = json.dumps(request_body).encode('utf-8')
+    route_request = UrlRequest(
+        'https://routes.googleapis.com/directions/v2:computeRoutes',
+        data=request_data,
+        headers={
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': api_key,
+            'X-Goog-FieldMask': 'routes.optimizedIntermediateWaypointIndex',
+        },
+        method='POST',
+    )
+    try:
+        timeout_seconds = max(2.0, min(float(os.environ.get('EASYADMIN_GOOGLE_ROUTES_TIMEOUT_SECONDS', '8')), 20.0))
+    except (TypeError, ValueError):
+        timeout_seconds = 8.0
+    with urlopen(route_request, timeout=timeout_seconds) as response:
+        response_data = json.loads(response.read().decode('utf-8'))
+
+    routes = response_data.get('routes') or []
+    waypoint_order = routes[0].get('optimizedIntermediateWaypointIndex') if routes else None
+    if not isinstance(waypoint_order, list) or sorted(waypoint_order) != list(range(len(intermediate_stops))):
+        raise ValueError('Google Routes did not return a complete waypoint order.')
+    optimised = [intermediate_stops[index] for index in waypoint_order]
+    return optimised + [destination] + missing_stops, True
+
+
+def _optimise_daily_route(route, start_point, api_key):
+    time_groups = {}
+    for stop in route:
+        time_groups.setdefault(stop.get('time') or '', []).append(stop)
+
+    ordered = []
+    current_origin = start_point
+    optimised_groups = 0
+    for time_key in sorted(time_groups):
+        group = time_groups[time_key]
+        optimised_group, was_optimised = _google_route_order(group, current_origin, api_key)
+        ordered.extend(optimised_group)
+        if was_optimised:
+            optimised_groups += 1
+        addressed = [stop for stop in optimised_group if stop.get('address') != 'No address on file']
+        if addressed:
+            current_origin = addressed[-1]['address']
+    return ordered, optimised_groups
+
+
 @app.route('/daily_route', methods=['POST'])
 def daily_route():
+    payload = request.get_json(silent=True) or {}
+    route_date = str(payload.get('date') or '').strip()
+    employee_filter = str(payload.get('employee') or '').strip()
+    start_point = str(payload.get('start_point') or '').strip()
+    optimise_requested = bool(payload.get('optimize'))
+    try:
+        datetime.strptime(route_date, '%Y-%m-%d')
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Please select a valid route date.'}), 400
+
     conn = get_db_connection()
-    date = request.get_json()['date']
-    b = conn.execute('''SELECT b.title, b.start, b.client_id, c.name AS client_first_name, c.surname AS client_surname, c.company_name AS client_company_name,
-                               c.address, c.building_number, c.street_name, c.suburb, c.postal_code
-                        FROM bookings b
-                        LEFT JOIN clients c ON c.id=b.client_id AND c.company_id=b.company_id
-                        WHERE b.company_id=? AND b.start LIKE ? ORDER BY b.start ASC''', (session['company_id'], f"{date}%")).fetchall()
+    try:
+        rows = conn.execute('''SELECT b.id, b.title, b.start, b.employee, b.booking_type, b.client_id,
+                                      c.name AS client_first_name, c.surname AS client_surname,
+                                      c.company_name AS client_company_name, c.address,
+                                      c.building_number, c.street_name, c.suburb, c.postal_code
+                               FROM bookings b
+                               LEFT JOIN clients c ON c.id=b.client_id AND c.company_id=b.company_id
+                               WHERE b.company_id=? AND substr(b.start, 1, 10)=?
+                               ORDER BY b.start ASC, b.id ASC''', (session['company_id'], route_date)).fetchall()
+        active_employees = conn.execute("""SELECT name FROM employees
+                                           WHERE company_id=?
+                                             AND (emp_type != 'Supplier' OR emp_type IS NULL)
+                                             AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Active')))='active'
+                                           ORDER BY name ASC""", (session['company_id'],)).fetchall()
+    finally:
+        conn.close()
+
     route = []
-    for row in b:
-        c = row
-        address = ""
-        if c:
-            address = compose_client_address(c['building_number'], c['street_name'], c['suburb'], c['postal_code'], c['address'])
-        route.append({"time": row['start'].split('T')[1], "client": (' '.join([x for x in [row['client_first_name'], row['client_surname']] if x]).strip() or row['client_company_name'] or row['title']), "address": address if address else "No address on file"})
-    conn.close()
-    return jsonify({"route": route})
+    assigned_employee_names = set()
+    selected_key = _normalise_route_text(employee_filter)
+    for row in rows:
+        employee_names = _route_employee_names(row['employee'])
+        assigned_employee_names.update(employee_names)
+        if selected_key and selected_key not in {_normalise_route_text(name) for name in employee_names}:
+            continue
+        address = compose_client_address(
+            row['building_number'], row['street_name'], row['suburb'], row['postal_code'], row['address']
+        )
+        client_name = (' '.join([str(value).strip() for value in [row['client_first_name'], row['client_surname']] if value]).strip()
+                       or row['client_company_name'] or row['title'] or 'Booking')
+        area = str(row['suburb'] or row['postal_code'] or '').strip()
+        route.append({
+            'id': row['id'],
+            'time': _route_time_label(row['start']),
+            'start': row['start'],
+            'client': client_name,
+            'address': address if address else 'No address on file',
+            'area': area if area else 'Area not available',
+            'employee': ', '.join(employee_names) if employee_names else 'Unassigned',
+            'employees': employee_names,
+            'booking_type': row['booking_type'] or '',
+            'conflict': False,
+        })
+
+    route = _fallback_daily_route_order(route, start_point)
+    warnings = _daily_route_conflicts(route)
+    optimisation = {
+        'requested': optimise_requested,
+        'status': 'area_order',
+        'message': 'Bookings are ordered by appointment time and grouped by area.',
+    }
+    if optimise_requested:
+        routes_api_key = (os.environ.get('GOOGLE_ROUTES_API_KEY') or os.environ.get('GOOGLE_MAPS_API_KEY') or '').strip()
+        if not start_point:
+            optimisation.update(status='fallback', message='Enter a starting point and load again to use travel-route optimisation. Area ordering was used.')
+        elif not routes_api_key:
+            optimisation.update(status='fallback', message='Google Routes is not configured. Area ordering was used.')
+        else:
+            try:
+                route, optimised_groups = _optimise_daily_route(route, start_point, routes_api_key)
+                if optimised_groups:
+                    optimisation.update(status='google_routes', message='Same-time bookings were refined using travel-route optimisation.')
+                else:
+                    optimisation.update(status='not_needed', message='No same-time group required travel-route optimisation. Area ordering was kept.')
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
+                app.logger.warning('Daily route optimisation fell back to area ordering: %s', type(exc).__name__)
+                optimisation.update(status='fallback', message='Travel-route optimisation was unavailable. Area ordering was used.')
+
+    employees = sorted(
+        {str(row['name']).strip() for row in active_employees if row['name']} | assigned_employee_names,
+        key=lambda name: name.casefold(),
+    )
+    return jsonify({
+        'status': 'success',
+        'route': route,
+        'warnings': warnings,
+        'optimization': optimisation,
+        'employees': employees,
+        'employee_filter': employee_filter,
+    })
 
 # ==========================================================
 # 2. FINANCE ROUTES

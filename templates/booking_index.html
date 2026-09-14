@@ -1171,12 +1171,21 @@
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body bg-light">
-                    <div class="row mb-3">
-                        <div class="col-md-4">
+                    <div class="row g-2 mb-3">
+                        <div class="col-md-3">
                             <label class="small fw-bold">Select Date</label>
                             <input type="date" id="routeDate" class="form-control">
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-md-3">
+                            <label class="small fw-bold">Plan Route For</label>
+                            <select id="routeEmployee" class="form-select">
+                                <option value="">All bookings</option>
+                                {% for employee in active_booking_employees %}
+                                <option value="{{ employee['name'] }}">{{ employee['name'] }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
                             <label class="small fw-bold">Starting Point (e.g., Office Address)</label>
                             <input type="text" id="routeStart" class="form-control" placeholder="Enter office or starting address">
                         </div>
@@ -1184,6 +1193,8 @@
                             <button class="btn btn-primary w-100" onclick="fetchRouteBookings()">Load</button>
                         </div>
                     </div>
+
+                    <div id="routePlannerStatus"></div>
 
                     <div class="bg-white border rounded p-3 mb-3">
                         <h6 class="text-primary border-bottom pb-2">Bookings on Route</h6>
@@ -1195,7 +1206,7 @@
                     <div class="form-check mb-3">
                         <input class="form-check-input" type="checkbox" id="optimizeRoute">
                         <label class="form-check-label small text-muted" for="optimizeRoute">
-                            <strong>Auto-Optimize geographical route</strong> (Uncheck to strictly force Google Maps to follow the chronological time order)
+                            <strong>Optimize same-time stops by travel route</strong> (Earlier appointment times always remain first. If unavailable, Easy Admin groups the route by area.)
                         </label>
                     </div>
                 </div>
@@ -1223,7 +1234,8 @@
         const routePlannerModal = new bootstrap.Modal(document.getElementById('routePlannerModal'));
         const bookingsExportModal = new bootstrap.Modal(document.getElementById('bookingsExportModal')); 
         
-        let currentRouteData = []; 
+        let currentRouteData = [];
+        let loadedRouteSettings = null;
         let currentProjects = [];
 
         function openBookingsExportModal() {
@@ -3350,24 +3362,70 @@
         function openRoutePlannerModal() {
             document.getElementById('routeDate').value = localISODate();
             document.getElementById('routeStart').value = getRememberedRouteStart();
+            document.getElementById('routeEmployee').value = '';
             document.getElementById('optimizeRoute').checked = false;
             document.getElementById('routeList').innerHTML = '<li class="list-group-item text-muted small">Click Load to fetch bookings...</li>';
+            document.getElementById('routePlannerStatus').innerHTML = '';
             currentRouteData = [];
+            loadedRouteSettings = null;
             routePlannerModal.show();
         }
 
+        function routePlannerSettings() {
+            return {
+                date: document.getElementById('routeDate').value,
+                employee: document.getElementById('routeEmployee').value,
+                start_point: document.getElementById('routeStart').value.trim(),
+                optimize: document.getElementById('optimizeRoute').checked
+            };
+        }
+
+        function escapeRouteText(value) {
+            const element = document.createElement('div');
+            element.textContent = value == null ? '' : String(value);
+            return element.innerHTML;
+        }
+
+        function renderRoutePlannerStatus(data) {
+            const container = document.getElementById('routePlannerStatus');
+            const optimization = data.optimization || {};
+            const warningItems = Array.isArray(data.warnings) ? data.warnings : [];
+            let html = '';
+            if (optimization.message) {
+                const className = optimization.status === 'fallback' ? 'alert-warning' : 'alert-info';
+                html += `<div class="alert ${className} py-2 small mb-2">${escapeRouteText(optimization.message)}</div>`;
+            }
+            if (warningItems.length) {
+                html += `<div class="alert alert-danger py-2 small mb-3"><strong>Scheduling conflict:</strong><ul class="mb-0 mt-1">${warningItems.map(item => `<li>${escapeRouteText(item.message)}</li>`).join('')}</ul></div>`;
+            }
+            container.innerHTML = html;
+        }
+
         function fetchRouteBookings() {
-            const date = document.getElementById('routeDate').value;
-            if (!date) return alert("Please select a date.");
+            const settings = routePlannerSettings();
+            if (!settings.date) return alert("Please select a date.");
+            rememberRouteStart();
 
             fetch('/daily_route', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ date: date })
+                body: JSON.stringify(settings)
             })
-            .then(res => res.json())
+            .then(async res => {
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.message || 'Could not load the route.');
+                return data;
+            })
             .then(data => {
-                currentRouteData = data.route;
+                currentRouteData = Array.isArray(data.route) ? data.route : [];
+                loadedRouteSettings = JSON.stringify(settings);
+                renderRoutePlannerStatus(data);
+                renderRouteList();
+            })
+            .catch(error => {
+                currentRouteData = [];
+                loadedRouteSettings = null;
+                document.getElementById('routePlannerStatus').innerHTML = `<div class="alert alert-danger py-2 small mb-3">${escapeRouteText(error.message)}</div>`;
                 renderRouteList();
             });
         }
@@ -3384,12 +3442,14 @@
             currentRouteData.forEach((b, index) => {
                 const addressText = b.address === 'No address on file' 
                     ? `<span class="text-danger fw-bold">Missing Address!</span>` 
-                    : `<span class="text-muted">${b.address}</span>`;
+                    : `<span class="text-muted">${escapeRouteText(b.address)}</span>`;
+                const conflictBadge = b.conflict ? '<span class="badge bg-danger ms-2">Conflict</span>' : '';
 
                 list.innerHTML += `
                     <li class="list-group-item d-flex justify-content-between align-items-center py-2">
                         <div>
-                            <strong>🕒 ${b.time}</strong> - ${b.client} <br>
+                            <strong>${index + 1}. 🕒 ${escapeRouteText(b.time)}</strong> - ${escapeRouteText(b.client)} ${conflictBadge}<br>
+                            <small class="text-secondary">Area: ${escapeRouteText(b.area || 'Area not available')} · Employee: ${escapeRouteText(b.employee || 'Unassigned')}</small><br>
                             <small>📍 ${addressText}</small>
                         </div>
                         <button class="btn btn-sm btn-outline-danger" onclick="removeFromRoute(${index})" title="Remove from route">🗑️ Remove</button>
@@ -3403,10 +3463,12 @@
         }
 
         function generateGoogleMaps() {
-            const startPoint = document.getElementById('routeStart').value;
-            const optimize = document.getElementById('optimizeRoute').checked;
+            const settings = routePlannerSettings();
+            const startPoint = settings.start_point;
 
             if (!startPoint) return alert("Please enter a starting point.");
+            if (!loadedRouteSettings) return alert("Click Load before opening the route.");
+            if (loadedRouteSettings !== JSON.stringify(settings)) return alert("The route options changed. Click Load again before opening the route.");
             rememberRouteStart();
             if (currentRouteData.length === 0) return alert("There are no valid bookings left on the route.");
 
@@ -3419,13 +3481,12 @@
             
             let waypointsParam = "";
             if (validStops.length > 1) {
-                const intermediateStops = validStops.slice(0, -1).map(b => encodeURIComponent(b.address));
-                const optFlag = optimize ? "optimize:true|" : "";
-                waypointsParam = `&waypoints=${optFlag}${intermediateStops.join('|')}`;
+                const intermediateStops = validStops.slice(0, -1).map(b => b.address);
+                waypointsParam = `&waypoints=${encodeURIComponent(intermediateStops.join('|'))}`;
             }
 
-            const mapUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}${waypointsParam}`;
-            window.open(mapUrl, '_blank');
+            const mapUrl = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}${waypointsParam}&travelmode=driving`;
+            window.open(mapUrl, '_blank', 'noopener');
         }
 
         document.getElementById('routeStart').addEventListener('change', rememberRouteStart);
