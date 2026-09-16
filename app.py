@@ -623,9 +623,9 @@ def safe_table_name(name):
 
 COMPANY_IMPORT_TABLES = {
     'clients': ['name', 'surname', 'company_name', 'registration_number', 'vat_number', 'building_number', 'street_name', 'suburb', 'postal_code', 'address', 'phone', 'email', 'client_type', 'discount_percent', 'notes'],
-    'employees': ['name', 'emp_number', 'id_passport', 'date_of_birth', 'job_title', 'status', 'emp_type', 'gross_salary', 'start_date', 'inactive_date', 'phone', 'email', 'address', 'emergency_contact', 'tax_number', 'paye_ref', 'bank_name', 'account_holder', 'account_number', 'branch_code', 'account_type', 'payment_reference', 'workday_hours', 'overtime_pay_treatment', 'notes'],
+    'employees': ['name', 'emp_number', 'id_passport', 'date_of_birth', 'job_title', 'status', 'emp_type', 'gross_salary', 'half_day_rate', 'start_date', 'inactive_date', 'phone', 'email', 'address', 'emergency_contact', 'tax_number', 'paye_ref', 'bank_name', 'account_holder', 'account_number', 'branch_code', 'account_type', 'payment_reference', 'workday_hours', 'overtime_pay_treatment', 'notes'],
     'services': ['name', 'client_price', 'company_cost'],
-    'bookings': ['title', 'start', 'employee', 'booking_type', 'transport', 'booking_notes', 'overtime_hours', 'is_invoiced'],
+    'bookings': ['title', 'start', 'employee', 'booking_type', 'transport', 'booking_notes', 'overtime_hours', 'is_half_day', 'is_invoiced'],
     'expenses': ['date', 'category', 'supplier', 'description', 'amount', 'invoice_file'],
     'leave_records': ['employee_id', 'date_taken', 'days', 'leave_type', 'notes', 'document_file']
 }
@@ -665,9 +665,9 @@ IMPORT_DATETIME_FIELDS = {
 
 IMPORT_NUMERIC_FIELDS = {
     'clients': {'discount_percent': 0},
-    'employees': {'gross_salary': None, 'workday_hours': None},
+    'employees': {'gross_salary': None, 'half_day_rate': None, 'workday_hours': None},
     'services': {'client_price': None, 'company_cost': None},
-    'bookings': {'overtime_hours': 0, 'is_invoiced': 0},
+    'bookings': {'overtime_hours': 0, 'is_half_day': 0, 'is_invoiced': 0},
     'expenses': {'amount': None},
     'leave_records': {'employee_id': None, 'days': None},
 }
@@ -677,6 +677,7 @@ IMPORT_EMPLOYEE_TYPES = {
     'Full-time', 'Full-time (5 Days)', 'Full-time (6 Days)', 'Shift Worker',
     'Contract >25 Hrs', 'Contract <25 Hrs', 'Supplier', 'Provider'
 }
+CONTRACT_BOOKING_EMPLOYEE_TYPES = {'Contract >25 Hrs', 'Contract <25 Hrs'}
 IMPORT_OVERTIME_TREATMENTS = {'regular', 'irregular'}
 IMPORT_LEAVE_TYPES = {'Annual Leave', 'Sick Leave', 'Family Responsibility', 'Unpaid Leave', 'Other'}
 
@@ -1012,11 +1013,11 @@ def validate_import_row(import_type, row, line_no, conn, company_id, seen_values
         if raw == '':
             cleaned[field] = default
             continue
-        if field == 'is_invoiced':
+        if field in {'is_invoiced', 'is_half_day'}:
             parsed_bool = normalise_import_boolean(raw)
             if parsed_bool is None:
                 errors.append(
-                    f"Line {line_no}, field 'is_invoiced': '{raw}' is invalid. "
+                    f"Line {line_no}, field '{field}': '{raw}' is invalid. "
                     "Use 1/0, yes/no, or true/false."
                 )
             else:
@@ -1078,6 +1079,14 @@ def validate_import_row(import_type, row, line_no, conn, company_id, seen_values
         gross_salary = cleaned.get('gross_salary')
         if isinstance(gross_salary, (int, float)) and float(gross_salary) < 0:
             errors.append(f"Line {line_no}, field 'gross_salary': value cannot be negative.")
+        half_day_rate = cleaned.get('half_day_rate')
+        if emp_type in CONTRACT_BOOKING_EMPLOYEE_TYPES:
+            if not isinstance(gross_salary, (int, float)) or float(gross_salary) <= 0:
+                errors.append(f"Line {line_no}, field 'gross_salary': a positive Full Day Booking Rate is required for contract employees.")
+            if not isinstance(half_day_rate, (int, float)) or float(half_day_rate) <= 0:
+                errors.append(f"Line {line_no}, field 'half_day_rate': a positive Half Day Rate is required for contract employees.")
+        elif isinstance(half_day_rate, (int, float)) and float(half_day_rate) < 0:
+            errors.append(f"Line {line_no}, field 'half_day_rate': value cannot be negative.")
         workday_hours = cleaned.get('workday_hours')
         if isinstance(workday_hours, (int, float)) and not (0 < float(workday_hours) <= 24):
             errors.append(f"Line {line_no}, field 'workday_hours': value must be greater than 0 and not more than 24.")
@@ -1150,7 +1159,7 @@ def coerce_import_value_for_db(import_type, field, value):
     if field in IMPORT_NUMERIC_FIELDS.get(import_type, {}):
         if value in (None, ''):
             return IMPORT_NUMERIC_FIELDS[import_type][field]
-        if field in {'employee_id', 'is_invoiced'}:
+        if field in {'employee_id', 'is_invoiced', 'is_half_day'}:
             return int(value)
         return float(value)
     return normalise_import_value(value)
@@ -1181,11 +1190,11 @@ def get_import_template_rows(import_type):
     if import_type == 'clients':
         sample.update({'name': 'Example Client', 'phone': '0712345678', 'email': 'client@example.com'})
     elif import_type == 'employees':
-        sample.update({'name': 'Example Employee', 'status': 'Active', 'emp_type': 'Contract >25 Hrs', 'gross_salary': '5000', 'start_date': '2026-01-01'})
+        sample.update({'name': 'Example Employee', 'status': 'Active', 'emp_type': 'Contract >25 Hrs', 'gross_salary': '500', 'half_day_rate': '300', 'start_date': '2026-01-01'})
     elif import_type == 'services':
         sample.update({'name': 'Example Service', 'client_price': '550', 'company_cost': '300'})
     elif import_type == 'bookings':
-        sample.update({'title': 'Example Client', 'start': '2026-05-22T09:00:00', 'employee': 'Example Employee', 'booking_type': 'Example Service'})
+        sample.update({'title': 'Example Client', 'start': '2026-05-22T09:00:00', 'employee': 'Example Employee', 'booking_type': 'Example Service', 'is_half_day': '0'})
     elif import_type == 'expenses':
         sample.update({'date': '2026-05-22', 'category': 'Supplies', 'description': 'Example expense', 'amount': '100'})
     elif import_type == 'leave_records':
@@ -2508,11 +2517,11 @@ def init_db():
             pass
 
     loose_cols = {
-        'bookings': [('client_id', 'INTEGER'), ('google_event_id', 'TEXT'), ('booking_type', 'TEXT DEFAULT "Standard Home Clean"'), ('transport', 'TEXT DEFAULT ""'), ('booking_notes', 'TEXT DEFAULT ""'), ('overtime_hours', 'REAL DEFAULT 0'), ('is_invoiced', 'INTEGER DEFAULT 0'), ('project_id', 'INTEGER')],
+        'bookings': [('client_id', 'INTEGER'), ('google_event_id', 'TEXT'), ('booking_type', 'TEXT DEFAULT "Standard Home Clean"'), ('transport', 'TEXT DEFAULT ""'), ('booking_notes', 'TEXT DEFAULT ""'), ('overtime_hours', 'REAL DEFAULT 0'), ('is_half_day', 'INTEGER DEFAULT 0'), ('is_invoiced', 'INTEGER DEFAULT 0'), ('project_id', 'INTEGER')],
         'clients': [('surname', 'TEXT'), ('address', 'TEXT'), ('building_number', 'TEXT'), ('street_name', 'TEXT'), ('suburb', 'TEXT'), ('postal_code', 'TEXT'), ('phone', 'TEXT'), ('email', 'TEXT'), ('client_type', 'TEXT DEFAULT "Ad hoc"'), ('discount_percent', 'REAL DEFAULT 0'), ('company_name', 'TEXT'), ('registration_number', 'TEXT'), ('vat_number', 'TEXT'), ('notes', 'TEXT')],
         'invoices': [('client_id', 'INTEGER')],
         'quotes': [('client_id', 'INTEGER')],
-        'employees': [('start_date', 'TEXT'), ('inactive_date', 'TEXT'), ('gross_salary', 'REAL DEFAULT 0'), ('emp_number', 'TEXT'), ('id_passport', 'TEXT'), ('job_title', 'TEXT'), ('status', 'TEXT DEFAULT "Active"'), ('phone', 'TEXT'), ('email', 'TEXT'), ('address', 'TEXT'), ('emergency_contact', 'TEXT'), ('tax_number', 'TEXT'), ('paye_ref', 'TEXT'), ('bank_details', 'TEXT'), ('bank_name', 'TEXT'), ('account_holder', 'TEXT'), ('account_number', 'TEXT'), ('branch_code', 'TEXT'), ('account_type', 'TEXT'), ('payment_reference', 'TEXT'), ('google_event_id', 'TEXT'), ('emp_type', 'TEXT DEFAULT "Full-time (5 Days)"'), ('cv_file', 'TEXT'), ('id_file', 'TEXT'), ('contract_file', 'TEXT'), ('additional_leave', 'REAL DEFAULT 0'), ('notes', 'TEXT'), ('workday_hours', 'REAL DEFAULT 7'), ('overtime_pay_treatment', 'TEXT DEFAULT "regular"'), ('uif_contributor', 'TEXT DEFAULT "Yes"'), ('uif_non_contributor_reason', 'TEXT'), ('uif_termination_code', 'TEXT')],
+        'employees': [('start_date', 'TEXT'), ('inactive_date', 'TEXT'), ('gross_salary', 'REAL DEFAULT 0'), ('half_day_rate', 'REAL'), ('emp_number', 'TEXT'), ('id_passport', 'TEXT'), ('job_title', 'TEXT'), ('status', 'TEXT DEFAULT "Active"'), ('phone', 'TEXT'), ('email', 'TEXT'), ('address', 'TEXT'), ('emergency_contact', 'TEXT'), ('tax_number', 'TEXT'), ('paye_ref', 'TEXT'), ('bank_details', 'TEXT'), ('bank_name', 'TEXT'), ('account_holder', 'TEXT'), ('account_number', 'TEXT'), ('branch_code', 'TEXT'), ('account_type', 'TEXT'), ('payment_reference', 'TEXT'), ('google_event_id', 'TEXT'), ('emp_type', 'TEXT DEFAULT "Full-time (5 Days)"'), ('cv_file', 'TEXT'), ('id_file', 'TEXT'), ('contract_file', 'TEXT'), ('additional_leave', 'REAL DEFAULT 0'), ('notes', 'TEXT'), ('workday_hours', 'REAL DEFAULT 7'), ('overtime_pay_treatment', 'TEXT DEFAULT "regular"'), ('uif_contributor', 'TEXT DEFAULT "Yes"'), ('uif_non_contributor_reason', 'TEXT'), ('uif_termination_code', 'TEXT')],
         'payslips': [('transport', 'REAL DEFAULT 0'), ('overtime', 'REAL DEFAULT 0'), ('bonus', 'REAL DEFAULT 0'), ('reimbursable_expenses', 'REAL DEFAULT 0'), ('loan_repayment', 'REAL DEFAULT 0'), ('payslip_type', 'TEXT DEFAULT "regular"'), ('adjustment_of_payslip_id', 'INTEGER'), ('adjustment_reason', 'TEXT'), ('created_at', 'TEXT'), ('uif_applicable', 'INTEGER'), ('uif_monthly_hours', 'REAL'), ('uif_booked_days', 'INTEGER'), ('uif_eligibility_reason', 'TEXT'), ('bonus_tax_treatment', 'TEXT DEFAULT "annual"'), ('sdl', 'REAL DEFAULT 0'), ('sdl_applicable', 'INTEGER')],
         'leave_records': [('leave_type', 'TEXT DEFAULT "Annual Leave"'), ('notes', 'TEXT'), ('document_file', 'TEXT')],
         'expenses': [('invoice_file', 'TEXT')]
@@ -3502,6 +3511,40 @@ def get_employee_workday_hours(emp):
         hours = 7.0
     return max(0.01, hours)
 
+
+def booking_is_half_day(booking):
+    """Return the stored half-day flag without assuming a specific row type."""
+    try:
+        value = dict(booking).get('is_half_day')
+    except Exception:
+        try:
+            value = booking['is_half_day']
+        except Exception:
+            value = 0
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def booking_work_fraction(booking):
+    return 0.5 if booking_is_half_day(booking) else 1.0
+
+
+def calculate_booking_work_units(bookings):
+    """Sum daily booking fractions, capped at one configured workday per date."""
+    units_by_date = {}
+    for booking in bookings or []:
+        try:
+            start_value = dict(booking).get('start') or ''
+        except Exception:
+            try:
+                start_value = booking['start'] or ''
+            except Exception:
+                start_value = ''
+        date_part = str(start_value)[:10]
+        if not date_part:
+            continue
+        units_by_date[date_part] = min(1.0, units_by_date.get(date_part, 0.0) + booking_work_fraction(booking))
+    return round(sum(units_by_date.values()), 4), units_by_date
+
 def parse_date_safe(value):
     """Read canonical ISO dates and supported historical South African dates safely."""
     return parse_supported_date(value)
@@ -3631,11 +3674,59 @@ def calculate_public_holiday_premium(daily_rate, is_daily_rate, ordinary_days_wo
     overtime-hours logic.
     """
     rate = max(0.0, float(daily_rate or 0.0))
-    ordinary_days = max(0, int(ordinary_days_worked or 0))
-    nonordinary_days = max(0, int(nonordinary_days_worked or 0))
+    ordinary_days = max(0.0, float(ordinary_days_worked or 0))
+    nonordinary_days = max(0.0, float(nonordinary_days_worked or 0))
     if is_daily_rate:
         return rate * (ordinary_days + nonordinary_days)
     return (rate * ordinary_days) + (rate * 2.0 * nonordinary_days)
+
+
+def calculate_contract_booking_pay(bookings, full_day_rate, half_day_rate, emp_type, workday_hours, public_holiday_dates):
+    """Calculate per-booking contract earnings and booking-specific premiums."""
+    rules = get_contract_day_rules(emp_type)
+    holidays = set(public_holiday_dates or [])
+    gross = 0.0
+    premium = 0.0
+    full_day_count = 0
+    half_day_count = 0
+    for booking in bookings or []:
+        half_day = booking_is_half_day(booking)
+        booking_rate = half_day_rate if half_day else full_day_rate
+        if half_day:
+            half_day_count += 1
+        else:
+            full_day_count += 1
+        gross += booking_rate
+
+        try:
+            date_value = str(dict(booking).get('start') or '')[:10]
+            booking_date = datetime.strptime(date_value, '%Y-%m-%d')
+        except Exception:
+            booking_date = None
+            date_value = ''
+        if booking_date:
+            weekday = booking_date.weekday()
+            if date_value in holidays:
+                # Contract gross already contains the first 1.0x booking payment.
+                premium += booking_rate
+            elif weekday == 6 and rules['sunday_multiplier'] > 1.0:
+                premium += booking_rate * (rules['sunday_multiplier'] - 1.0)
+            elif weekday == 5 and rules['saturday_multiplier'] > 1.0:
+                premium += booking_rate * (rules['saturday_multiplier'] - 1.0)
+
+        try:
+            overtime_hours = max(0.0, float(dict(booking).get('overtime_hours') or 0.0))
+        except Exception:
+            overtime_hours = 0.0
+        if overtime_hours:
+            scheduled_hours = max(0.01, float(workday_hours or 0.0) * (0.5 if half_day else 1.0))
+            premium += (booking_rate / scheduled_hours) * 1.5 * overtime_hours
+    return {
+        'gross': round(gross, 2),
+        'premium': round(premium, 2),
+        'full_day_count': full_day_count,
+        'half_day_count': half_day_count,
+    }
 
 
 def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_dates, deduplicate_workdays=False):
@@ -3663,7 +3754,7 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
     public_holiday_ordinary_days = 0
     public_holiday_nonordinary_days = 0
     explicit_overtime_hours = 0.0
-    counted_work_dates = set()
+    counted_work_dates = {}
 
     for b in bookings:
         if b['start']:
@@ -3675,9 +3766,15 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
             is_saturday = weekday == 5
             is_ordinary_schedule_day = weekday in rules['ordinary_weekdays']
 
-            count_work_date = not deduplicate_workdays or b_date_str not in counted_work_dates
-            if count_work_date:
-                counted_work_dates.add(b_date_str)
+            booking_fraction = booking_work_fraction(b)
+            if deduplicate_workdays:
+                previous_fraction = counted_work_dates.get(b_date_str, 0.0)
+                new_fraction = min(1.0, previous_fraction + booking_fraction)
+                count_work_fraction = new_fraction - previous_fraction
+                counted_work_dates[b_date_str] = new_fraction
+            else:
+                count_work_fraction = booking_fraction
+            if count_work_fraction > 0:
 
                 # Compliance hours follow the employee's ordinary work pattern. A public
                 # holiday that falls on an ordinary workday remains part of the ordinary
@@ -3686,23 +3783,23 @@ def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_date
                 # shift worker is counted as ordinary hours and separately flagged for the
                 # applicable Sunday premium.
                 if is_ordinary_schedule_day:
-                    ordinary_days += 1
+                    ordinary_days += count_work_fraction
                 else:
-                    nonordinary_days += 1
+                    nonordinary_days += count_work_fraction
 
                 # Premium categories are deliberately separate from the overtime bucket.
                 # Public holidays override Sunday/Saturday premium classification so the
                 # same work date is not classified as two different premium day types.
                 if is_holiday:
-                    public_holiday_days += 1
+                    public_holiday_days += count_work_fraction
                     if is_ordinary_schedule_day:
-                        public_holiday_ordinary_days += 1
+                        public_holiday_ordinary_days += count_work_fraction
                     else:
-                        public_holiday_nonordinary_days += 1
+                        public_holiday_nonordinary_days += count_work_fraction
                 elif is_sunday and rules['sunday_multiplier'] > 1.0:
-                    sunday_premium_days += 1
+                    sunday_premium_days += count_work_fraction
                 elif is_saturday and rules['saturday_multiplier'] > 1.0:
-                    saturday_nonordinary_days += 1
+                    saturday_nonordinary_days += count_work_fraction
 
         try:
             explicit_overtime_hours += max(0.0, float(b['overtime_hours'] or 0.0))
@@ -3859,28 +3956,16 @@ def get_employee_month_bookings(conn, company_id, employee_name, target_month, p
 
 
 def calculate_contract_uif_booking_hours(bookings, workday_hours):
-    """Calculate UIF threshold hours from unique booked working dates.
+    """Calculate UIF threshold hours from daily capped booking work units.
 
     Contract <25 Hrs employees are no-work-no-pay employees. Multiple client
-    bookings on the same calendar date represent one working day for this monthly
-    UIF threshold, so the date is counted once and multiplied by the employee's
-    configured Working Hours per Day.
+    A half-day contributes 0.5 of Working Hours per Day. Multiple bookings on the
+    same date can build up to, but never exceed, one configured working day.
     """
-    unique_dates = set()
-    for booking in bookings or []:
-        try:
-            start_value = dict(booking).get('start') or ''
-        except Exception:
-            try:
-                start_value = booking['start'] or ''
-            except Exception:
-                start_value = ''
-        date_part = str(start_value)[:10]
-        if date_part:
-            unique_dates.add(date_part)
-    booked_days = len(unique_dates)
+    work_units, units_by_date = calculate_booking_work_units(bookings)
+    booked_days = len(units_by_date)
     hours_per_day = max(0.0, float(workday_hours or 0.0))
-    monthly_hours = booked_days * hours_per_day
+    monthly_hours = work_units * hours_per_day
     return booked_days, round(monthly_hours, 2)
 
 
@@ -4027,7 +4112,7 @@ def fetch_employee_bookings_between(conn, company_id, employee_name, start_date,
             bookings.append(row)
     return bookings
 
-def analyse_employee_hours_for_period(conn, company_id, employee, start_date, end_date, proposed_date=None, proposed_overtime=0, exclude_booking_id=None, include_proposed=False, deduplicate_workdays=False, exclude_cancelled=False):
+def analyse_employee_hours_for_period(conn, company_id, employee, start_date, end_date, proposed_date=None, proposed_overtime=0, exclude_booking_id=None, include_proposed=False, deduplicate_workdays=False, exclude_cancelled=False, proposed_half_day=False):
     emp_name = employee['name']
     workday_hours = get_employee_workday_hours(employee)
     bookings = fetch_employee_bookings_between(conn, company_id, emp_name, start_date, end_date, exclude_booking_id)
@@ -4048,7 +4133,8 @@ def analyse_employee_hours_for_period(conn, company_id, employee, start_date, en
         bookings.append({
             'start': f"{proposed_date_only.strftime('%Y-%m-%d')}T00:00",
             'employee': emp_name,
-            'overtime_hours': float(proposed_overtime or 0)
+            'overtime_hours': float(proposed_overtime or 0),
+            'is_half_day': 1 if proposed_half_day else 0
         })
 
     public_holidays = get_public_holiday_dates_between(conn, start_date, end_date)
@@ -4095,7 +4181,7 @@ def is_employee_booked_on_date(conn, company_id, employee_name, target_date, exc
             return True
     return False
 
-def get_booking_staff_hours_summary(conn, company_id, employee, target_date, proposed_overtime=0, exclude_booking_id=None, include_proposed=False):
+def get_booking_staff_hours_summary(conn, company_id, employee, target_date, proposed_overtime=0, exclude_booking_id=None, include_proposed=False, proposed_half_day=False):
     target_date_only = as_date(target_date)
     week_start, week_end = get_week_bounds(target_date_only)
     month_start, month_end = get_month_bounds(target_date_only)
@@ -4103,13 +4189,13 @@ def get_booking_staff_hours_summary(conn, company_id, employee, target_date, pro
     week_hours, week_warning = analyse_employee_hours_for_period(
         conn, company_id, employee, week_start, week_end, target_date_only,
         proposed_overtime, exclude_booking_id, include_proposed,
-        deduplicate_workdays=True, exclude_cancelled=True
+        deduplicate_workdays=True, exclude_cancelled=True, proposed_half_day=proposed_half_day
     )
 
     month_hours, _month_warning = analyse_employee_hours_for_period(
         conn, company_id, employee, month_start, month_end, target_date_only,
         proposed_overtime, exclude_booking_id, include_proposed,
-        deduplicate_workdays=True, exclude_cancelled=True
+        deduplicate_workdays=True, exclude_cancelled=True, proposed_half_day=proposed_half_day
     )
 
     # The month colour reflects the worst weekly BCEA status in the payroll month, because BCEA limits are weekly.
@@ -4122,7 +4208,7 @@ def get_booking_staff_hours_summary(conn, company_id, employee, target_date, pro
             conn, company_id, employee, current_week_start, current_week_end,
             proposed_for_this_week, proposed_overtime if proposed_for_this_week else 0,
             exclude_booking_id, include_proposed,
-            deduplicate_workdays=True, exclude_cancelled=True
+            deduplicate_workdays=True, exclude_cancelled=True, proposed_half_day=proposed_half_day
         )
         if week_check['status'] == 'red':
             worst_status = 'red'
@@ -4214,6 +4300,35 @@ def validate_booking_employees_available(conn, company_id, assignments, booking_
         return False, f"Cannot book employee on leave: {', '.join(on_leave)}"
     return True, ''
 
+
+def validate_half_day_booking_rates(conn, company_id, assignments, is_half_day):
+    """Prevent half-day contract bookings when the employee profile is incomplete."""
+    if not is_half_day:
+        return True, ''
+    selected_names = []
+    for assignment in assignments or []:
+        for raw_name in str((assignment or {}).get('employee') or '').split(','):
+            name = raw_name.strip()
+            if name and name not in selected_names:
+                selected_names.append(name)
+    missing_rates = []
+    for name in selected_names:
+        employee = conn.execute(
+            'SELECT emp_type, half_day_rate FROM employees WHERE company_id=? AND name=?',
+            (company_id, name)
+        ).fetchone()
+        if not employee or str(employee['emp_type'] or '').strip() not in CONTRACT_BOOKING_EMPLOYEE_TYPES:
+            continue
+        try:
+            valid_rate = float(employee['half_day_rate'] or 0) > 0
+        except (TypeError, ValueError):
+            valid_rate = False
+        if not valid_rate:
+            missing_rates.append(name)
+    if missing_rates:
+        return False, 'Set a positive Half Day Rate on the employee profile before creating this half-day booking: ' + ', '.join(missing_rates)
+    return True, ''
+
 def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str=None, conn=None):
     start = parse_date_safe(start_date_str)
     if not start:
@@ -4256,7 +4371,7 @@ def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref
     elif safe_type == 'Full-time (6 Days)': base_monthly_rate = 1.5
     monthly_rate = base_monthly_rate + (add_leave_per_year / 12.0)
 
-    valid_shift_dates = []
+    valid_shift_bookings = []
     if safe_type == 'Contract >25 Hrs':
         bookings = conn.execute('SELECT * FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall()
         for b in bookings:
@@ -4266,7 +4381,7 @@ def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref
                 if (b_date and start.date() <= b_date.date() <= now.date()
                         and employee_name_matches(b['employee'], emp_name)
                         and status not in {'cancelled', 'canceled'}):
-                    valid_shift_dates.append(b_date)
+                    valid_shift_bookings.append(b)
             except Exception:
                 pass
 
@@ -4277,7 +4392,9 @@ def calculate_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref
         amount = 0.0
         if safe_type == 'Contract >25 Hrs':
             next_month = add_months(award_month, 1)
-            shifts = len({d.date() for d in valid_shift_dates if award_month.date() <= d.date() < next_month.date()})
+            month_bookings = [b for b in valid_shift_bookings
+                              if award_month.date() <= parse_date_safe(b['start']).date() < next_month.date()]
+            shifts, _units_by_date = calculate_booking_work_units(month_bookings)
             amount = (shifts / 17.0) + (add_leave_per_year / 12.0)
         else:
             amount = monthly_rate
@@ -4347,7 +4464,7 @@ def calculate_final_leave_payout(conn, emp, company_id, month_start, month_end, 
     days = max(0.0, float(balance))
     base = safe_money(emp['gross_salary'])
     emp_type = emp['emp_type'] or 'Full-time (5 Days)'
-    daily_contract = emp_type in ['Contract <25 Hrs', 'Contract >25 Hrs'] and base < 2000
+    daily_contract = emp_type in CONTRACT_BOOKING_EMPLOYEE_TYPES
     # Monthly remuneration = 4 1/3 weeks. Leave units follow the existing leave
     # scheme (five-day units for Shift Worker; six-day units for six-day contracts).
     week_days = 6 if emp_type in ['Full-time (6 Days)', 'Contract >25 Hrs', 'Contract <25 Hrs'] else 5
@@ -4401,11 +4518,15 @@ def calculate_sick_leave_balance(employee_id, start_date_str, emp_type, emp_name
         elif safe_type == 'Full-time (6 Days)':
             earned = ((max(0, days) / 7.0) * 6.0) / 26.0
         elif safe_type == 'Contract >25 Hrs':
-            valid = 0
-            for booking in conn.execute('SELECT start FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall():
+            valid_bookings = []
+            for booking in conn.execute('SELECT * FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall():
                 booking_date = parse_date_safe(booking['start'])
-                if booking_date and start.date() <= booking_date.date() <= now.date():
-                    valid += 1
+                status = str(dict(booking).get('mobile_status') or '').strip().lower()
+                if (booking_date and start.date() <= booking_date.date() <= now.date()
+                        and employee_name_matches(booking['employee'], emp_name)
+                        and status not in {'cancelled', 'canceled'}):
+                    valid_bookings.append(booking)
+            valid, _units_by_date = calculate_booking_work_units(valid_bookings)
             earned = valid / 26.0
     else:
         if safe_type in ['Full-time', 'Full-time (5 Days)']:
@@ -4413,15 +4534,19 @@ def calculate_sick_leave_balance(employee_id, start_date_str, emp_type, emp_name
         elif safe_type == 'Full-time (6 Days)':
             earned = 36.0
         elif safe_type == 'Contract >25 Hrs':
-            cycle_bookings = conn.execute('SELECT start FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall()
-            valid = 0
+            cycle_bookings = conn.execute('SELECT * FROM bookings WHERE company_id=? AND employee LIKE ?', (cid, f"%{emp_name}%")).fetchall()
+            valid_bookings = []
             for b in cycle_bookings:
                 try:
                     b_date = parse_date_safe(b['start'])
-                    if b_date and cycle_start.date() <= b_date.date() < cycle_end.date() and b_date.date() <= now.date():
-                        valid += 1
+                    status = str(dict(b).get('mobile_status') or '').strip().lower()
+                    if (b_date and cycle_start.date() <= b_date.date() < cycle_end.date() and b_date.date() <= now.date()
+                            and employee_name_matches(b['employee'], emp_name)
+                            and status not in {'cancelled', 'canceled'}):
+                        valid_bookings.append(b)
                 except Exception:
                     pass
+            valid, _units_by_date = calculate_booking_work_units(valid_bookings)
             weeks_in_cycle_to_date = max(1, (min(now, cycle_end).date() - cycle_start.date()).days / 7.0)
             avg_days_per_week = valid / weeks_in_cycle_to_date
             earned = avg_days_per_week * 6.0
@@ -4451,11 +4576,15 @@ def calculate_family_leave_balance(employee_id, start_date_str, emp_type, emp_na
         conn.close()
         return 0.0
     if emp_type == 'Contract >25 Hrs':
-        valid = 0
-        for booking in conn.execute("SELECT start FROM bookings WHERE employee LIKE ? AND company_id=?", (f"%{emp_name}%", session['company_id'])).fetchall():
+        valid_bookings = []
+        for booking in conn.execute("SELECT * FROM bookings WHERE employee LIKE ? AND company_id=?", (f"%{emp_name}%", session['company_id'])).fetchall():
             booking_date = parse_date_safe(booking['start'])
-            if booking_date and start.date() <= booking_date.date() <= now.date():
-                valid += 1
+            status = str(dict(booking).get('mobile_status') or '').strip().lower()
+            if (booking_date and start.date() <= booking_date.date() <= now.date()
+                    and employee_name_matches(booking['employee'], emp_name)
+                    and status not in {'cancelled', 'canceled'}):
+                valid_bookings.append(booking)
+        valid, _units_by_date = calculate_booking_work_units(valid_bookings)
         if (valid / max(1, (now.date() - start.date()).days / 7.0)) < 4.0:
             conn.close()
             return 0.0
@@ -11535,6 +11664,7 @@ def bookings():
                 "transport": r['transport'] or '', 
                 "booking_notes": r['booking_notes'] or '', 
                 "overtime_hours": float(r['overtime_hours'] or 0),
+                "is_half_day": booking_is_half_day(r),
                 "project_id": r['project_id'] or '',
                 "project_name": r['project_name'] or '',
                 "project_code": r['project_code'] or '',
@@ -11602,6 +11732,7 @@ def booking_staff_hours():
     date_str = request.args.get('date') or datetime.now().strftime('%Y-%m-%d')
     employee_name = request.args.get('employee') or ''
     exclude_booking_id = request.args.get('exclude_booking_id') or None
+    proposed_half_day = _db_truthy(request.args.get('is_half_day'))
     try:
         overtime_hours = float(request.args.get('overtime_hours') or 0)
     except Exception:
@@ -11624,7 +11755,10 @@ def booking_staff_hours():
         if not emp:
             conn.close()
             return jsonify({"status": "error", "message": "Employee is not available for new bookings. Only Active employees/providers can be assigned."}), 404
-        summary = get_booking_staff_hours_summary(conn, cid, emp, target_date, overtime_hours, exclude_booking_id, True)
+        summary = get_booking_staff_hours_summary(
+            conn, cid, emp, target_date, overtime_hours, exclude_booking_id, True,
+            proposed_half_day=proposed_half_day
+        )
         conn.close()
         return jsonify({"status": "success", "employee": summary})
 
@@ -12267,7 +12401,7 @@ def api_bulk_bookings_delete():
 
 @app.route('/add', methods=['POST'])
 def add_booking():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     conn = get_db_connection()
     try:
         project_id = normalise_booking_project_id(conn, session['company_id'], data.get('project_id'))
@@ -12303,6 +12437,13 @@ def add_booking():
     if not is_available:
         conn.close()
         return jsonify({"status": "error", "message": availability_message}), 400
+    is_half_day = 1 if _db_truthy(data.get('is_half_day')) else 0
+    valid_half_day, half_day_message = validate_half_day_booking_rates(
+        conn, session['company_id'], assignments_to_check, is_half_day
+    )
+    if not valid_half_day:
+        conn.close()
+        return jsonify({"status": "error", "message": half_day_message}), 400
     
     booking_ids = []
     if 'assignments' in data:
@@ -12314,8 +12455,8 @@ def add_booking():
                 except Exception as e: 
                     print(f"Google Sync Error: {_format_google_calendar_error(e)}")
 
-            cur = conn.execute('INSERT INTO bookings (company_id, client_id, title, start, employee, google_event_id, booking_type, transport, booking_notes, overtime_hours, is_invoiced, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                         (session['company_id'], client_id, client_name, dt_str, req['employee'], google_id, booking_type_value, req.get('transport'), data.get('booking_notes', ''), float(req.get('overtime_hours', 0)), 0, project_id))
+            cur = conn.execute('INSERT INTO bookings (company_id, client_id, title, start, employee, google_event_id, booking_type, transport, booking_notes, overtime_hours, is_half_day, is_invoiced, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                         (session['company_id'], client_id, client_name, dt_str, req['employee'], google_id, booking_type_value, req.get('transport'), data.get('booking_notes', ''), float(req.get('overtime_hours', 0)), is_half_day, 0, project_id))
             booking_ids.append(cur.lastrowid)
             save_custom_field_values(conn, session['company_id'], 'booking', cur.lastrowid, custom_fields)
     else:
@@ -12324,8 +12465,8 @@ def add_booking():
             try: google_id = create_google_event(client_name, data['date'], data['time'], data['employee'], booking_type_value, data.get('transport'), session['company_name'], session.get('company_id'))
             except Exception as e: print(f"Google Sync Error: {_format_google_calendar_error(e)}")
                 
-        cur = conn.execute('INSERT INTO bookings (company_id, client_id, title, start, employee, google_event_id, booking_type, transport, booking_notes, overtime_hours, is_invoiced, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
-                     (session['company_id'], client_id, client_name, dt_str, data['employee'], google_id, booking_type_value, data.get('transport'), data.get('booking_notes', ''), float(data.get('overtime_hours', 0)), 0, project_id))
+        cur = conn.execute('INSERT INTO bookings (company_id, client_id, title, start, employee, google_event_id, booking_type, transport, booking_notes, overtime_hours, is_half_day, is_invoiced, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
+                     (session['company_id'], client_id, client_name, dt_str, data['employee'], google_id, booking_type_value, data.get('transport'), data.get('booking_notes', ''), float(data.get('overtime_hours', 0)), is_half_day, 0, project_id))
         booking_ids.append(cur.lastrowid)
         save_custom_field_values(conn, session['company_id'], 'booking', cur.lastrowid, custom_fields)
                      
@@ -12346,7 +12487,7 @@ def edit_booking():
         return jsonify({"status": "error", "message": "Missing booking data: " + ", ".join(missing_payload)}), 400
 
     conn = get_db_connection()
-    b = conn.execute("SELECT google_event_id, employee, start, title FROM bookings WHERE id=? AND company_id=?", (data['id'], session['company_id'])).fetchone()
+    b = conn.execute("SELECT google_event_id, employee, start, title, is_half_day FROM bookings WHERE id=? AND company_id=?", (data['id'], session['company_id'])).fetchone()
     if not b:
         conn.close()
         return jsonify({"status": "error", "message": "Booking not found for this company."}), 404
@@ -12380,6 +12521,13 @@ def edit_booking():
     if not is_available:
         conn.close()
         return jsonify({"status": "error", "message": availability_message}), 400
+    is_half_day = (1 if _db_truthy(data.get('is_half_day')) else 0) if 'is_half_day' in data else (1 if booking_is_half_day(b) else 0)
+    valid_half_day, half_day_message = validate_half_day_booking_rates(
+        conn, session['company_id'], [{"employee": data.get('employee', '')}], is_half_day
+    )
+    if not valid_half_day:
+        conn.close()
+        return jsonify({"status": "error", "message": half_day_message}), 400
     
     new_google_event_id = b['google_event_id'] if b else None
     if session.get('comp_google_calendar'):
@@ -12393,7 +12541,7 @@ def edit_booking():
         except Exception as e:
             print(f"Google Sync Error: {_format_google_calendar_error(e)}")
             
-    conn.execute('UPDATE bookings SET client_id=?, title=?, start=?, employee=?, google_event_id=?, booking_type=?, transport=?, booking_notes=?, overtime_hours=?, project_id=? WHERE id=? AND company_id=?', (client_id, client_name, dt_str, data['employee'], new_google_event_id, data['booking_type'], data.get('transport'), data.get('booking_notes', ''), overtime_hours, project_id, data['id'], session['company_id']))
+    conn.execute('UPDATE bookings SET client_id=?, title=?, start=?, employee=?, google_event_id=?, booking_type=?, transport=?, booking_notes=?, overtime_hours=?, is_half_day=?, project_id=? WHERE id=? AND company_id=?', (client_id, client_name, dt_str, data['employee'], new_google_event_id, data['booking_type'], data.get('transport'), data.get('booking_notes', ''), overtime_hours, is_half_day, project_id, data['id'], session['company_id']))
     if custom_fields_submitted:
         save_custom_field_values(conn, session['company_id'], 'booking', data['id'], custom_fields)
     old_employee_names = b['employee'] if b else ''
@@ -12556,6 +12704,13 @@ def generate_recurring():
             'transport': data.get('transport', ''),
             'overtime_hours': data.get('overtime_hours', 0)
         }]
+    is_half_day = 1 if _db_truthy(data.get('is_half_day')) else 0
+    valid_half_day, half_day_message = validate_half_day_booking_rates(
+        conn, session['company_id'], assignments, is_half_day
+    )
+    if not valid_half_day:
+        conn.close()
+        return jsonify({"status": "error", "message": half_day_message}), 400
 
     custom_fields = data.get('custom_fields') or {}
     booking_custom_fields = get_tenant_custom_fields(conn, session['company_id'], 'booking', visible_only=True)
@@ -12576,12 +12731,12 @@ def generate_recurring():
         
         for req in assignments:
             cursor.execute('''
-                INSERT INTO bookings (company_id, client_id, title, start, employee, booking_type, transport, booking_notes, overtime_hours, is_invoiced, project_id) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                INSERT INTO bookings (company_id, client_id, title, start, employee, booking_type, transport, booking_notes, overtime_hours, is_half_day, is_invoiced, project_id) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
             ''', (
                 session['company_id'], client_id, client_name, dt_str, req.get('employee'), 
                 booking_type_value, req.get('transport'), data.get('booking_notes', ''), 
-                float(req.get('overtime_hours', 0)), project_id
+                float(req.get('overtime_hours', 0)), is_half_day, project_id
             ))
             db_id = cursor.lastrowid
             save_custom_field_values(conn, session['company_id'], 'booking', db_id, custom_fields)
@@ -14002,8 +14157,9 @@ def payroll_index():
         employee_total = conn.execute(f"SELECT COUNT(*) FROM employees WHERE {emp_where}", emp_params).fetchone()[0]
         employees = conn.execute(f"SELECT * FROM employees WHERE {emp_where} ORDER BY name ASC LIMIT ? OFFSET ?", emp_params + [payroll_per_page, payroll_offset]).fetchall()
         employee_pagination = pagination_meta(employee_total, payroll_page, payroll_per_page)
-        all_payroll_employees = conn.execute("""SELECT id, name, start_date, date_of_birth, emp_type, status, inactive_date
-                                                FROM employees
+        all_payroll_employees = conn.execute("""SELECT id, name, start_date, date_of_birth, emp_type, status, inactive_date,
+                                                       gross_salary, half_day_rate
+                                                 FROM employees
                                                 WHERE company_id=? AND (emp_type != 'Supplier' OR emp_type IS NULL)
                                                 ORDER BY name ASC""", (cid,)).fetchall()
         for payroll_emp in all_payroll_employees:
@@ -14022,6 +14178,19 @@ def payroll_index():
                     field_issues.append(f"{field_label} is invalid ({raw_value})")
                 elif not is_iso_date_value(raw_value):
                     field_issues.append(f"{field_label} is stored as {raw_value}; edit and save it as YYYY-MM-DD")
+            if str(payroll_emp['emp_type'] or '').strip() in CONTRACT_BOOKING_EMPLOYEE_TYPES:
+                try:
+                    full_day_rate_valid = float(payroll_emp['gross_salary'] or 0) > 0
+                except (TypeError, ValueError):
+                    full_day_rate_valid = False
+                try:
+                    half_day_rate_valid = float(payroll_emp['half_day_rate'] or 0) > 0
+                except (TypeError, ValueError):
+                    half_day_rate_valid = False
+                if not full_day_rate_valid:
+                    field_issues.append('Full Day Booking Rate is missing or invalid')
+                if not half_day_rate_valid:
+                    field_issues.append('Half Day Rate is missing or invalid')
             if field_issues:
                 payroll_data_warnings.append({
                     'employee_id': payroll_emp['id'],
@@ -14065,7 +14234,19 @@ def payroll_index():
             d = dict(emp)
             d['leave_balance'] = calculate_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'])
             d['sick_leave_balance'] = calculate_sick_leave_balance(emp['id'], emp['start_date'], emp['emp_type'], emp['name'])
-            d['hours_worked'] = round(conn.execute("SELECT COUNT(*) as c FROM bookings WHERE company_id=? AND start LIKE ? AND employee LIKE ?", (cid, f"{current_month}%", f"%{emp['name']}%")).fetchone()['c'] * get_employee_workday_hours(emp), 2)
+            month_booking_rows = conn.execute(
+                "SELECT * FROM bookings WHERE company_id=? AND start LIKE ? AND employee LIKE ?",
+                (cid, f"{current_month}%", f"%{emp['name']}%")
+            ).fetchall()
+            month_booking_rows = [
+                row for row in month_booking_rows
+                if employee_name_matches(row['employee'], emp['name'])
+                and str(dict(row).get('mobile_status') or 'Scheduled').strip().lower() not in {'cancelled', 'canceled'}
+            ]
+            _booked_units, booked_hours = calculate_contract_uif_booking_hours(
+                month_booking_rows, get_employee_workday_hours(emp)
+            )
+            d['hours_worked'] = booked_hours
             _m_start, _m_end, _inactive, payroll_cutoff = get_employee_payroll_cutoff(emp, current_month_ref_date)
             d['current_month_payroll_applicable'] = payroll_cutoff is not None
             d['current_month_payroll_finalized'] = int(emp['id']) in current_month_finalized_map
@@ -14571,6 +14752,23 @@ def update_employee():
     missing_fields = [label for key, label in required_fields.items() if not str(data.get(key) or '').strip()]
     if missing_fields:
         return jsonify({"status": "error", "message": "Missing required fields: " + ", ".join(missing_fields)}), 400
+    emp_type = str(data.get('emp_type') or '').strip()
+    try:
+        gross_salary = float(data.get('gross_salary'))
+        if not 0 <= gross_salary < float('inf'):
+            raise ValueError()
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Monthly Base Salary / Full Day Booking Rate must be a valid non-negative amount."}), 400
+    half_day_rate = None
+    if emp_type in CONTRACT_BOOKING_EMPLOYEE_TYPES:
+        if gross_salary <= 0:
+            return jsonify({"status": "error", "message": "Full Day Booking Rate must be greater than zero for contract employees."}), 400
+        try:
+            half_day_rate = float(data.get('half_day_rate'))
+            if not 0 < half_day_rate < float('inf'):
+                raise ValueError()
+        except (TypeError, ValueError):
+            return jsonify({"status": "error", "message": "Half Day Rate is required and must be greater than zero for contract employees."}), 400
     try:
         emp_workday_hours = float(data.get('workday_hours') or 7)
         if emp_workday_hours <= 0:
@@ -14622,7 +14820,7 @@ def update_employee():
                 conn.close()
                 return jsonify({"status": "error", "message": "Upload Signed Contract and Upload ID/Passport Copy are required."}), 400
 
-            conn.execute('''UPDATE employees SET name=?, job_title=?, emp_type=?, status=?, start_date=?, inactive_date=?, date_of_birth=?, gross_salary=?, id_passport=?, phone=?, email=?, emergency_contact=?, tax_number=?, paye_ref=?, bank_details=?, bank_name=?, account_holder=?, account_number=?, branch_code=?, account_type=?, payment_reference=?, address=?, cv_file=?, id_file=?, contract_file=?, additional_leave=?, notes=?, workday_hours=?, overtime_pay_treatment=?, uif_contributor=?, uif_non_contributor_reason=?, uif_termination_code=? WHERE id=? AND company_id=?''', (data.get('name'), data.get('job_title'), data.get('emp_type'), data.get('status'), start_date, inactive_date, date_of_birth, data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), final_cv, final_id, final_contract, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or '', emp_id, cid))
+            conn.execute('''UPDATE employees SET name=?, job_title=?, emp_type=?, status=?, start_date=?, inactive_date=?, date_of_birth=?, gross_salary=?, half_day_rate=?, id_passport=?, phone=?, email=?, emergency_contact=?, tax_number=?, paye_ref=?, bank_details=?, bank_name=?, account_holder=?, account_number=?, branch_code=?, account_type=?, payment_reference=?, address=?, cv_file=?, id_file=?, contract_file=?, additional_leave=?, notes=?, workday_hours=?, overtime_pay_treatment=?, uif_contributor=?, uif_non_contributor_reason=?, uif_termination_code=? WHERE id=? AND company_id=?''', (data.get('name'), data.get('job_title'), emp_type, data.get('status'), start_date, inactive_date, date_of_birth, gross_salary, half_day_rate, data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), final_cv, final_id, final_contract, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or '', emp_id, cid))
             action_msg = ('HR & Payroll', 'Updated Employee', f"Updated profile information for {data.get('name')}")
         else:
             if not id_filename or not contract_filename:
@@ -14634,7 +14832,7 @@ def update_employee():
                     _begin_atomic_write(conn)
                 allocated_employee_number = _allocate_employee_number(conn, cid, synchronise=True)
                 try:
-                    conn.execute('''INSERT INTO employees (company_id, name, emp_number, job_title, emp_type, status, start_date, inactive_date, date_of_birth, gross_salary, id_passport, phone, email, emergency_contact, tax_number, paye_ref, bank_details, bank_name, account_holder, account_number, branch_code, account_type, payment_reference, address, cv_file, id_file, contract_file, additional_leave, notes, workday_hours, overtime_pay_treatment, uif_contributor, uif_non_contributor_reason, uif_termination_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (cid, data.get('name'), allocated_employee_number, data.get('job_title'), data.get('emp_type'), data.get('status'), start_date, inactive_date, date_of_birth, data.get('gross_salary'), data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), cv_filename, id_filename, contract_filename, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or ''))
+                    conn.execute('''INSERT INTO employees (company_id, name, emp_number, job_title, emp_type, status, start_date, inactive_date, date_of_birth, gross_salary, half_day_rate, id_passport, phone, email, emergency_contact, tax_number, paye_ref, bank_details, bank_name, account_holder, account_number, branch_code, account_type, payment_reference, address, cv_file, id_file, contract_file, additional_leave, notes, workday_hours, overtime_pay_treatment, uif_contributor, uif_non_contributor_reason, uif_termination_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (cid, data.get('name'), allocated_employee_number, data.get('job_title'), emp_type, data.get('status'), start_date, inactive_date, date_of_birth, gross_salary, half_day_rate, data.get('id_passport'), data.get('phone'), data.get('email'), data.get('emergency_contact'), data.get('tax_number'), data.get('paye_ref'), compose_bank_details(data), data.get('bank_name'), data.get('account_holder'), data.get('account_number'), data.get('branch_code'), data.get('account_type'), data.get('payment_reference'), data.get('address'), cv_filename, id_filename, contract_filename, emp_add_leave, data.get('notes'), emp_workday_hours, overtime_pay_treatment, data.get('uif_contributor') or 'Yes', data.get('uif_non_contributor_reason') or '', data.get('uif_termination_code') or ''))
                     break
                 except Exception as exc:
                     if attempt == 0 and _is_employee_number_conflict(exc):
@@ -15000,11 +15198,13 @@ def _calculate_draft_payslip(conn, emp, company, data):
         conn, session['company_id'], emp['name'], target_month, payroll_cutoff, payroll_start
     )
     
-    days_worked = len(bookings)
     base_salary = _payroll_input_amount(emp['gross_salary'], 'Employee salary')
     
     emp_type = emp['emp_type'] or ''
-    is_daily_rate = emp_type in ['Contract <25 Hrs', 'Contract >25 Hrs'] and base_salary < 2000
+    is_daily_rate = emp_type in CONTRACT_BOOKING_EMPLOYEE_TYPES
+    half_day_rate = _payroll_input_amount(dict(emp).get('half_day_rate'), 'Half Day Rate')
+    if is_daily_rate and any(booking_is_half_day(booking) for booking in bookings) and half_day_rate <= 0:
+        raise ValueError('Set a positive Half Day Rate on the employee profile before calculating payroll for half-day bookings.')
     
     payable_base_salary, inactive_salary_note = prorate_monthly_salary_for_inactive_date(base_salary, emp_type, month_start, month_end, payroll_cutoff, payroll_start)
     divisor = 26.0 if '(6 Days)' in emp_type else 22.0
@@ -15017,7 +15217,9 @@ def _calculate_draft_payslip(conn, emp, company, data):
     target_year = date_str[:4]
     hol_db = conn.execute("SELECT date_str FROM public_holidays WHERE year=?", (target_year,)).fetchall()
     sa_holidays = [h['date_str'] for h in hol_db]
-    booking_hours = analyse_booking_hours(bookings, emp_type, workday_hours, sa_holidays)
+    booking_hours = analyse_booking_hours(
+        bookings, emp_type, workday_hours, sa_holidays, deduplicate_workdays=True
+    )
     saturday_count = booking_hours['saturday_nonordinary_days']
     sunday_premium_count = booking_hours['sunday_premium_days']
     public_holiday_count = booking_hours['public_holiday_days']
@@ -15028,25 +15230,23 @@ def _calculate_draft_payslip(conn, emp, company, data):
     hourly_rate = daily_rate / workday_hours
     rules = get_contract_day_rules(emp_type)
 
+    contract_booking_pay = None
     if is_daily_rate:
-        # Existing gross already contains 1.0x for every worked booking. Add only
-        # the premium portion needed for Saturday/Sunday rules and public holidays.
-        overtime_amount += daily_rate * max(0.0, rules['saturday_multiplier'] - 1.0) * saturday_count
-        overtime_amount += daily_rate * max(0.0, rules['sunday_multiplier'] - 1.0) * sunday_premium_count
+        contract_booking_pay = calculate_contract_booking_pay(
+            bookings, base_salary, half_day_rate, emp_type, workday_hours, sa_holidays
+        )
+        overtime_amount = contract_booking_pay['premium']
     else:
         # Monthly salary already covers ordinary scheduled days, but not extra
         # non-ordinary Saturday/Sunday work. Preserve the existing treatment.
         overtime_amount += (hourly_rate * workday_hours * rules['saturday_multiplier']) * saturday_count
         overtime_amount += (hourly_rate * workday_hours * rules['sunday_multiplier']) * sunday_premium_count
-
-    # Public-holiday pay is calculated as the *additional* payroll amount, not as
-    # another blanket 2.0x on top of pay that is already included elsewhere.
-    overtime_amount += calculate_public_holiday_premium(
-        daily_rate, is_daily_rate, public_holiday_ordinary_count, public_holiday_nonordinary_count
-    )
-
-    if total_overtime_hours > 0:
-        overtime_amount += (hourly_rate * 1.5) * total_overtime_hours
+        # Public-holiday pay is the additional amount still due above monthly salary.
+        overtime_amount += calculate_public_holiday_premium(
+            daily_rate, False, public_holiday_ordinary_count, public_holiday_nonordinary_count
+        )
+        if total_overtime_hours > 0:
+            overtime_amount += (hourly_rate * 1.5) * total_overtime_hours
         
     display_parts = []
     if is_daily_rate and public_holiday_count > 0:
@@ -15062,8 +15262,13 @@ def _calculate_draft_payslip(conn, emp, company, data):
     sundays_display = f"({', '.join(display_parts)})" if display_parts else ""
 
     if is_daily_rate:
-        gross = base_salary * days_worked
-        days_worked_display = f"({days_worked} shifts @ R{base_salary:.2f})"
+        gross = contract_booking_pay['gross']
+        display_parts = []
+        if contract_booking_pay['full_day_count']:
+            display_parts.append(f"{contract_booking_pay['full_day_count']} full day @ R{base_salary:.2f}")
+        if contract_booking_pay['half_day_count']:
+            display_parts.append(f"{contract_booking_pay['half_day_count']} half day @ R{half_day_rate:.2f}")
+        days_worked_display = f"({', '.join(display_parts)})" if display_parts else '(No bookings worked)'
     else:
         gross = payable_base_salary
         days_worked_display = inactive_salary_note
@@ -16233,7 +16438,10 @@ def _build_employee_activity_report(emp_id, emp_name, s_date, e_date):
         if not emp:
             raise ValueError('Employee not found.')
         actual_name = emp['name'] or emp_name or ''
-        bookings = conn.execute("SELECT start, title, booking_notes FROM bookings WHERE company_id=? AND employee LIKE ? AND substr(start, 1, 10) BETWEEN ? AND ? ORDER BY start ASC", (cid, f"%{actual_name}%", s_date, e_date)).fetchall()
+        bookings = conn.execute("SELECT * FROM bookings WHERE company_id=? AND employee LIKE ? AND substr(start, 1, 10) BETWEEN ? AND ? ORDER BY start ASC", (cid, f"%{actual_name}%", s_date, e_date)).fetchall()
+        bookings = [b for b in bookings
+                    if employee_name_matches(b['employee'], actual_name)
+                    and str(dict(b).get('mobile_status') or 'Scheduled').strip().lower() not in {'cancelled', 'canceled'}]
         leave = conn.execute("SELECT * FROM leave_records WHERE company_id=? AND employee_id=? AND date_taken BETWEEN ? AND ? ORDER BY date_taken ASC", (cid, emp_id, s_date, e_date)).fetchall()
         workday_hours = get_employee_workday_hours(emp)
         dates_worked = []
@@ -16241,9 +16449,10 @@ def _build_employee_activity_report(emp_id, emp_name, s_date, e_date):
             work_date = b['start'][:10]
             try: weekday = datetime.strptime(work_date, '%Y-%m-%d').strftime('%A')
             except Exception: weekday = ''
-            dates_worked.append({'date':work_date,'day':weekday,'client':b['title'],'notes':b['booking_notes'] or ''})
+            dates_worked.append({'date':work_date,'day':weekday,'client':b['title'],'notes':b['booking_notes'] or '', 'is_half_day': booking_is_half_day(b)})
         leave_records = [{'id':l['id'],'date':l['date_taken'],'days':l['days'],'type':l['leave_type'],'notes':(dict(l).get('notes') or ''),'doc':l['document_file'],'attachment_url':(url_for('leave_record_attachment', leave_id=l['id']) if l['document_file'] else '')} for l in leave]
-        return {'employee_id':int(emp_id),'employee_name':actual_name,'start_date':s_date,'end_date':e_date,'total_hours':round(len(dates_worked)*workday_hours,2),'dates_worked':dates_worked,'total_leave':sum(float(l['days'] or 0) for l in leave_records),'leave_records':leave_records}
+        _work_units, total_hours = calculate_contract_uif_booking_hours(bookings, workday_hours)
+        return {'employee_id':int(emp_id),'employee_name':actual_name,'start_date':s_date,'end_date':e_date,'total_hours':total_hours,'dates_worked':dates_worked,'total_leave':sum(float(l['days'] or 0) for l in leave_records),'leave_records':leave_records}
     finally:
         conn.close()
 

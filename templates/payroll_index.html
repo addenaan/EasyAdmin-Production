@@ -352,7 +352,8 @@
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="account_holder"> <label class="form-check-label small">Account Holder</label></div>
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="account_number"> <label class="form-check-label small">Account Number</label></div>
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="branch_code"> <label class="form-check-label small">Branch Code</label></div>
-                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="gross_salary"> <label class="form-check-label small">Base Salary (R)</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="gross_salary"> <label class="form-check-label small">Base Salary / Full Day Rate (R)</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="half_day_rate"> <label class="form-check-label small">Half Day Rate (R)</label></div>
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="workday_hours"> <label class="form-check-label small">Working Hours per Day</label></div>
                         </div>
                     </div>
@@ -487,13 +488,14 @@
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Full Name</label><input type="text" class="form-control" id="empName" name="name" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Job Title</label><input type="text" class="form-control" id="empJobTitle" name="job_title" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Status</label><select class="form-select" id="empStatus" name="status" required><option>Active</option><option>On Leave</option><option>Resigned</option><option>Terminated</option></select></div>
-                            <div class="col-md-3 mb-3"><label class="small fw-bold">Contract Type</label><select class="form-select" id="empType" name="emp_type" required><option>Full-time (5 Days)</option><option>Full-time (6 Days)</option><option>Shift Worker</option><option>Contract >25 Hrs</option><option>Contract <25 Hrs</option></select><div class="form-text small">Contract &lt;25 Hrs UIF is assessed monthly from unique booked days × Working Hours per Day. UIF applies from 24 hours.</div></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold">Contract Type</label><select class="form-select" id="empType" name="emp_type" required onchange="toggleEmployeeRateFields()"><option>Full-time (5 Days)</option><option>Full-time (6 Days)</option><option>Shift Worker</option><option>Contract >25 Hrs</option><option>Contract <25 Hrs</option></select><div class="form-text small">Contract &lt;25 Hrs UIF is assessed monthly from booked full/half-day hours. UIF applies from 24 hours.</div></div>
                             
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Start Date</label><input type="date" class="form-control" id="empStartDate" name="start_date" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Inactive Date / Last Working Day</label><input type="date" class="form-control" id="empInactiveDate" name="inactive_date"><div class="form-text small">Leave blank while active.</div></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Date of Birth</label><input type="date" class="form-control" id="empDob" name="date_of_birth" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">ID / Passport Number</label><input type="text" class="form-control" id="empIdPassport" name="id_passport" required></div>
-                            <div class="col-md-3 mb-3"><label class="small fw-bold text-success">Monthly Base Salary / Rate (R)</label><input type="number" class="form-control border-success" id="empGross" name="gross_salary" step="0.01" required></div>
+                            <div class="col-md-3 mb-3"><label class="small fw-bold text-success" id="empGrossLabel">Monthly Base Salary (R)</label><input type="number" class="form-control border-success" id="empGross" name="gross_salary" step="0.01" min="0" required></div>
+                            <div class="col-md-3 mb-3" id="empHalfDayRateGroup" style="display:none;"><label class="small fw-bold text-success">Half Day Rate (R)</label><input type="number" class="form-control border-success" id="empHalfDayRate" name="half_day_rate" step="0.01" min="0.01"><div class="form-text small">Required for contract employees and used when Half Day Booking is selected.</div></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold text-success">Working Hours per Day</label><input type="number" class="form-control border-success" id="empWorkdayHours" name="workday_hours" step="0.25" min="0.25" value="7" required><div class="form-text small">Excludes statutory breaks.</div></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Phone Number</label><input type="text" class="form-control" id="empPhone" name="phone" required></div>
                             
@@ -1550,6 +1552,7 @@
             document.getElementById('empDob').value = emp ? (emp.date_of_birth || '') : '';
             document.getElementById('empIdPassport').value = emp ? emp.id_passport : '';
             document.getElementById('empGross').value = emp ? emp.gross_salary : '';
+            document.getElementById('empHalfDayRate').value = emp ? (emp.half_day_rate || '') : '';
             document.getElementById('empWorkdayHours').value = emp ? (emp.workday_hours || 7) : 7;
             document.getElementById('empPhone').value = emp ? emp.phone : '';
             document.getElementById('empEmail').value = emp ? emp.email : '';
@@ -1575,7 +1578,19 @@
             document.getElementById('empIdFile').required = !(emp && emp.id_file);
             document.getElementById('empContractFile').required = !(emp && emp.contract_file);
 
+            toggleEmployeeRateFields();
+
             profileModal.show();
+        }
+
+        function toggleEmployeeRateFields() {
+            const type = document.getElementById('empType').value;
+            const isContract = type === 'Contract >25 Hrs' || type === 'Contract <25 Hrs';
+            const group = document.getElementById('empHalfDayRateGroup');
+            const halfDayInput = document.getElementById('empHalfDayRate');
+            document.getElementById('empGrossLabel').innerText = isContract ? 'Full Day Booking Rate (R)' : 'Monthly Base Salary (R)';
+            group.style.display = isContract ? '' : 'none';
+            halfDayInput.required = isContract;
         }
 
         function saveProfile() {
