@@ -291,7 +291,12 @@
                         <h4 class="fw-bold mb-0">Reports</h4>
                         <div class="small-muted">Operational accounting reports for sales, Chart of Accounts and VAT return support.</div>
                     </div>
-                    <span class="badge bg-dark">Posted accounting data</span>
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="badge bg-dark">Posted accounting data</span>
+                        {% if session.get('comp_sars_compliance_enabled') and session.get('comp_can_accounting') and (session.get('is_superadmin') or session.get('can_accounting') or session.get('can_accounting_readonly')) %}
+                        <button class="btn btn-sm btn-success fw-bold" type="button" onclick="openSarsCompliance('accounting', 'VAT201')" title="Prepare and independently review VAT201 working values">🧾 SARS Compliance</button>
+                        {% endif %}
+                    </div>
                 </div>
                 <div class="row g-2 align-items-end">
                     <div class="col-md-3">
@@ -1661,5 +1666,9 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 </script>
     <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
+    {% if session.get('comp_sars_compliance_enabled') and session.get('comp_can_accounting') and (session.get('is_superadmin') or session.get('can_accounting') or session.get('can_accounting_readonly')) %}
+    {% include '_sars_compliance_modal.html' %}
+    <script src="{{ url_for('static', filename='sars-compliance.js') }}?v=20260915-sars-phase1-2"></script>
+    {% endif %}
 </body>
 </html>

@@ -299,12 +299,26 @@ class PgCursor:
             self.rowcount = self._cursor.rowcount
             self.lastrowid = None
             if translated.lstrip().upper().startswith("INSERT"):
-                try:
-                    with self.connection._conn.cursor() as id_cur:
+                raw_connection = self.connection._conn
+                savepoint_active = False
+                with raw_connection.cursor() as id_cur:
+                    try:
+                        # Some legacy inserts target tables without a sequence.
+                        # LASTVAL() then raises on a fresh PostgreSQL session. In
+                        # an explicit transaction that error must be isolated or
+                        # it aborts the otherwise successful business operation.
+                        if not raw_connection.autocommit:
+                            id_cur.execute("SAVEPOINT easyadmin_lastrowid_probe")
+                            savepoint_active = True
                         id_cur.execute("SELECT LASTVAL()")
                         self.lastrowid = id_cur.fetchone()[0]
-                except Exception:
-                    self.lastrowid = None
+                    except Exception:
+                        self.lastrowid = None
+                        if savepoint_active:
+                            id_cur.execute("ROLLBACK TO SAVEPOINT easyadmin_lastrowid_probe")
+                    finally:
+                        if savepoint_active:
+                            id_cur.execute("RELEASE SAVEPOINT easyadmin_lastrowid_probe")
             return self
         except Exception as exc:
             if _is_postgres_connection_error(exc):

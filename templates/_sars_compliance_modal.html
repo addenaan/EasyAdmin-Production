@@ -1,0 +1,211 @@
+<div class="modal fade" id="easyAdminSarsComplianceModal" tabindex="-1" aria-labelledby="easyAdminSarsComplianceTitle" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-dark text-white">
+                <div>
+                    <h5 class="modal-title fw-bold" id="easyAdminSarsComplianceTitle">SARS Compliance Preparation</h5>
+                    <div class="small opacity-75" id="sarsComplianceCompanyName">Easy Admin review workspace</div>
+                </div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body bg-light">
+                <div class="alert alert-warning border-warning shadow-sm" role="alert">
+                    <strong>Review only — not submitted to SARS.</strong>
+                    Easy Admin prepares and stores a review pack. Approval does not submit a return, authorise a payment, or replace the authorised user's eFiling or e@syFile declaration.
+                </div>
+
+                <div id="sarsComplianceMessage" class="d-none" role="alert" aria-live="polite"></div>
+
+                <ul class="nav nav-pills mb-3" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active fw-bold" id="sarsReviewsTab" data-bs-toggle="pill" data-bs-target="#sarsReviewsPane" type="button" role="tab" aria-controls="sarsReviewsPane" aria-selected="true">Prepare &amp; Review</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link fw-bold" id="sarsSettingsTab" data-bs-toggle="pill" data-bs-target="#sarsSettingsPane" type="button" role="tab" aria-controls="sarsSettingsPane" aria-selected="false">Employer Settings</button>
+                    </li>
+                </ul>
+
+                <div class="tab-content">
+                    <div class="tab-pane fade show active" id="sarsReviewsPane" role="tabpanel" aria-labelledby="sarsReviewsTab" tabindex="0">
+                        <div class="card border-0 shadow-sm mb-3">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                                    <div>
+                                        <h5 class="fw-bold mb-1">Prepare a return review</h5>
+                                        <div class="text-muted small">Figures are copied into an immutable revision from saved payroll or posted accounting records.</div>
+                                    </div>
+                                    <span class="badge bg-secondary" id="sarsComplianceContextBadge">Payroll</span>
+                                </div>
+                                <div class="row g-3 align-items-end">
+                                    <div class="col-md-3">
+                                        <label class="form-label small fw-bold" for="sarsReturnType">Return Type</label>
+                                        <select class="form-select" id="sarsReturnType">
+                                            <option value="EMP201">EMP201</option>
+                                            <option value="EMP501">EMP501</option>
+                                            <option value="VAT201">VAT201</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3" id="sarsEmp201PeriodGroup">
+                                        <label class="form-label small fw-bold" for="sarsEmp201Month">Payroll Month</label>
+                                        <input class="form-control" type="month" id="sarsEmp201Month">
+                                    </div>
+                                    <div class="col-md-3 d-none" id="sarsEmp501PeriodGroup">
+                                        <label class="form-label small fw-bold" for="sarsEmp501TaxYear">Tax Year Ending February</label>
+                                        <input class="form-control" type="number" min="2000" max="2200" step="1" id="sarsEmp501TaxYear" placeholder="2027">
+                                    </div>
+                                    <div class="col-md-3 d-none" id="sarsEmp501CycleGroup">
+                                        <label class="form-label small fw-bold" for="sarsEmp501Cycle">Reconciliation Period</label>
+                                        <select class="form-select" id="sarsEmp501Cycle">
+                                            <option value="interim">Interim (1 Mar–31 Aug)</option>
+                                            <option value="annual">Annual (1 Mar–end Feb)</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3 d-none" id="sarsVatStartGroup">
+                                        <label class="form-label small fw-bold" for="sarsVatStartDate">VAT Period Start</label>
+                                        <input class="form-control" type="date" id="sarsVatStartDate">
+                                    </div>
+                                    <div class="col-md-3 d-none" id="sarsVatEndGroup">
+                                        <label class="form-label small fw-bold" for="sarsVatEndDate">VAT Period End</label>
+                                        <input class="form-control" type="date" id="sarsVatEndDate">
+                                    </div>
+                                    <div class="col-md-3 d-grid">
+                                        <button class="btn btn-dark fw-bold" type="button" id="sarsPrepareButton" disabled title="Loading access permissions">Prepare Review</button>
+                                    </div>
+                                </div>
+                                <div class="small text-muted mt-2" id="sarsPrepareHelp">EMP201 is prepared from saved payslip ledger values for the selected month.</div>
+                            </div>
+                        </div>
+
+                        <div class="row g-3">
+                            <div class="col-lg-4">
+                                <div class="card border-0 shadow-sm h-100">
+                                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                                        <div>
+                                            <h6 class="fw-bold mb-0">Prepared Reviews</h6>
+                                            <div class="small text-muted">Latest 100 revisions</div>
+                                        </div>
+                                        <button class="btn btn-sm btn-outline-secondary" type="button" id="sarsRefreshButton">Refresh</button>
+                                    </div>
+                                    <div class="card-body p-0">
+                                        <div id="sarsReturnList" class="list-group list-group-flush">
+                                            <div class="text-center text-muted py-4">Loading prepared reviews…</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-lg-8">
+                                <div class="card border-0 shadow-sm h-100">
+                                    <div class="card-body" id="sarsReturnDetail">
+                                        <div class="text-center text-muted py-5">
+                                            Prepare a new review or select a stored revision to inspect its totals and validation findings.
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tab-pane fade" id="sarsSettingsPane" role="tabpanel" aria-labelledby="sarsSettingsTab" tabindex="0">
+                        <div class="card border-0 shadow-sm">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                                    <div>
+                                        <h5 class="fw-bold mb-1">Employer and vendor details</h5>
+                                        <div class="text-muted small">These values are copied into each stored review revision. Tenant details remain managed under Super Admin Controls.</div>
+                                    </div>
+                                    <span class="badge bg-warning text-dark">No SARS credentials stored</span>
+                                </div>
+
+                                <div class="row g-3 mb-3">
+                                    <div class="col-md-4">
+                                        <label class="form-label small fw-bold">Company</label>
+                                        <input class="form-control" id="sarsSettingCompanyName" type="text" readonly>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small fw-bold">Registration Number</label>
+                                        <input class="form-control" id="sarsSettingCompanyRegistration" type="text" readonly>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small fw-bold" for="sarsSettingVatNumber">VAT Registration Number</label>
+                                        <input class="form-control" id="sarsSettingVatNumber" type="text" maxlength="20" autocomplete="off">
+                                    </div>
+                                </div>
+
+                                <div id="sarsPayrollSettingsGroup">
+                                    <h6 class="fw-bold border-bottom pb-2 mt-4">Payroll references</h6>
+                                    <div class="row g-3">
+                                        <div class="col-md-4">
+                                            <label class="form-label small fw-bold" for="sarsSettingPayeReference">PAYE Reference</label>
+                                            <input class="form-control" id="sarsSettingPayeReference" type="text" maxlength="30" autocomplete="off">
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small fw-bold" for="sarsSettingUifReference">UIF Reference</label>
+                                            <input class="form-control" id="sarsSettingUifReference" type="text" maxlength="30" autocomplete="off">
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small fw-bold" for="sarsSettingSdlReference">SDL Reference</label>
+                                            <input class="form-control" id="sarsSettingSdlReference" type="text" maxlength="30" autocomplete="off">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div id="sarsVatSettingsGroup">
+                                    <h6 class="fw-bold border-bottom pb-2 mt-4">VAT settings</h6>
+                                    <div class="row g-3">
+                                        <div class="col-md-6">
+                                            <label class="form-label small fw-bold" for="sarsSettingVatCategory">VAT Filing Category</label>
+                                            <select class="form-select" id="sarsSettingVatCategory">
+                                                <option value="Monthly">Monthly</option>
+                                                <option value="Two-monthly">Two-monthly</option>
+                                                <option value="Other">Other</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small fw-bold" for="sarsSettingVatBasis">VAT Accounting Basis</label>
+                                            <select class="form-select" id="sarsSettingVatBasis">
+                                                <option value="Invoice">Invoice</option>
+                                                <option value="Payment">Payment</option>
+                                            </select>
+                                            <div class="form-text">Phase 1 VAT201 preparation currently supports the invoice basis only.</div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <h6 class="fw-bold border-bottom pb-2 mt-4">Responsible person</h6>
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label small fw-bold" for="sarsSettingContactName">Name</label>
+                                        <input class="form-control" id="sarsSettingContactName" type="text" maxlength="120" autocomplete="off">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label small fw-bold" for="sarsSettingContactCapacity">Capacity</label>
+                                        <input class="form-control" id="sarsSettingContactCapacity" type="text" maxlength="120" placeholder="Director, member or authorised representative" autocomplete="off">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label small fw-bold" for="sarsSettingContactPhone">Contact Number</label>
+                                        <input class="form-control" id="sarsSettingContactPhone" type="tel" maxlength="50" autocomplete="off">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label small fw-bold" for="sarsSettingContactEmail">Email Address</label>
+                                        <input class="form-control" id="sarsSettingContactEmail" type="email" maxlength="160" autocomplete="off">
+                                    </div>
+                                </div>
+
+                                <div class="d-flex justify-content-end mt-4">
+                                    <button class="btn btn-dark fw-bold d-none" type="button" id="sarsSaveSettingsButton" disabled>Save Employer Settings</button>
+                                </div>
+                                <div class="alert alert-secondary small mt-3 mb-0">
+                                    Saving these settings does not connect Easy Admin to eFiling and does not grant submission authority.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <span class="me-auto small text-muted">Direct SARS submission is unavailable in this Phase 1 workspace.</span>
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>

@@ -330,7 +330,7 @@ def build_payslip_pdf(payslip, employee, company, logo_path=None, leave_balances
                         f"through {p.get('leave_payout_date') or ''}; balance after payout: "
                         f"{f('annual_leave_balance_after'):.2f} days")
         optional_earnings.append(('Annual Leave Payout', leave_detail, 'Code: 3605', leave_payout))
-    optional_earnings.append(('Transport Reimbursement (Tax Free)', '', 'Code: 3702', f('transport')))
+    optional_earnings.append(('Transport Reimbursement', 'SARS treatment unclassified', '', f('transport')))
     for label, note, code, amount in optional_earnings:
         if amount > 0:
             rows.append((description_cell(label, note, code), amount, None, 'normal'))
@@ -432,7 +432,7 @@ def build_irp5_pdf(irp5, company=None, logo_path=None):
                 {'cells':['3601 - Salary / Wages + Current-period Bonus', i.get('code_3601') or '0.00']},
                 {'cells':['3605 - Annual Payment', i.get('code_3605') or '0.00']},
                 {'cells':['3607 - Overtime', i.get('code_3607') or '0.00']},
-                {'cells':['3702 - Travel', i.get('code_3702') or '0.00']},
+                {'cells':['Transport reimbursement (unclassified)', i.get('transport_unclassified') or '0.00']},
                 {'cells':['3699 - Gross Employment Income', i.get('code_3699') or '0.00'], 'bold':True, 'shade':True, 'total':True},
                 {'cells':['4102 - PAYE', i.get('code_4102') or '0.00']},
                 {'cells':['4141 - Employee + Employer UIF', i.get('code_4141') or '0.00']},
@@ -442,5 +442,5 @@ def build_irp5_pdf(irp5, company=None, logo_path=None):
         ]
     }
     if i.get('warning'):
-        payload['groups'].append({'title':'Compliance Note','rows':[{'cells':['Historical payroll', i.get('warning')]}]})
+        payload['groups'].append({'title':'Compliance Note','rows':[{'cells':['Review note', i.get('warning')]}]})
     return build_table_report_pdf(payload, logo_path)

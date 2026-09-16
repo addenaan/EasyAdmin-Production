@@ -32,7 +32,7 @@ from app_modules.pagination import get_page_args, like_filter, pagination_meta
 from app_modules.jobs import job_manager
 from app_modules.db_compat import connect_database, is_postgres_enabled, table_exists as compat_table_exists, table_columns as compat_table_columns
 from app_modules.pdf_standard import validate_pdf_bytes as _standard_validate_pdf_bytes, build_table_report_pdf as _standard_table_pdf, build_payslip_pdf as _standard_payslip_pdf, build_irp5_pdf as _standard_irp5_pdf
-from app_modules import cashbook_ai
+from app_modules import cashbook_ai, sars_compliance
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -973,6 +973,33 @@ def _begin_atomic_write(conn):
             raise
 
 
+def _commit_atomic_write(conn):
+    """Commit explicitly so PostgreSQL commit failures are not suppressed."""
+    raw_conn = getattr(conn, '_conn', None)
+    if raw_conn is not None:
+        raw_conn.commit()
+        try:
+            raw_conn.autocommit = True
+        except Exception:
+            # The commit has succeeded; connection cleanup will discard/reset a
+            # handle that cannot return to autocommit without misreporting failure.
+            pass
+    else:
+        conn.commit()
+
+
+def _rollback_atomic_write(conn):
+    raw_conn = getattr(conn, '_conn', None)
+    try:
+        if raw_conn is not None:
+            raw_conn.rollback()
+            raw_conn.autocommit = True
+        else:
+            conn.rollback()
+    except Exception:
+        pass
+
+
 def validate_import_row(import_type, row, line_no, conn, company_id, seen_values):
     """Validate and normalise one company CSV row without writing to the database."""
     cleaned = {field: normalise_import_value(value) for field, value in row.items()}
@@ -1841,6 +1868,8 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: conn.execute('ALTER TABLE companies ADD COLUMN cashbook_ai_enabled INTEGER DEFAULT 0')
     except Exception: pass
+    try: conn.execute('ALTER TABLE companies ADD COLUMN sars_compliance_enabled INTEGER DEFAULT 0')
+    except Exception: pass
 
     conn.execute("""CREATE TABLE IF NOT EXISTS system_ai_settings (
         provider TEXT PRIMARY KEY,
@@ -2229,6 +2258,51 @@ def init_db():
             pass
         except Exception:
             pass
+
+    # Durable SARS preparation records. These snapshots are intentionally kept
+    # separately from the rolling application audit log so an approved tax-period
+    # review pack remains reproducible after the live payroll or ledger changes.
+    conn.execute('''CREATE TABLE IF NOT EXISTS sars_return_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        return_type TEXT NOT NULL,
+        period_start TEXT NOT NULL,
+        period_end TEXT NOT NULL,
+        period_label TEXT NOT NULL,
+        version_no INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'prepared',
+        source_hash TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        validation_json TEXT NOT NULL,
+        validation_error_count INTEGER NOT NULL DEFAULT 0,
+        validation_warning_count INTEGER NOT NULL DEFAULT 0,
+        prepared_by TEXT NOT NULL,
+        prepared_by_user_id INTEGER,
+        prepared_at TEXT NOT NULL,
+        approved_by TEXT,
+        approved_by_user_id INTEGER,
+        approved_at TEXT,
+        approval_note TEXT,
+        rejected_by TEXT,
+        rejected_by_user_id INTEGER,
+        rejected_at TEXT,
+        rejection_reason TEXT,
+        exported_by TEXT,
+        exported_by_user_id INTEGER,
+        exported_at TEXT,
+        export_count INTEGER NOT NULL DEFAULT 0,
+        submission_status TEXT NOT NULL DEFAULT 'not_submitted',
+        sars_reference TEXT,
+        sars_response_json TEXT,
+        UNIQUE(company_id, return_type, period_start, period_end, version_no)
+    )''')
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_sars_batches_company_period ON sars_return_batches(company_id, return_type, period_start, period_end, version_no)')
+    except Exception: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_sars_batches_company_status ON sars_return_batches(company_id, status, prepared_at)')
+    except Exception: pass
+    for actor_column in ('prepared_by_user_id', 'approved_by_user_id', 'rejected_by_user_id', 'exported_by_user_id'):
+        try: conn.execute(f'ALTER TABLE sars_return_batches ADD COLUMN {actor_column} INTEGER')
+        except Exception: pass
 
 
     conn.execute('''CREATE TABLE IF NOT EXISTS staff_leave_requests (
@@ -5394,6 +5468,7 @@ def login():
             session.clear()
             session.permanent = True
             session['logged_in'] = True
+            session['user_id'] = user['id']
             session['username'] = user['username']
             _touch_session_activity()
             session['is_superadmin'] = bool(user['is_superadmin'])
@@ -5429,6 +5504,7 @@ def login():
             session['comp_can_invoicing'] = bool(dict(comp).get('can_invoicing', 0)) if comp else False
             session['comp_can_accounting'] = bool(dict(comp).get('can_accounting', 0)) if comp else False
             session['comp_can_franchise_reports'] = bool(dict(comp).get('can_franchise_reports', 0)) if comp else False
+            session['comp_sars_compliance_enabled'] = bool(dict(comp).get('sars_compliance_enabled', 0)) if comp else False
             session['comp_google_calendar'] = bool(dict(comp).get('google_calendar_sync', 0)) if comp else False
 
             franchise_membership = conn.execute('''SELECT fg.id AS franchise_group_id,
@@ -10366,6 +10442,7 @@ def switch_company():
         session['comp_can_invoicing'] = bool(dict(comp).get('can_invoicing', 0))
         session['comp_can_accounting'] = bool(dict(comp).get('can_accounting', 0))
         session['comp_can_franchise_reports'] = bool(dict(comp).get('can_franchise_reports', 0))
+        session['comp_sars_compliance_enabled'] = bool(dict(comp).get('sars_compliance_enabled', 0))
         session['comp_google_calendar'] = bool(dict(comp).get('google_calendar_sync', 0))
     return jsonify({"status": "success"})
 
@@ -10406,6 +10483,7 @@ def save_company():
     c_ca = 1 if request.form.get('can_accounting') == 'true' else 0
     c_cfr = 1 if request.form.get('can_franchise_reports') == 'true' else 0
     c_cashbook_ai = 1 if c_ca and request.form.get('cashbook_ai_enabled') == 'true' else 0
+    c_sars_compliance = 1 if (c_cp or c_ca) and request.form.get('sars_compliance_enabled') == 'true' else 0
     c_gcal = 1 if request.form.get('google_calendar_sync') == 'true' else 0
     c_sdl = 1 if request.form.get('sdl_applicable') == 'true' else 0
     website_integration_field_present = 'website_integration_enabled' in request.form
@@ -10444,11 +10522,11 @@ def save_company():
     try:
         if c_id:
             if filename:
-                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, cashbook_ai_enabled=?, google_calendar_sync=?, sdl_applicable=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_cashbook_ai, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, logo_file=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, cashbook_ai_enabled=?, sars_compliance_enabled=?, google_calendar_sync=?, sdl_applicable=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_cashbook_ai, c_sars_compliance, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
             else:
-                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, cashbook_ai_enabled=?, google_calendar_sync=?, sdl_applicable=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_cashbook_ai, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
+                conn.execute('UPDATE companies SET name=?, transport_policy=?, transport_amount_per_lift=?, can_booking=?, can_finance=?, can_payroll=?, can_invoicing=?, can_accounting=?, can_franchise_reports=?, cashbook_ai_enabled=?, sars_compliance_enabled=?, google_calendar_sync=?, sdl_applicable=?, address=?, contact_email=?, contact_number=?, registration_number=?, vat_number=?, industry_template=? WHERE id=?', (c_name, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_cashbook_ai, c_sars_compliance, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry, c_id))
         else:
-            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports, cashbook_ai_enabled, google_calendar_sync, sdl_applicable, address, contact_email, contact_number, registration_number, vat_number, industry_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_cashbook_ai, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry))
+            cur = conn.execute('INSERT INTO companies (name, logo_file, transport_policy, transport_amount_per_lift, can_booking, can_finance, can_payroll, can_invoicing, can_accounting, can_franchise_reports, cashbook_ai_enabled, sars_compliance_enabled, google_calendar_sync, sdl_applicable, address, contact_email, contact_number, registration_number, vat_number, industry_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (c_name, filename, c_trans, c_transport_per_lift, c_cb, c_cf, c_cp, c_ci, c_ca, c_cfr, c_cashbook_ai, c_sars_compliance, c_gcal, c_sdl, c_address, c_contact_email, c_contact_number, c_reg_no, c_vat_no, c_industry))
             target_company_id = getattr(cur, 'lastrowid', None)
             if not target_company_id:
                 row = conn.execute('SELECT id FROM companies WHERE name=? ORDER BY id DESC LIMIT 1', (c_name,)).fetchone()
@@ -10494,6 +10572,7 @@ def save_company():
         session['comp_can_invoicing'] = bool(c_ci)
         session['comp_can_accounting'] = bool(c_ca)
         session['comp_can_franchise_reports'] = bool(c_cfr)
+        session['comp_sars_compliance_enabled'] = bool(c_sars_compliance)
         session['comp_google_calendar'] = bool(c_gcal)
 
     if website_integration_field_present:
@@ -10517,6 +10596,18 @@ def save_company():
             'System Admin',
             'Updated Tenant AI Access',
             f"Company: {c_name}; AI Cash Book Allocation: {'enabled' if c_cashbook_ai else 'disabled'}.",
+            record_type='company',
+            record_id=target_company_id,
+            company_id=target_company_id,
+        )
+    except Exception:
+        pass
+
+    try:
+        log_action(
+            'System Admin',
+            'Updated Tenant SARS Compliance Access',
+            f"Company: {c_name}; SARS preparation and approval workspace: {'enabled' if c_sars_compliance else 'disabled'}.",
             record_type='company',
             record_id=target_company_id,
             company_id=target_company_id,
@@ -10804,6 +10895,7 @@ def admin_save_tenant_setup():
             session['comp_can_payroll'] = bool(dict(comp).get('can_payroll', 0))
             session['comp_can_invoicing'] = bool(dict(comp).get('can_invoicing', 0))
             session['comp_can_accounting'] = bool(dict(comp).get('can_accounting', 0))
+            session['comp_sars_compliance_enabled'] = bool(dict(comp).get('sars_compliance_enabled', 0))
             session['comp_google_calendar'] = bool(dict(comp).get('google_calendar_sync', 0))
             switch_company_after_setup = True
 
@@ -10938,7 +11030,7 @@ def admin_export_company_data():
             'companies', 'clients', 'employees', 'services', 'bookings', 'expenses', 'payslips',
             'leave_records', 'interviews', 'invoices', 'quotes', 'settings', 'users', 'audit_logs',
             'tenant_labels', 'tenant_custom_fields', 'custom_field_values', 'tenant_custom_field_options',
-            'finance_categories', 'tenant_scorecard_blocks'
+            'finance_categories', 'tenant_scorecard_blocks', 'sars_return_batches'
         ]
         for table in direct_tables:
             if not table_exists(conn, table):
@@ -14122,7 +14214,9 @@ def payroll_index():
     # Ensure older/existing tenants have their setup defaults available before rendering HR screens.
     # Patch 5.3 introduced tenant scorecards, but the payroll page must explicitly load the
     # configured scorecard for the active tenant; otherwise Jinja renders the empty warning.
-    comp = conn.execute('SELECT industry_template FROM companies WHERE id=?', (cid,)).fetchone()
+    comp = conn.execute('SELECT industry_template, can_payroll, sars_compliance_enabled FROM companies WHERE id=?', (cid,)).fetchone()
+    session['comp_can_payroll'] = bool(dict(comp).get('can_payroll', 0)) if comp else False
+    session['comp_sars_compliance_enabled'] = bool(dict(comp).get('sars_compliance_enabled', 0)) if comp else False
     ensure_tenant_template(conn, cid, (dict(comp).get('industry_template') if comp else 'Cleaning') or 'Cleaning', force_reset=False)
     conn.commit()
 
@@ -15624,16 +15718,44 @@ def save_adjustment_payslip():
 
         conn = get_db_connection()
         try:
+            _begin_atomic_write(conn)
             emp = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (emp_id, session['company_id'])).fetchone()
             if not emp:
                 return jsonify({"status": "error", "message": "Employee not found."}), 404
-            regular = conn.execute("""SELECT * FROM payslips
-                                      WHERE company_id=? AND employee_id=? AND date LIKE ?
-                                        AND COALESCE(payslip_type, 'regular')='regular'
-                                      ORDER BY id DESC LIMIT 1""",
-                                   (session['company_id'], emp_id, f"{target_month}%")).fetchone()
+            regular_sql = """SELECT * FROM payslips
+                               WHERE company_id=? AND employee_id=? AND date LIKE ?
+                                 AND COALESCE(payslip_type, 'regular')='regular'
+                               ORDER BY id DESC LIMIT 1"""
+            if getattr(conn, '_conn', None) is not None:
+                regular_sql += ' FOR UPDATE'
+            regular = conn.execute(
+                regular_sql,
+                (session['company_id'], emp_id, f"{target_month}%"),
+            ).fetchone()
             if not regular:
                 return jsonify({"status": "error", "message": "A finalised regular payslip must exist before an adjustment can be applied."}), 400
+
+            legacy_adjustment_sql = """SELECT id, gross_salary, overtime, bonus,
+                                               COALESCE(leave_payout_amount, 0) AS leave_payout_amount,
+                                               COALESCE(sdl, 0) AS sdl
+                                        FROM payslips
+                                        WHERE company_id=? AND employee_id=? AND date LIKE ?
+                                          AND COALESCE(payslip_type, 'regular')='adjustment'
+                                        ORDER BY id ASC"""
+            if getattr(conn, '_conn', None) is not None:
+                legacy_adjustment_sql += ' FOR UPDATE'
+            legacy_adjustments = conn.execute(
+                legacy_adjustment_sql,
+                (session['company_id'], emp_id, f"{target_month}%"),
+            ).fetchall()
+            legacy_leviable_remuneration = sum(
+                float(row['gross_salary'] or 0)
+                + float(row['overtime'] or 0)
+                + float(row['bonus'] or 0)
+                + float(row['leave_payout_amount'] or 0)
+                for row in legacy_adjustments
+            )
+            legacy_sdl = sum(float(row['sdl'] or 0) for row in legacy_adjustments)
 
             new_gross = float(regular['gross_salary'] or 0) + gross
             new_overtime = float(regular['overtime'] or 0) + overtime
@@ -15643,7 +15765,31 @@ def save_adjustment_payslip():
             new_loan = float(regular['loan_repayment'] or 0) + loan_repayment
             new_uif = float(regular['uif'] or 0) + uif
             new_paye = float(regular['paye'] or 0) + paye
-            new_net = new_gross + new_overtime + new_bonus + new_transport + new_reimbursable + float(dict(regular).get('leave_payout_amount') or 0) - new_uif - new_paye - new_loan
+            leave_payout_amount = float(dict(regular).get('leave_payout_amount') or 0)
+            new_net = new_gross + new_overtime + new_bonus + new_transport + new_reimbursable + leave_payout_amount - new_uif - new_paye - new_loan
+
+            # SDL is an employer cost and does not change net pay, but it must stay
+            # in step with the adjusted leviable remuneration used by EMP201/EMP501.
+            sdl_applicable_value = dict(regular).get('sdl_applicable')
+            if sdl_applicable_value is None:
+                company_sdl = conn.execute(
+                    'SELECT sdl_applicable FROM companies WHERE id=?',
+                    (session['company_id'],),
+                ).fetchone()
+                sdl_applicable_value = dict(company_sdl).get('sdl_applicable') if company_sdl else 0
+            sdl_applicable_snapshot = 1 if bool(int(sdl_applicable_value or 0)) else 0
+            total_leviable_remuneration = (
+                new_gross + new_overtime + new_bonus + leave_payout_amount
+                + legacy_leviable_remuneration
+            )
+            total_sdl = calculate_sdl(
+                total_leviable_remuneration,
+                bool(sdl_applicable_snapshot),
+            )
+            # Historical versions stored adjustments as separate ledger rows. Those
+            # rows remain immutable, so store only the residual on the regular row;
+            # SUM(sdl) across the whole month then equals 1% of total remuneration.
+            new_sdl = round(total_sdl - legacy_sdl, 2)
 
             try:
                 existing_adjustment_note = regular['adjustment_reason'] or ''
@@ -15661,17 +15807,20 @@ def save_adjustment_payslip():
 
             conn.execute("""UPDATE payslips
                             SET gross_salary=?, overtime=?, transport=?, bonus=?, reimbursable_expenses=?,
-                                loan_repayment=?, uif=?, paye=?, net_salary=?, adjustment_reason=?
+                                loan_repayment=?, uif=?, paye=?, sdl=?, sdl_applicable=?, net_salary=?, adjustment_reason=?
                             WHERE id=? AND company_id=?""",
                          (new_gross, new_overtime, new_transport, new_bonus, new_reimbursable,
-                          new_loan, new_uif, new_paye, new_net, adjustment_note, regular['id'], session['company_id']))
-            conn.commit()
+                          new_loan, new_uif, new_paye, new_sdl, sdl_applicable_snapshot,
+                          new_net, adjustment_note, regular['id'], session['company_id']))
+            _commit_atomic_write(conn)
 
             response = {
                 "status": "success",
                 "message": "Adjustment applied successfully. Finalized payslip updated.",
                 "net": round(net, 2),
                 "updated_net": round(new_net, 2),
+                "updated_sdl": round(total_sdl, 2),
+                "updated_regular_row_sdl": round(new_sdl, 2),
                 "employee_id": emp_id,
                 "month": target_month
             }
@@ -15687,13 +15836,13 @@ def save_adjustment_payslip():
             except Exception as refresh_error:
                 app.logger.warning('Payslip adjustment applied, but refreshed payload could not be built: %s', refresh_error)
 
-            log_action('HR & Payroll', 'Updated Finalized Payslip', f"Applied payslip adjustment for Employee ID {emp_id} for {target_month}: {reason}")
+            try:
+                log_action('HR & Payroll', 'Updated Finalized Payslip', f"Applied payslip adjustment for Employee ID {emp_id} for {target_month}: {reason}")
+            except Exception:
+                app.logger.exception('Payslip adjustment succeeded, but the secondary audit write failed')
             return jsonify(response)
         except Exception as db_error:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+            _rollback_atomic_write(conn)
             app.logger.exception('Failed to apply finalized payslip adjustment')
             return jsonify({"status": "error", "message": f"Unable to apply adjustment: {db_error}"}), 500
         finally:
@@ -16255,7 +16404,10 @@ def generate_emp201():
         "uif": round(total_uif, 2),
         "sdl": round(total_sdl, 2),
         "total": round(total_paye + total_uif + total_sdl, 2),
-        "warning": ("Historical payslips pre-date the SDL applicability snapshot and were not retroactively recalculated." if historical_sdl_rows else ""),
+        "warning": ' '.join(filter(None, [
+            'This liability is before ETI utilised, penalties and interest. Reconcile those eFiling values before filing or payment.',
+            'Historical payslips pre-date the SDL applicability snapshot and were not retroactively recalculated.' if historical_sdl_rows else '',
+        ])),
         "source": "Saved Payslip Ledger Only",
         "payslip_count": payslip_count
     })
@@ -16285,15 +16437,27 @@ def _payroll_tax_certificate_ledger_summary(conn, company_id, emp_id, start_date
     uif_combined = float(ledger['uif_employee'] or 0) * 2.0
     sdl = float(ledger['sdl'] or 0)
     code_3601 = gross + current_period_bonus
-    code_3699 = code_3601 + annual_bonus + overtime + travel
-    warning = ''
+    # Easy Admin stores a flat per-lift transport reimbursement, not the
+    # kilometre/rate and allowance classification needed to assign a SARS code.
+    # Keep it visible for review, but never silently classify it as code 3702 or
+    # include it in the certificate gross-income working total.
+    code_3699 = code_3601 + annual_bonus + overtime
+    historical_sdl_warning = ''
     if int(ledger['historical_sdl_rows'] or 0):
-        warning = 'Historical payslips pre-date the SDL applicability snapshot and were not retroactively recalculated.'
+        historical_sdl_warning = 'Historical payslips pre-date the SDL applicability snapshot and were not retroactively recalculated.'
+    transport_classification_warning = ''
+    if abs(travel) >= 0.005:
+        transport_classification_warning = (
+            'Transport reimbursement is unclassified. Review the supporting records '
+            'and assign the correct SARS treatment before producing tax certificates.'
+        )
+    warning = ' '.join(part for part in (historical_sdl_warning, transport_classification_warning) if part)
     return {
         'code_3601': code_3601,
         'code_3605': annual_bonus,
         'code_3607': overtime,
-        'code_3702': travel,
+        'code_3702': 0.0,
+        'transport_unclassified': travel,
         'code_3699': code_3699,
         'code_4102': paye,
         'code_4141': uif_combined,
@@ -16301,13 +16465,16 @@ def _payroll_tax_certificate_ledger_summary(conn, company_id, emp_id, start_date
         'code_4149': paye + uif_combined + sdl,
         'payslip_count': int(ledger['payslip_count'] or 0),
         'warning': warning,
+        'historical_sdl_warning': historical_sdl_warning,
+        'transport_classification_warning': transport_classification_warning,
     }
 
 
 def _build_irp5_data(emp_id, tax_year):
     tax_year = int(tax_year)
     start_date = f"{tax_year-1}-03-01"
-    end_date = f"{tax_year}-02-28"
+    end_date = f"{tax_year}-02-{calendar.monthrange(tax_year, 2)[1]:02d}"
+    period_end_label = datetime.strptime(end_date, '%Y-%m-%d').strftime('%d %b %Y')
     conn = get_db_connection()
     try:
         emp = conn.execute('SELECT * FROM employees WHERE id=? AND company_id=?', (emp_id, session['company_id'])).fetchone()
@@ -16315,11 +16482,12 @@ def _build_irp5_data(emp_id, tax_year):
             raise ValueError('Employee not found.')
         summary = _payroll_tax_certificate_ledger_summary(conn, session['company_id'], emp_id, start_date, end_date)
         return {
-            'internal_use':'Internal Use', 'tax_year':tax_year, 'period':f"01 Mar {tax_year-1} - 28 Feb {tax_year}",
+            'internal_use':'Internal Use', 'tax_year':tax_year, 'period':f"01 Mar {tax_year-1} - {period_end_label}",
             'name':emp['name'], 'emp_num':emp['emp_number'] or 'N/A', 'id_num':emp['id_passport'] or 'N/A',
             'tax_number':emp['tax_number'] or 'N/A',
             'code_3601':f"{summary['code_3601']:.2f}", 'code_3605':f"{summary['code_3605']:.2f}",
             'code_3607':f"{summary['code_3607']:.2f}", 'code_3702':f"{summary['code_3702']:.2f}",
+            'transport_unclassified':f"{summary['transport_unclassified']:.2f}",
             'code_3699':f"{summary['code_3699']:.2f}", 'code_4102':f"{summary['code_4102']:.2f}",
             'code_4141':f"{summary['code_4141']:.2f}", 'code_4142':f"{summary['code_4142']:.2f}",
             'code_4149':f"{summary['code_4149']:.2f}", 'warning':summary['warning'],
@@ -16369,7 +16537,7 @@ def export_emp501(year):
         return "Forbidden", 403
     tax_year = int(year)
     start_date = f"{tax_year-1}-03-01"
-    end_date = f"{tax_year}-02-28"
+    end_date = f"{tax_year}-02-{calendar.monthrange(tax_year, 2)[1]:02d}"
 
     conn = get_db_connection()
     employees = conn.execute("SELECT * FROM employees WHERE company_id=?", (session['company_id'],)).fetchall()
@@ -16378,17 +16546,17 @@ def export_emp501(year):
     cw = csv.writer(si)
     cw.writerow(['Internal Use', 'Emp Number', 'Name', 'ID/Passport', 'Tax Number', 'PAYE Ref',
                  'Code 3601 (Salary/Wages + Current-period Bonus)', 'Code 3605 (Annual Payment)',
-                 'Code 3607 (Overtime)', 'Code 3702 (Travel)', 'Code 3699 (Gross Employment Income)',
+                 'Code 3607 (Overtime)', 'Transport reimbursement (unclassified)', 'Code 3699 (Gross Employment Income)',
                  'Code 4102 (PAYE)', 'Code 4141 (Employee + Employer UIF)', 'Code 4142 (Employer SDL)',
                  'Code 4149 (Total Tax / SDL / UIF)', 'Compliance Note'])
 
     for emp in employees:
         summary = _payroll_tax_certificate_ledger_summary(conn, session['company_id'], emp['id'], start_date, end_date)
-        if summary['payslip_count'] > 0 and summary['code_3699'] > 0:
+        if summary['payslip_count'] > 0:
             cw.writerow([
                 'Internal Use', emp['emp_number'], emp['name'], emp['id_passport'], emp['tax_number'], emp['paye_ref'],
                 f"{summary['code_3601']:.2f}", f"{summary['code_3605']:.2f}", f"{summary['code_3607']:.2f}",
-                f"{summary['code_3702']:.2f}", f"{summary['code_3699']:.2f}", f"{summary['code_4102']:.2f}",
+                f"{summary['transport_unclassified']:.2f}", f"{summary['code_3699']:.2f}", f"{summary['code_4102']:.2f}",
                 f"{summary['code_4141']:.2f}", f"{summary['code_4142']:.2f}", f"{summary['code_4149']:.2f}",
                 summary['warning']
             ])
@@ -19659,6 +19827,9 @@ def accounting_index():
     conn = get_db_connection()
     try:
         company_id = _current_company_id()
+        company = _sars_company_row(conn, company_id)
+        session['comp_can_accounting'] = _sars_company_module_enabled(company, 'VAT201')
+        session['comp_sars_compliance_enabled'] = _sars_feature_enabled(company)
         ensure_accounting_posting_defaults(conn, company_id)
         conn.commit()
         ai_status = _cashbook_ai_company_status(conn, company_id)
@@ -22260,6 +22431,1401 @@ def download_accounting_bank_reconciliation_xlsx():
             {'title': 'Bank Ledger Transactions', 'rows': detail_rows}
         ]
         return _accounting_excel_response(_build_accounting_report_xlsx(payload), _accounting_xlsx_safe_filename(f'Bank_Reconciliation_{data.get("end_date") or end_date}'))
+    finally:
+        conn.close()
+
+
+# ==========================================================
+# SARS COMPLIANCE PREPARATION (PHASE 1)
+# ==========================================================
+# This workspace prepares immutable review packs only. It deliberately contains
+# no eFiling password storage, browser automation or "submitted" status. A direct
+# transmission adapter may only be enabled after written SARS ISV approval.
+SARS_SETTING_KEYS = [
+    'sars_paye_reference', 'sars_uif_reference', 'sars_sdl_reference',
+    'sars_contact_name', 'sars_contact_capacity', 'sars_contact_phone',
+    'sars_contact_email', 'sars_vat_filing_category', 'sars_vat_accounting_basis'
+]
+SARS_APPROVAL_DECLARATION = (
+    'I confirm that I reviewed this stored return snapshot and its validation '
+    'findings. Approval creates an Easy Admin review pack only and does not '
+    'submit a return or make a payment to SARS.'
+)
+
+
+def _sars_now():
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _sars_issue(issues, severity, code, message, entity=''):
+    issues.append({
+        'severity': severity,
+        'code': code,
+        'message': message,
+        'entity': entity or '',
+    })
+
+
+def _sars_clean_reference(value):
+    return re.sub(r'[^A-Za-z0-9]', '', str(value or '')).upper()
+
+
+def _sars_type_module(return_type):
+    return 'accounting' if return_type == 'VAT201' else 'payroll'
+
+
+def _sars_has_access(return_type, action='read'):
+    module_name = _sars_type_module(return_type)
+    if action == 'read':
+        return _session_has_app_read(module_name)
+    if action == 'prepare':
+        return _session_has_app_full(module_name)
+    if action == 'approve':
+        return bool(
+            session.get('is_superadmin')
+            or (session.get('is_company_admin') and _session_has_app_read(module_name))
+        )
+    return False
+
+
+def _sars_current_user_row(conn, company_id):
+    """Resolve the logged-in actor from the database, not mutable session roles."""
+    user_id = session.get('user_id')
+    cache_key = (int(company_id or 0), str(user_id or ''), str(session.get('username') or ''))
+    user_cache = getattr(g, '_sars_user_cache', {})
+    if cache_key in user_cache:
+        return user_cache[cache_key]
+    if user_id is not None:
+        try:
+            row = conn.execute('SELECT * FROM users WHERE id=?', (int(user_id),)).fetchone()
+        except (TypeError, ValueError):
+            return None
+    else:
+        username = str(session.get('username') or '').strip()
+        if not username:
+            return None
+        row = conn.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
+    if not row:
+        user_cache[cache_key] = None
+        g._sars_user_cache = user_cache
+        return None
+    user = dict(row)
+    if session.get('user_id') is None and user.get('id') is not None:
+        session['user_id'] = user.get('id')
+    if bool(user.get('is_superadmin')):
+        user_cache[cache_key] = row
+        g._sars_user_cache = user_cache
+        return row
+    try:
+        if int(user.get('company_id') or 0) != int(company_id or 0):
+            user_cache[cache_key] = None
+            g._sars_user_cache = user_cache
+            return None
+    except (TypeError, ValueError):
+        user_cache[cache_key] = None
+        g._sars_user_cache = user_cache
+        return None
+    user_cache[cache_key] = row
+    g._sars_user_cache = user_cache
+    return row
+
+
+def _sars_fresh_has_access(conn, company_id, return_type, action='read'):
+    user_row = _sars_current_user_row(conn, company_id)
+    if not user_row:
+        return False
+    user = dict(user_row)
+    if bool(user.get('is_superadmin')):
+        return True
+    module_name = _sars_type_module(return_type)
+    full_key, readonly_key = APP_PERMISSION_MAP[module_name]
+    has_full = bool(user.get(full_key))
+    has_read = bool(has_full or user.get(readonly_key))
+    if action == 'read':
+        return has_read
+    if action == 'prepare':
+        return has_full
+    if action == 'approve':
+        return bool(user.get('is_company_admin') and has_read)
+    return False
+
+
+def _sars_actor_identity(conn, company_id):
+    row = _sars_current_user_row(conn, company_id)
+    if not row:
+        return None, ''
+    user = dict(row)
+    try:
+        user_id = int(user.get('id'))
+    except (TypeError, ValueError):
+        user_id = None
+    return user_id, str(user.get('username') or '').strip()
+
+
+def _sars_company_row(conn, company_id):
+    return conn.execute('SELECT * FROM companies WHERE id=?', (company_id,)).fetchone()
+
+
+def _sars_begin_company_write(conn, company_id):
+    """Start a checked transaction and serialize SARS writes for one tenant."""
+    _begin_atomic_write(conn)
+    if getattr(conn, '_conn', None) is not None:
+        conn.execute('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+    sql = 'SELECT * FROM companies WHERE id=?'
+    if getattr(conn, '_conn', None) is not None:
+        sql += ' FOR UPDATE'
+    return conn.execute(sql, (company_id,)).fetchone()
+
+
+def _sars_commit_atomic(conn):
+    """Commit without the legacy PostgreSQL wrapper swallowing commit failures."""
+    _commit_atomic_write(conn)
+
+
+def _sars_rollback_atomic(conn):
+    _rollback_atomic_write(conn)
+
+
+def _sars_is_concurrency_error(exc):
+    message = str(exc or '').lower()
+    return any(marker in message for marker in (
+        'could not serialize access',
+        'serialization failure',
+        'deadlock detected',
+        'database is locked',
+        'unique constraint',
+        'duplicate key',
+    ))
+
+
+def _sars_feature_enabled(company):
+    return bool(company and int(dict(company).get('sars_compliance_enabled') or 0))
+
+
+def _sars_company_module_enabled(company, return_type):
+    if not company:
+        return False
+    module_key = 'can_accounting' if _sars_type_module(return_type) == 'accounting' else 'can_payroll'
+    return bool(int(dict(company).get(module_key) or 0))
+
+
+def _sars_audit_event(conn, action, details, record_type, record_id, company_id, username):
+    """Store the compliance decision in the same transaction as its state change."""
+    conn.execute(
+        '''INSERT INTO audit_logs
+           (company_id, username, app_name, action, details, timestamp, ip_address,
+            user_agent, record_type, record_id, result, event_type)
+           VALUES (?, ?, 'SARS Compliance', ?, ?, datetime('now', 'localtime'), ?, ?, ?, ?, 'success', 'application')''',
+        (
+            company_id,
+            username or 'unknown',
+            action,
+            _safe_audit_details(details),
+            _client_ip(),
+            _client_user_agent(),
+            record_type,
+            str(record_id) if record_id is not None else None,
+        ),
+    )
+
+
+def _sars_limited_text(value, field_label, maximum=1000):
+    text_value = str(value or '').strip()
+    if len(text_value) > maximum:
+        raise ValueError(f'{field_label} cannot exceed {maximum} characters.')
+    return text_value
+
+
+def _sars_settings_payload(conn, company_id):
+    company_row = _sars_company_row(conn, company_id)
+    company = dict(company_row) if company_row else {}
+    settings = get_company_settings_dict(conn, company_id)
+    current_user_row = _sars_current_user_row(conn, company_id)
+    current_user = dict(current_user_row) if current_user_row else {}
+    return {
+        'enabled': _sars_feature_enabled(company_row),
+        'company_name': company.get('name') or '',
+        'company_registration_number': company.get('registration_number') or '',
+        'company_vat_number': company.get('vat_number') or '',
+        'company_address': company.get('address') or '',
+        'sars_paye_reference': settings.get('sars_paye_reference') or settings.get('ui19_paye_ref') or '',
+        'sars_uif_reference': settings.get('sars_uif_reference') or settings.get('ui19_uif_ref') or '',
+        'sars_sdl_reference': settings.get('sars_sdl_reference') or '',
+        'sars_contact_name': settings.get('sars_contact_name') or settings.get('ui19_authorised_person') or '',
+        'sars_contact_capacity': settings.get('sars_contact_capacity') or '',
+        'sars_contact_phone': settings.get('sars_contact_phone') or settings.get('ui19_phone') or company.get('contact_number') or '',
+        'sars_contact_email': settings.get('sars_contact_email') or settings.get('ui19_email') or company.get('contact_email') or '',
+        'sars_vat_filing_category': settings.get('sars_vat_filing_category') or 'Two-monthly',
+        'sars_vat_accounting_basis': settings.get('sars_vat_accounting_basis') or 'Invoice',
+        'can_configure': bool(current_user.get('is_superadmin') or current_user.get('is_company_admin')),
+        'can_prepare_payroll': bool(
+            _sars_company_module_enabled(company_row, 'EMP201')
+            and _sars_fresh_has_access(conn, company_id, 'EMP201', 'prepare')
+        ),
+        'can_prepare_accounting': bool(
+            _sars_company_module_enabled(company_row, 'VAT201')
+            and _sars_fresh_has_access(conn, company_id, 'VAT201', 'prepare')
+        ),
+        'direct_submission_available': False,
+        'direct_submission_status': 'Awaiting SARS ISV approval and interface credentials',
+    }
+
+
+def _sars_parse_period(return_type, data):
+    if return_type == 'EMP201':
+        month_value = str(data.get('month') or '').strip()
+        start_dt, end_dt = month_bounds_from_yyyy_mm(month_value)
+        return start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d'), start_dt.strftime('%B %Y')
+    if return_type == 'EMP501':
+        try:
+            tax_year = int(data.get('tax_year'))
+        except Exception as exc:
+            raise ValueError('Tax year must be a four-digit year, for example 2026.') from exc
+        if tax_year < 2000 or tax_year > 2200:
+            raise ValueError('Tax year must be a four-digit year, for example 2026.')
+        reconciliation_period = str(data.get('reconciliation_period') or 'annual').strip().lower()
+        if reconciliation_period not in {'interim', 'annual'}:
+            raise ValueError('EMP501 reconciliation period must be interim or annual.')
+        start_date = f'{tax_year - 1}-03-01'
+        if reconciliation_period == 'interim':
+            end_date = f'{tax_year - 1}-08-31'
+            period_name = 'interim reconciliation'
+        else:
+            end_day = calendar.monthrange(tax_year, 2)[1]
+            end_date = f'{tax_year}-02-{end_day:02d}'
+            period_name = 'annual reconciliation'
+        return start_date, end_date, f'{tax_year} tax year {period_name} ({start_date} to {end_date})'
+    start_value = str(data.get('start_date') or '').strip()
+    end_value = str(data.get('end_date') or '').strip()
+    try:
+        start_dt = datetime.strptime(start_value, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_value, '%Y-%m-%d')
+    except Exception as exc:
+        raise ValueError('VAT201 start and end dates must use YYYY-MM-DD.') from exc
+    if start_dt > end_dt:
+        raise ValueError('VAT201 start date cannot be after the end date.')
+    if (end_dt - start_dt).days > 366:
+        raise ValueError('A VAT201 preparation period cannot exceed 367 days.')
+    start_date = start_dt.strftime('%Y-%m-%d')
+    end_date = end_dt.strftime('%Y-%m-%d')
+    return start_date, end_date, f'{start_date} to {end_date}'
+
+
+def _sars_employer_snapshot(settings):
+    return {
+        'company_name': settings.get('company_name') or '',
+        'company_registration_number': settings.get('company_registration_number') or '',
+        'company_vat_number': settings.get('company_vat_number') or '',
+        'company_address': settings.get('company_address') or '',
+        'paye_reference': settings.get('sars_paye_reference') or '',
+        'uif_reference': settings.get('sars_uif_reference') or '',
+        'sdl_reference': settings.get('sars_sdl_reference') or '',
+        'contact_name': settings.get('sars_contact_name') or '',
+        'contact_capacity': settings.get('sars_contact_capacity') or '',
+        'contact_phone': settings.get('sars_contact_phone') or '',
+        'contact_email': settings.get('sars_contact_email') or '',
+        'vat_filing_category': settings.get('sars_vat_filing_category') or '',
+        'vat_accounting_basis': settings.get('sars_vat_accounting_basis') or '',
+    }
+
+
+def _sars_validate_employer_payroll(settings, issues, require_sdl=False, require_uif=False):
+    paye_ref = _sars_clean_reference(settings.get('sars_paye_reference'))
+    if not paye_ref:
+        _sars_issue(issues, 'error', 'EMPLOYER_PAYE_REFERENCE_MISSING', 'Set the employer PAYE reference in SARS Compliance settings.')
+    elif len(paye_ref) != 10:
+        _sars_issue(issues, 'warning', 'EMPLOYER_PAYE_REFERENCE_FORMAT', 'Review the employer PAYE reference; SARS references are normally 10 characters.')
+    if require_uif and not _sars_clean_reference(settings.get('sars_uif_reference')):
+        _sars_issue(issues, 'error', 'EMPLOYER_UIF_REFERENCE_MISSING', 'Set the employer UIF reference before approval.')
+    if require_sdl and not _sars_clean_reference(settings.get('sars_sdl_reference')):
+        _sars_issue(issues, 'error', 'EMPLOYER_SDL_REFERENCE_MISSING', 'Set the employer SDL reference before approval.')
+    if not (settings.get('sars_contact_name') or '').strip():
+        _sars_issue(issues, 'warning', 'DECLARANT_NAME_MISSING', 'Add the responsible person in SARS Compliance settings.')
+    if not (settings.get('sars_contact_phone') or '').strip():
+        _sars_issue(issues, 'warning', 'DECLARANT_PHONE_MISSING', 'Add a contact number for the responsible person.')
+
+
+def _sars_build_emp201_snapshot(conn, company_id, period_start, period_end, period_label):
+    settings = _sars_settings_payload(conn, company_id)
+    issues = []
+    rows = conn.execute('''SELECT p.*, e.name AS employee_name, e.emp_number, e.id_passport,
+                                  e.tax_number, e.start_date AS employee_start_date,
+                                  e.inactive_date AS employee_inactive_date, e.emp_type
+                           FROM payslips p
+                           JOIN employees e ON e.id=p.employee_id AND e.company_id=p.company_id
+                           WHERE p.company_id=? AND p.date>=? AND p.date<=?
+                           ORDER BY p.date ASC, e.name ASC, p.id ASC''',
+                        (company_id, period_start, period_end)).fetchall()
+    detail_rows = []
+    employee_ids_with_payroll = set()
+    total_gross = total_paye = uif_employee = total_sdl = 0.0
+    historical_sdl_rows = 0
+    for row in rows:
+        d = dict(row)
+        employee_ids_with_payroll.add(int(d.get('employee_id')))
+        taxable = round(
+            _money_float(d.get('gross_salary')) + _money_float(d.get('overtime'))
+            + _money_float(d.get('bonus')) + _money_float(d.get('leave_payout_amount')),
+            2,
+        )
+        paye = round(_money_float(d.get('paye')), 2)
+        employee_uif = round(_money_float(d.get('uif')), 2)
+        sdl = round(_money_float(d.get('sdl')), 2)
+        total_gross += taxable
+        total_paye += paye
+        uif_employee += employee_uif
+        total_sdl += sdl
+        if d.get('sdl_applicable') is None:
+            historical_sdl_rows += 1
+        entity = d.get('employee_name') or f"Employee #{d.get('employee_id')}"
+        if not str(d.get('tax_number') or '').strip():
+            _sars_issue(issues, 'error', 'EMPLOYEE_TAX_NUMBER_MISSING', 'Income tax reference number is missing.', entity)
+        if not str(d.get('id_passport') or '').strip():
+            _sars_issue(issues, 'error', 'EMPLOYEE_ID_MISSING', 'ID or passport number is missing.', entity)
+        detail_rows.append({
+            'payslip_id': d.get('id'),
+            'employee_number': d.get('emp_number') or '',
+            'employee_name': entity,
+            'payroll_date': d.get('date') or '',
+            'payslip_type': d.get('payslip_type') or 'regular',
+            'taxable_remuneration': round(taxable, 2),
+            'paye': paye,
+            'uif_employee': employee_uif,
+            'uif_employer': employee_uif,
+            'sdl_employer': sdl,
+        })
+    total_gross = round(total_gross, 2)
+    total_paye = round(total_paye, 2)
+    uif_employee = round(uif_employee, 2)
+    total_uif = round(uif_employee * 2, 2)
+    total_sdl = round(total_sdl, 2)
+
+    if not rows:
+        _sars_issue(issues, 'error', 'NO_FINALISED_PAYROLL', 'No saved payslips were found for this month. Finalise payroll before preparing EMP201.')
+    if min(total_gross, total_paye, total_uif, total_sdl) < 0:
+        _sars_issue(issues, 'error', 'NEGATIVE_EMP201_TOTAL', 'One or more EMP201 totals are negative and require payroll review.')
+    if historical_sdl_rows:
+        _sars_issue(issues, 'warning', 'HISTORICAL_SDL_SNAPSHOT', f'{historical_sdl_rows} payslip(s) pre-date the saved SDL-applicability snapshot.')
+    _sars_validate_employer_payroll(settings, issues, require_sdl=total_sdl > 0, require_uif=total_uif > 0)
+    _sars_issue(
+        issues,
+        'warning',
+        'EMP201_EFILING_RECONCILIATION_REQUIRED',
+        'The calculated liability excludes ETI utilised, penalties and interest because Easy Admin does not store those eFiling values. Reconcile them manually before filing or paying SARS.',
+    )
+
+    # A person whose employment dates overlap the month must have a saved payroll
+    # result, even where it is a zero-value result, before the return can be approved.
+    employees = conn.execute('''SELECT id, name, start_date, inactive_date, emp_type
+                                FROM employees WHERE company_id=?
+                                  AND COALESCE(emp_type, '') NOT IN ('Supplier', 'Provider')
+                                ORDER BY name ASC, id ASC''',
+                             (company_id,)).fetchall()
+    period_start_dt = datetime.strptime(period_start, '%Y-%m-%d')
+    period_end_dt = datetime.strptime(period_end, '%Y-%m-%d')
+    for employee in employees:
+        emp = dict(employee)
+        employee_id = int(emp.get('id'))
+        entity = emp.get('name') or f"Employee #{emp.get('id')}"
+        raw_start_date = str(emp.get('start_date') or '').strip()
+        raw_inactive_date = str(emp.get('inactive_date') or '').strip()
+        start_dt = parse_date_safe(emp.get('start_date'))
+        inactive_dt = parse_date_safe(emp.get('inactive_date'))
+        if raw_inactive_date and not inactive_dt:
+            _sars_issue(issues, 'error', 'EMPLOYEE_INACTIVE_DATE_INVALID', 'Employment inactive date is invalid and must be corrected.', entity)
+            continue
+        if not start_dt:
+            known_historical_employee = bool(
+                inactive_dt
+                and inactive_dt.strftime('%Y-%m-%d') < period_start
+                and employee_id not in employee_ids_with_payroll
+            )
+            if known_historical_employee:
+                continue
+            _sars_issue(
+                issues,
+                'error',
+                'EMPLOYEE_START_DATE_MISSING' if not raw_start_date else 'EMPLOYEE_START_DATE_INVALID',
+                'Employment start date is missing.' if not raw_start_date else 'Employment start date is invalid and must be corrected.',
+                entity,
+            )
+            continue
+        overlaps = start_dt.strftime('%Y-%m-%d') <= period_end and (not inactive_dt or inactive_dt.strftime('%Y-%m-%d') >= period_start)
+        if employee_id in employee_ids_with_payroll and not overlaps:
+            _sars_issue(issues, 'error', 'PAYROLL_OUTSIDE_EMPLOYMENT_PERIOD', 'A saved payslip falls outside this employee’s employment dates.', entity)
+        if overlaps and employee_id not in employee_ids_with_payroll:
+            employee_type = str(emp.get('emp_type') or '').strip()
+            if employee_type in CONTRACT_BOOKING_EMPLOYEE_TYPES:
+                payroll_start = max(period_start_dt, start_dt)
+                payroll_cutoff = min(period_end_dt, inactive_dt) if inactive_dt else period_end_dt
+                qualifying_bookings = get_employee_month_bookings(
+                    conn,
+                    company_id,
+                    str(emp.get('name') or ''),
+                    period_start[:7],
+                    payroll_cutoff,
+                    payroll_start=payroll_start,
+                )
+                if qualifying_bookings:
+                    _sars_issue(issues, 'error', 'CONTRACT_PAYROLL_NOT_FINALISED', f'{len(qualifying_bookings)} qualifying booking(s) exist but no saved payslip was found for this contract employee.', entity)
+                else:
+                    _sars_issue(issues, 'warning', 'CONTRACT_PAYROLL_NOT_FINALISED', 'No saved payslip exists for this contract employee and no qualifying bookings were found. Confirm that no other remuneration occurred in the month.', entity)
+            else:
+                _sars_issue(issues, 'error', 'EMPLOYEE_PAYROLL_NOT_FINALISED', 'No saved payslip exists for an employee whose employment dates overlap this month.', entity)
+
+    liability_before_adjustments = round(total_paye + total_uif + total_sdl, 2)
+    return {
+        'schema_version': 1,
+        'return_type': 'EMP201',
+        'period_start': period_start,
+        'period_end': period_end,
+        'period_label': period_label,
+        'employer': _sars_employer_snapshot(settings),
+        'source': 'Saved payslip ledger only',
+        'return_values': [
+            {'field': 'Gross remuneration', 'label': 'Gross remuneration from finalised payroll', 'value': total_gross},
+            {'field': 'PAYE', 'label': 'Employees tax withheld', 'value': total_paye},
+            {'field': 'UIF', 'label': 'Employee and employer UIF', 'value': total_uif},
+            {'field': 'SDL', 'label': 'Employer skills development levy', 'value': total_sdl},
+            {'field': 'Payroll liability before ETI, penalties and interest', 'label': 'PAYE + UIF + SDL before eFiling adjustments', 'value': liability_before_adjustments},
+        ],
+        'totals': {
+            'gross_remuneration': total_gross,
+            'paye': total_paye,
+            'uif_employee': uif_employee,
+            'uif_employer': uif_employee,
+            'uif_total': total_uif,
+            'sdl': total_sdl,
+            'liability_before_eti_penalties_interest': liability_before_adjustments,
+            'total_payable': liability_before_adjustments,
+            'payslip_count': len(rows),
+        },
+        'detail_rows': detail_rows,
+        'export_format': 'Easy Admin SARS review pack',
+        'direct_submission_supported': False,
+    }, issues
+
+
+def _sars_build_emp501_snapshot(conn, company_id, period_start, period_end, period_label):
+    settings = _sars_settings_payload(conn, company_id)
+    issues = []
+    period_start_dt = datetime.strptime(period_start, '%Y-%m-%d')
+    period_end_dt = datetime.strptime(period_end, '%Y-%m-%d')
+    employees = conn.execute('''SELECT DISTINCT e.* FROM employees e
+                                JOIN payslips p ON p.employee_id=e.id AND p.company_id=e.company_id
+                                WHERE e.company_id=? AND p.date>=? AND p.date<=?
+                                ORDER BY e.name ASC, e.id ASC''', (company_id, period_start, period_end)).fetchall()
+    payslip_rows = conn.execute('''SELECT employee_id, id, date,
+                                          COALESCE(payslip_type, 'regular') AS payslip_type,
+                                          COALESCE(paye, 0) AS paye,
+                                          COALESCE(uif, 0) AS uif,
+                                          COALESCE(sdl, 0) AS sdl
+                                   FROM payslips
+                                   WHERE company_id=? AND date>=? AND date<=?
+                                   ORDER BY employee_id ASC, date ASC, id ASC''',
+                                (company_id, period_start, period_end)).fetchall()
+    payslip_months_by_employee = {}
+    invalid_payslip_dates_by_employee = {}
+    for payslip_row in payslip_rows:
+        payslip_record = dict(payslip_row)
+        employee_id = int(payslip_record.get('employee_id') or 0)
+        payslip_date = parse_date_safe(payslip_record.get('date'))
+        if not payslip_date:
+            invalid_payslip_dates_by_employee.setdefault(employee_id, []).append({
+                'id': payslip_record.get('id'),
+                'date': payslip_record.get('date') or '',
+            })
+            continue
+        payslip_months_by_employee.setdefault(employee_id, set()).add(
+            payslip_date.strftime('%Y-%m')
+        )
+    certificates = []
+    historical_sdl_employee_count = 0
+    eligible_payslip_months_by_employee = {}
+    for employee in employees:
+        emp = dict(employee)
+        employee_id = int(emp.get('id') or 0)
+        name = emp.get('name') or f"Employee #{employee_id}"
+        required_fields = [
+            ('tax_number', 'EMPLOYEE_TAX_NUMBER_MISSING', 'Income tax reference number is missing.'),
+            ('id_passport', 'EMPLOYEE_ID_MISSING', 'ID or passport number is missing.'),
+            ('emp_number', 'EMPLOYEE_NUMBER_MISSING', 'Employee number is missing.'),
+            ('start_date', 'EMPLOYEE_START_DATE_MISSING', 'Employment start date is missing.'),
+        ]
+        for field_name, code, message in required_fields:
+            if not str(emp.get(field_name) or '').strip():
+                _sars_issue(issues, 'error', code, message, name)
+        if str(emp.get('start_date') or '').strip() and not parse_date_safe(emp.get('start_date')):
+            _sars_issue(issues, 'error', 'EMPLOYEE_START_DATE_INVALID', 'Employment start date is invalid and must be corrected.', name)
+        if str(emp.get('inactive_date') or '').strip() and not parse_date_safe(emp.get('inactive_date')):
+            _sars_issue(issues, 'error', 'EMPLOYEE_INACTIVE_DATE_INVALID', 'Employment inactive date is invalid and must be corrected.', name)
+        employment_start = parse_date_safe(emp.get('start_date'))
+        employment_end = parse_date_safe(emp.get('inactive_date'))
+        for invalid_payslip in invalid_payslip_dates_by_employee.get(employee_id, []):
+            _sars_issue(
+                issues,
+                'error',
+                'PAYSLIP_DATE_INVALID',
+                f"Saved payslip #{invalid_payslip.get('id')} has an invalid payroll date and must be corrected.",
+                name,
+            )
+        payroll_months = sorted(payslip_months_by_employee.get(employee_id, set()))
+        eligible_months = set(payroll_months)
+        if employment_start or employment_end:
+            eligible_months = set()
+            for payroll_month in payroll_months:
+                payroll_month_start = datetime.strptime(f'{payroll_month}-01', '%Y-%m-%d')
+                payroll_month_end = datetime(
+                    payroll_month_start.year,
+                    payroll_month_start.month,
+                    calendar.monthrange(payroll_month_start.year, payroll_month_start.month)[1],
+                )
+                month_overlaps_employment = (
+                    (not employment_start or employment_start <= payroll_month_end)
+                    and (not employment_end or employment_end >= payroll_month_start)
+                )
+                if month_overlaps_employment:
+                    eligible_months.add(payroll_month)
+                else:
+                    _sars_issue(
+                        issues,
+                        'error',
+                        'PAYROLL_OUTSIDE_EMPLOYMENT_PERIOD',
+                        f'Saved payroll for {payroll_month} falls wholly outside this employee’s employment dates.',
+                        name,
+                    )
+        eligible_payslip_months_by_employee[employee_id] = eligible_months
+
+        # Certificate totals use whole payroll months that intersect employment.
+        # This preserves valid month-end payslips for mid-month starters/leavers
+        # while excluding remuneration from wholly pre-start or post-exit months.
+        summary_start = period_start_dt
+        summary_end = period_end_dt
+        if employment_start:
+            summary_start = max(
+                summary_start,
+                datetime(employment_start.year, employment_start.month, 1),
+            )
+        if employment_end:
+            summary_end = min(
+                summary_end,
+                datetime(
+                    employment_end.year,
+                    employment_end.month,
+                    calendar.monthrange(employment_end.year, employment_end.month)[1],
+                ),
+            )
+        summary = _payroll_tax_certificate_ledger_summary(
+            conn,
+            company_id,
+            employee_id,
+            summary_start.strftime('%Y-%m-%d'),
+            summary_end.strftime('%Y-%m-%d'),
+        )
+        if summary.get('payslip_count', 0) <= 0:
+            continue
+        if not str(emp.get('date_of_birth') or '').strip():
+            _sars_issue(issues, 'warning', 'EMPLOYEE_BIRTH_DATE_MISSING', 'Date of birth is missing and may be required for the selected SARS certificate record.', name)
+        if not str(emp.get('address') or '').strip():
+            _sars_issue(issues, 'warning', 'EMPLOYEE_ADDRESS_MISSING', 'Employee address is missing.', name)
+        if summary.get('historical_sdl_warning'):
+            historical_sdl_employee_count += 1
+        transport_unclassified = round(_money_float(summary.get('transport_unclassified')), 2)
+        if abs(transport_unclassified) >= 0.005:
+            _sars_issue(
+                issues,
+                'error',
+                'TRANSPORT_CLASSIFICATION_REQUIRED',
+                'Easy Admin stores this transport amount as a flat reimbursement without the supporting kilometre/rate split needed to assign a SARS source code. Classify it outside this Phase 1 workflow before approval.',
+                name,
+            )
+        certificates.append({
+            'employee_id': emp.get('id'),
+            'employee_number': emp.get('emp_number') or '',
+            'employee_name': name,
+            'id_or_passport': emp.get('id_passport') or '',
+            'tax_number': emp.get('tax_number') or '',
+            'employment_start_date': emp.get('start_date') or '',
+            'employment_end_date': emp.get('inactive_date') or '',
+            'code_3601': round(summary.get('code_3601') or 0, 2),
+            'code_3605': round(summary.get('code_3605') or 0, 2),
+            'code_3607': round(summary.get('code_3607') or 0, 2),
+            'transport_unclassified': transport_unclassified,
+            'code_3699': round(summary.get('code_3699') or 0, 2),
+            'code_4102': round(summary.get('code_4102') or 0, 2),
+            'code_4141': round(summary.get('code_4141') or 0, 2),
+            'code_4142': round(summary.get('code_4142') or 0, 2),
+            'code_4149': round(summary.get('code_4149') or 0, 2),
+            'payslip_count': int(summary.get('payslip_count') or 0),
+        })
+    if not certificates:
+        _sars_issue(issues, 'error', 'NO_TAX_CERTIFICATES', 'No finalised payroll records were found for this tax year.')
+    if historical_sdl_employee_count:
+        _sars_issue(
+            issues,
+            'warning',
+            'HISTORICAL_SDL_SNAPSHOT',
+            f'{historical_sdl_employee_count} employee certificate(s) include payslips that pre-date the saved SDL-applicability snapshot.',
+        )
+
+    total_3601 = round(sum(_money_float(r.get('code_3601')) for r in certificates), 2)
+    total_3605 = round(sum(_money_float(r.get('code_3605')) for r in certificates), 2)
+    total_3607 = round(sum(_money_float(r.get('code_3607')) for r in certificates), 2)
+    total_transport_unclassified = round(sum(_money_float(r.get('transport_unclassified')) for r in certificates), 2)
+    total_3699 = round(sum(_money_float(r.get('code_3699')) for r in certificates), 2)
+    total_4102 = round(sum(_money_float(r.get('code_4102')) for r in certificates), 2)
+    total_4141 = round(sum(_money_float(r.get('code_4141')) for r in certificates), 2)
+    total_4142 = round(sum(_money_float(r.get('code_4142')) for r in certificates), 2)
+    total_4149 = round(sum(_money_float(r.get('code_4149')) for r in certificates), 2)
+    _sars_validate_employer_payroll(settings, issues, require_sdl=total_4142 > 0, require_uif=total_4141 > 0)
+    _sars_issue(
+        issues,
+        'warning',
+        'EASYFILE_IMPORT_NOT_AVAILABLE',
+        'This Phase 1 pack is an EMP501 reconciliation review pack, not a SARS PAYE BRS/e@syFile import file. Employee profiles do not yet store every BRS field.',
+    )
+    _sars_issue(
+        issues,
+        'warning',
+        'EMP501_DECLARATIONS_NOT_RECORDED',
+        'Monthly figures are derived from the saved payslip ledger. Compare them with the EMP201 declarations and payments actually recorded on eFiling before filing EMP501.',
+    )
+
+    monthly_totals = {}
+    for payslip_row in payslip_rows:
+        payslip_record = dict(payslip_row)
+        employee_id = int(payslip_record.get('employee_id') or 0)
+        payslip_date = parse_date_safe(payslip_record.get('date'))
+        if not payslip_date:
+            continue
+        payroll_month = payslip_date.strftime('%Y-%m')
+        if payroll_month not in eligible_payslip_months_by_employee.get(employee_id, set()):
+            continue
+        totals = monthly_totals.setdefault(payroll_month, {'paye': 0.0, 'uif_total': 0.0, 'sdl': 0.0})
+        totals['paye'] += _money_float(payslip_record.get('paye'))
+        totals['uif_total'] += _money_float(payslip_record.get('uif')) * 2.0
+        totals['sdl'] += _money_float(payslip_record.get('sdl'))
+    monthly_reconciliation = []
+    for payroll_month in sorted(monthly_totals):
+        totals = monthly_totals[payroll_month]
+        paye = round(_money_float(totals.get('paye')), 2)
+        uif_total = round(_money_float(totals.get('uif_total')), 2)
+        sdl = round(_money_float(totals.get('sdl')), 2)
+        monthly_reconciliation.append({
+            'month': payroll_month,
+            'paye': paye,
+            'uif_total': uif_total,
+            'sdl': sdl,
+            'derived_liability': round(paye + uif_total + sdl, 2),
+        })
+
+    return {
+        'schema_version': 1,
+        'return_type': 'EMP501',
+        'reconciliation_period': 'interim' if period_end.endswith('-08-31') else 'annual',
+        'period_start': period_start,
+        'period_end': period_end,
+        'period_label': period_label,
+        'employer': _sars_employer_snapshot(settings),
+        'source': 'Saved payslip ledger only',
+        'return_values': [
+            {'field': 'Certificate count', 'label': 'Employees with ledger-backed certificate totals', 'value': len(certificates)},
+            {'field': 'Code 3699', 'label': 'Gross employment income', 'value': total_3699},
+            {'field': 'Transport unclassified', 'label': 'Flat transport reimbursement requiring SARS treatment review', 'value': total_transport_unclassified},
+            {'field': 'Code 4102', 'label': 'PAYE', 'value': total_4102},
+            {'field': 'Code 4141', 'label': 'Employee and employer UIF', 'value': total_4141},
+            {'field': 'Code 4142', 'label': 'Employer SDL', 'value': total_4142},
+            {'field': 'Code 4149', 'label': 'Total tax, SDL and UIF', 'value': total_4149},
+        ],
+        'totals': {
+            'code_3601': total_3601,
+            'code_3605': total_3605,
+            'code_3607': total_3607,
+            'transport_unclassified': total_transport_unclassified,
+            'code_3699': total_3699,
+            'code_4102': total_4102,
+            'code_4141': total_4141,
+            'code_4142': total_4142,
+            'code_4149': total_4149,
+            'certificate_count': len(certificates),
+        },
+        'detail_rows': certificates,
+        'monthly_reconciliation': monthly_reconciliation,
+        'export_format': 'Easy Admin EMP501 reconciliation review pack',
+        'easyfile_import_file': False,
+        'direct_submission_supported': False,
+    }, issues
+
+
+def _sars_build_vat201_snapshot(conn, company_id, period_start, period_end, period_label):
+    settings = _sars_settings_payload(conn, company_id)
+    issues = []
+    report = _vat_report_data(conn, company_id, period_start, period_end)
+    vat_ref = _sars_clean_reference(settings.get('company_vat_number'))
+    if not vat_ref:
+        _sars_issue(issues, 'error', 'VAT_REFERENCE_MISSING', 'Set the company VAT registration number before approval.')
+    elif not (len(vat_ref) == 10 and vat_ref.isdigit() and vat_ref.startswith('4')):
+        _sars_issue(issues, 'error', 'VAT_REFERENCE_FORMAT', 'The VAT registration number must be a 10-digit number starting with 4.')
+    if not report.get('vat_account_id'):
+        _sars_issue(issues, 'error', 'VAT_CONTROL_ACCOUNT_MISSING', 'Configure the VAT Control account in Accounting before preparing VAT201.')
+    if str(settings.get('sars_vat_accounting_basis') or 'Invoice').strip().lower() != 'invoice':
+        _sars_issue(issues, 'error', 'VAT_PAYMENT_BASIS_NOT_SUPPORTED', 'Phase 1 calculates VAT201 working totals on the invoice basis. Payment-basis preparation is not yet supported.')
+
+    pending_checks = [
+        ('UNPOSTED_VAT_INVOICES', 'invoice(s) with VAT have not been posted to Accounting', '''SELECT COUNT(*) AS row_count FROM invoices
+             WHERE company_id=? AND date>=? AND date<=? AND COALESCE(vat_amount, 0)<>0
+               AND COALESCE(accounting_status, '')<>'posted' '''),
+        ('UNPOSTED_VAT_CREDIT_NOTES', 'credit note(s) affecting VAT have not been posted to Accounting', '''SELECT COUNT(*) AS row_count FROM invoice_credit_notes cn
+             JOIN invoices i ON i.id=cn.invoice_id AND i.company_id=cn.company_id
+             WHERE cn.company_id=? AND cn.credit_date>=? AND cn.credit_date<=?
+               AND COALESCE(i.vat_amount, 0)<>0 AND COALESCE(cn.accounting_status, '')<>'posted' '''),
+        ('UNPOSTED_VAT_CASHBOOK_LINES', 'cash-book line(s) with VAT have not been posted', '''SELECT COUNT(*) AS row_count FROM accounting_cashbook_lines
+             WHERE company_id=? AND transaction_date>=? AND transaction_date<=?
+               AND COALESCE(vat_amount, 0)<>0 AND COALESCE(status, '')<>'posted' '''),
+        ('UNPOSTED_VAT_JOURNALS', 'journal line(s) with VAT are in journals that have not been posted', '''SELECT COUNT(*) AS row_count FROM accounting_journal_lines l
+             JOIN accounting_journals j ON j.id=l.journal_id AND j.company_id=l.company_id
+             WHERE l.company_id=? AND j.journal_date>=? AND j.journal_date<=?
+               AND COALESCE(l.vat_amount, 0)<>0 AND COALESCE(j.status, '')<>'posted' '''),
+    ]
+    for code, label, sql in pending_checks:
+        count_row = conn.execute(sql, (company_id, period_start, period_end)).fetchone()
+        count = int(count_row['row_count'] or 0) if count_row else 0
+        if count:
+            _sars_issue(issues, 'error', code, f'{count} {label}.')
+
+    overlap_rows = conn.execute('''SELECT id, period_start, period_end, version_no
+                                   FROM sars_return_batches
+                                   WHERE company_id=? AND return_type='VAT201' AND status='approved'
+                                     AND NOT (period_end<? OR period_start>?)
+                                   ORDER BY id DESC''',
+                                (company_id, period_start, period_end)).fetchall()
+    for overlap in overlap_rows:
+        d = dict(overlap)
+        if d.get('period_start') == period_start and d.get('period_end') == period_end:
+            _sars_issue(issues, 'error', 'PRIOR_APPROVED_REVISION', f"An approved VAT201 review pack already exists for this exact period (batch #{d.get('id')}, version {d.get('version_no')}). An amendment workflow is required before another review can be approved.")
+        else:
+            _sars_issue(issues, 'error', 'OVERLAPPING_APPROVED_PERIOD', f"This period overlaps approved VAT201 batch #{d.get('id')} ({d.get('period_start')} to {d.get('period_end')}).")
+
+    output_vat = round(_money_float(report.get('output_vat')), 2)
+    input_vat = round(_money_float(report.get('input_vat')), 2)
+    adjustments = round(_money_float(report.get('vat_adjustments')), 2)
+    output_adjustment = round(max(adjustments, 0), 2)
+    input_adjustment = round(max(-adjustments, 0), 2)
+    field_13 = round(output_vat + output_adjustment, 2)
+    field_19 = round(input_vat + input_adjustment, 2)
+    field_20 = round(field_13 - field_19, 2)
+    if adjustments:
+        _sars_issue(issues, 'warning', 'VAT_ADJUSTMENT_CLASSIFICATION_REQUIRED', 'VAT Control adjustments must be assigned to the correct VAT201 adjustment field during eFiling review.')
+    if not report.get('rows'):
+        _sars_issue(issues, 'warning', 'NIL_VAT_ACTIVITY', 'No posted VAT-applicable transactions were found. Confirm whether a nil VAT201 return is required.')
+    _sars_issue(
+        issues,
+        'warning',
+        'VAT201_FIELD_CLASSIFICATION_REVIEW',
+        'Easy Admin currently identifies standard output and input VAT but cannot distinguish capital goods, imports, accommodation, zero-rated/exempt supplies, diesel or every adjustment category. Review the suggested VAT201 fields against source documents.',
+    )
+    if not (settings.get('sars_contact_name') or '').strip():
+        _sars_issue(issues, 'warning', 'DECLARANT_NAME_MISSING', 'Add the responsible person in SARS Compliance settings.')
+
+    detail_rows = []
+    for row in report.get('rows') or []:
+        detail_rows.append({
+            'date': row.get('date') or '',
+            'reference': row.get('reference') or '',
+            'source': row.get('source') or '',
+            'vat_type': row.get('vat_type') or '',
+            'description': row.get('description') or '',
+            'gross_amount': round(_money_float(row.get('gross_amount')), 2),
+            'net_amount': round(_money_float(row.get('net_amount')), 2),
+            'vat_amount': round(_money_float(row.get('vat_amount')), 2),
+        })
+    return {
+        'schema_version': 1,
+        'return_type': 'VAT201',
+        'period_start': period_start,
+        'period_end': period_end,
+        'period_label': period_label,
+        'employer': _sars_employer_snapshot(settings),
+        'source': 'Posted Accounting records only',
+        'return_values': [
+            {'field': 'VAT201 field 1 candidate', 'label': 'Standard-rated supplies, VAT-inclusive; classification review required', 'value': round(_money_float(report.get('output_gross')), 2)},
+            {'field': 'VAT201 field 4 candidate', 'label': 'Output tax on field 1 candidate', 'value': output_vat},
+            {'field': 'VAT201 field 12 candidate', 'label': 'Positive unclassified output adjustments; review required', 'value': output_adjustment},
+            {'field': 'VAT201 field 13 working total', 'label': 'Total output tax', 'value': field_13},
+            {'field': 'VAT201 field 15 candidate', 'label': 'Input tax on non-capital local goods/services; document and classification review required', 'value': input_vat},
+            {'field': 'VAT201 field 18 candidate', 'label': 'Unclassified input adjustments; review required', 'value': input_adjustment},
+            {'field': 'VAT201 field 19 working total', 'label': 'Total input tax', 'value': field_19},
+            {'field': 'VAT201 field 20 working total', 'label': 'VAT payable (positive) or refundable (negative)', 'value': field_20},
+        ],
+        'totals': {
+            'output_gross': round(_money_float(report.get('output_gross')), 2),
+            'output_net': round(_money_float(report.get('output_net')), 2),
+            'output_vat': output_vat,
+            'input_gross': round(_money_float(report.get('input_gross')), 2),
+            'input_net': round(_money_float(report.get('input_net')), 2),
+            'input_vat': input_vat,
+            'vat_adjustments': adjustments,
+            'vat201_field_13': field_13,
+            'vat201_field_19': field_19,
+            'vat201_field_20': field_20,
+            'transaction_count': len(detail_rows),
+        },
+        'detail_rows': detail_rows,
+        'vat_account': report.get('vat_account') or '',
+        'export_format': 'Easy Admin VAT201 review pack',
+        'direct_submission_supported': False,
+    }, issues
+
+
+def _sars_build_snapshot(conn, company_id, return_type, period_start, period_end, period_label):
+    if return_type == 'EMP201':
+        return _sars_build_emp201_snapshot(conn, company_id, period_start, period_end, period_label)
+    if return_type == 'EMP501':
+        return _sars_build_emp501_snapshot(conn, company_id, period_start, period_end, period_label)
+    return _sars_build_vat201_snapshot(conn, company_id, period_start, period_end, period_label)
+
+
+def _sars_snapshot_validation_state(row):
+    """Verify both the protected snapshot and its duplicated validation metadata."""
+    d = dict(row)
+    expected = str(d.get('source_hash') or '').strip().lower()
+    try:
+        snapshot = json.loads(d.get('snapshot_json') or '')
+    except Exception:
+        snapshot = {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    protected_issues = snapshot.get('validation_results')
+    if not isinstance(protected_issues, list):
+        protected_issues = []
+    counts = sars_compliance.summarize_issues(protected_issues)
+    try:
+        actual = sars_compliance.snapshot_hash(snapshot).lower()
+    except Exception:
+        actual = ''
+    metadata_matches = all(
+        str(snapshot.get(field_name) or '') == str(d.get(field_name) or '')
+        for field_name in ('return_type', 'period_start', 'period_end', 'period_label')
+    )
+    snapshot_integrity_ok = bool(
+        expected
+        and snapshot
+        and metadata_matches
+        and secrets.compare_digest(expected, actual)
+    )
+    try:
+        stored_issues = json.loads(d.get('validation_json') or '')
+    except Exception:
+        stored_issues = None
+    validation_integrity_ok = bool(
+        isinstance(snapshot.get('validation_results'), list)
+        and isinstance(stored_issues, list)
+        and secrets.compare_digest(
+            sars_compliance.canonical_json(protected_issues).encode('utf-8'),
+            sars_compliance.canonical_json(stored_issues).encode('utf-8'),
+        )
+        and int(d.get('validation_error_count') or 0) == int(counts.get('errors') or 0)
+        and int(d.get('validation_warning_count') or 0) == int(counts.get('warnings') or 0)
+    )
+    return {
+        'snapshot': snapshot,
+        'validation': protected_issues,
+        'counts': counts,
+        'snapshot_integrity_ok': snapshot_integrity_ok,
+        'validation_integrity_ok': validation_integrity_ok,
+    }
+
+
+def _sars_snapshot_integrity_ok(row):
+    """Backward-friendly snapshot fingerprint check."""
+    return bool(_sars_snapshot_validation_state(row).get('snapshot_integrity_ok'))
+
+
+def _sars_batch_payload(row, include_snapshot=False, conn=None, company_id=None):
+    d = dict(row)
+    username = str(session.get('username') or '').strip().lower()
+    prepared_by = str(d.get('prepared_by') or '').strip().lower()
+    batch_status = d.get('status') or 'prepared'
+    integrity = _sars_snapshot_validation_state(d)
+    current_user_id = session.get('user_id')
+    prepared_by_user_id = d.get('prepared_by_user_id')
+    same_actor = False
+    if current_user_id is not None and prepared_by_user_id is not None:
+        try:
+            same_actor = int(current_user_id) == int(prepared_by_user_id)
+        except (TypeError, ValueError):
+            same_actor = True
+    else:
+        same_actor = bool(prepared_by and prepared_by == username)
+    if conn is not None and company_id is not None:
+        has_approval_access = _sars_fresh_has_access(conn, company_id, d.get('return_type'), 'approve')
+        has_prepare_access = _sars_fresh_has_access(conn, company_id, d.get('return_type'), 'prepare')
+    else:
+        has_approval_access = _sars_has_access(d.get('return_type'), 'approve')
+        has_prepare_access = _sars_has_access(d.get('return_type'), 'prepare')
+    counts = integrity.get('counts') or {}
+    can_approve = bool(
+        batch_status == 'prepared'
+        and int(counts.get('errors') or 0) == 0
+        and integrity.get('snapshot_integrity_ok')
+        and integrity.get('validation_integrity_ok')
+        and has_approval_access
+        and not same_actor
+    )
+    payload = {
+        'id': d.get('id'),
+        'return_type': d.get('return_type'),
+        'module': _sars_type_module(d.get('return_type')),
+        'period_start': d.get('period_start'),
+        'period_end': d.get('period_end'),
+        'period_label': d.get('period_label'),
+        'version_no': int(d.get('version_no') or 1),
+        'status': batch_status,
+        'batch_status': batch_status,
+        'source_hash': d.get('source_hash') or '',
+        'validation_error_count': int(counts.get('errors') or 0),
+        'validation_warning_count': int(counts.get('warnings') or 0),
+        'prepared_by': d.get('prepared_by') or '',
+        'prepared_at': d.get('prepared_at') or '',
+        'approved_by': d.get('approved_by') or '',
+        'approved_at': d.get('approved_at') or '',
+        'approval_note': d.get('approval_note') or '',
+        'rejected_by': d.get('rejected_by') or '',
+        'rejected_at': d.get('rejected_at') or '',
+        'rejection_reason': d.get('rejection_reason') or '',
+        'exported_by': d.get('exported_by') or '',
+        'exported_at': d.get('exported_at') or '',
+        'export_count': int(d.get('export_count') or 0),
+        'submission_status': d.get('submission_status') or 'not_submitted',
+        'snapshot_integrity_ok': bool(integrity.get('snapshot_integrity_ok')),
+        'validation_integrity_ok': bool(integrity.get('validation_integrity_ok')),
+        'direct_submission_available': False,
+        'can_approve': can_approve,
+        'can_reject': bool(batch_status == 'prepared' and has_prepare_access),
+        'can_download': bool(
+            batch_status == 'approved'
+            and integrity.get('snapshot_integrity_ok')
+            and integrity.get('validation_integrity_ok')
+        ),
+    }
+    if include_snapshot:
+        payload['snapshot'] = integrity.get('snapshot') or {}
+        payload['validation'] = integrity.get('validation') or []
+        payload['approval_declaration'] = SARS_APPROVAL_DECLARATION
+    return payload
+
+
+def _sars_get_tenant_batch(conn, company_id, batch_id, for_update=False):
+    sql = 'SELECT * FROM sars_return_batches WHERE id=? AND company_id=?'
+    if for_update and getattr(conn, '_conn', None) is not None:
+        sql += ' FOR UPDATE'
+    return conn.execute(sql, (batch_id, company_id)).fetchone()
+
+
+@app.route('/api/sars/settings', methods=['GET', 'POST'])
+def sars_compliance_settings():
+    cid = _current_company_id()
+    conn = get_db_connection()
+    try:
+        company = _sars_begin_company_write(conn, cid) if request.method == 'POST' else _sars_company_row(conn, cid)
+        if not _sars_feature_enabled(company):
+            return jsonify({'status': 'error', 'message': 'SARS Compliance Preparation is disabled for this company. Ask the Super Admin to enable it under Tenants.'}), 403
+        payroll_access = bool(
+            _sars_company_module_enabled(company, 'EMP201')
+            and _sars_fresh_has_access(conn, cid, 'EMP201', 'read')
+        )
+        accounting_access = bool(
+            _sars_company_module_enabled(company, 'VAT201')
+            and _sars_fresh_has_access(conn, cid, 'VAT201', 'read')
+        )
+        if not (payroll_access or accounting_access):
+            return jsonify({'status': 'error', 'message': 'Payroll or Accounting permission is required.'}), 403
+        if request.method == 'POST':
+            user_row = _sars_current_user_row(conn, cid)
+            user = dict(user_row) if user_row else {}
+            if not (user.get('is_superadmin') or user.get('is_company_admin')):
+                return jsonify({'status': 'error', 'message': 'Only a Company Admin or Super Admin can change SARS employer settings.'}), 403
+            data = request.get_json(silent=True) or {}
+            if not isinstance(data, dict):
+                return jsonify({'status': 'error', 'message': 'SARS settings must be supplied as a JSON object.'}), 400
+            vat_number = _sars_limited_text(data.get('company_vat_number'), 'VAT registration number', 50)
+            clean_vat = _sars_clean_reference(vat_number)
+            if vat_number and not (len(clean_vat) == 10 and clean_vat.isdigit() and clean_vat.startswith('4')):
+                return jsonify({'status': 'error', 'message': 'VAT registration number must be a 10-digit number starting with 4.'}), 400
+            allowed_categories = {'Monthly', 'Two-monthly', 'Other'}
+            allowed_bases = {'Invoice', 'Payment'}
+            if data.get('sars_vat_filing_category') not in allowed_categories:
+                data['sars_vat_filing_category'] = 'Two-monthly'
+            if data.get('sars_vat_accounting_basis') not in allowed_bases:
+                data['sars_vat_accounting_basis'] = 'Invoice'
+            for key in SARS_SETTING_KEYS:
+                upsert_company_setting(conn, cid, key, _sars_limited_text(data.get(key), key.replace('_', ' '), 250))
+            # Keep the existing UI-19 employer references in sync so the payroll
+            # module has one consistent set of employer registration details.
+            upsert_company_setting(conn, cid, 'ui19_paye_ref', str(data.get('sars_paye_reference') or '').strip())
+            upsert_company_setting(conn, cid, 'ui19_uif_ref', str(data.get('sars_uif_reference') or '').strip())
+            upsert_company_setting(conn, cid, 'ui19_authorised_person', str(data.get('sars_contact_name') or '').strip())
+            upsert_company_setting(conn, cid, 'ui19_phone', str(data.get('sars_contact_phone') or '').strip())
+            upsert_company_setting(conn, cid, 'ui19_email', str(data.get('sars_contact_email') or '').strip())
+            conn.execute('UPDATE companies SET vat_number=? WHERE id=?', (vat_number, cid))
+            _, actor_username = _sars_actor_identity(conn, cid)
+            _sars_audit_event(
+                conn,
+                'Updated Employer Settings',
+                'Updated tenant SARS preparation references and responsible-person details.',
+                'company',
+                cid,
+                cid,
+                actor_username,
+            )
+            _sars_commit_atomic(conn)
+        result = _sars_settings_payload(conn, cid)
+        result['status'] = 'success'
+        return jsonify(result)
+    except ValueError as exc:
+        _sars_rollback_atomic(conn)
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        _sars_rollback_atomic(conn)
+        if _sars_is_concurrency_error(exc):
+            return jsonify({'status': 'error', 'message': 'SARS settings changed at the same time. Refresh and try again.'}), 409
+        app.logger.exception('Failed to load or update SARS employer settings')
+        return jsonify({'status': 'error', 'message': 'Could not load or update SARS employer settings. Please try again or contact support.'}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/sars/returns', methods=['GET'])
+def sars_compliance_returns():
+    cid = _current_company_id()
+    context = str(request.args.get('context') or '').strip().lower()
+    allowed_types = ['EMP201', 'EMP501'] if context == 'payroll' else ['VAT201'] if context == 'accounting' else ['EMP201', 'EMP501', 'VAT201']
+    conn = get_db_connection()
+    try:
+        company = _sars_company_row(conn, cid)
+        if not _sars_feature_enabled(company):
+            return jsonify({'status': 'error', 'message': 'SARS Compliance Preparation is disabled for this company.'}), 403
+        readable_types = [
+            return_type for return_type in allowed_types
+            if _sars_company_module_enabled(company, return_type)
+            and _sars_fresh_has_access(conn, cid, return_type, 'read')
+        ]
+        if not readable_types:
+            return jsonify({'status': 'error', 'message': 'Payroll or Accounting permission is required.'}), 403
+        placeholders = ','.join(['?'] * len(readable_types))
+        rows = conn.execute(f'''SELECT * FROM sars_return_batches
+                                WHERE company_id=? AND return_type IN ({placeholders})
+                                ORDER BY prepared_at DESC, id DESC LIMIT 100''', [cid] + readable_types).fetchall()
+        return jsonify({
+            'status': 'success',
+            'returns': [_sars_batch_payload(row, conn=conn, company_id=cid) for row in rows],
+            'direct_submission_available': False,
+        })
+    finally:
+        conn.close()
+
+
+@app.route('/api/sars/returns/prepare', methods=['POST'])
+def sars_compliance_prepare():
+    cid = _current_company_id()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'status': 'error', 'message': 'Return preparation details must be supplied as a JSON object.'}), 400
+    try:
+        return_type = sars_compliance.normalize_return_type(data.get('return_type'))
+        period_start, period_end, period_label = _sars_parse_period(return_type, data)
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    conn = get_db_connection()
+    try:
+        company = _sars_begin_company_write(conn, cid)
+        if not _sars_feature_enabled(company):
+            return jsonify({'status': 'error', 'message': 'SARS Compliance Preparation is disabled for this company.'}), 403
+        if not _sars_company_module_enabled(company, return_type):
+            return jsonify({'status': 'error', 'message': f'{_sars_type_module(return_type).title()} is disabled for this company.'}), 403
+        if not _sars_fresh_has_access(conn, cid, return_type, 'prepare'):
+            return jsonify({'status': 'error', 'message': f'Full {_sars_type_module(return_type).title()} access is required to prepare this return.'}), 403
+        actor_user_id, actor_username = _sars_actor_identity(conn, cid)
+        snapshot, issues = _sars_build_snapshot(conn, cid, return_type, period_start, period_end, period_label)
+        # Validation findings are part of the immutable preparation snapshot.
+        # This ensures that correcting profile/settings data creates a new
+        # revision even when the financial totals themselves did not change.
+        snapshot['validation_results'] = issues
+        issue_counts = sars_compliance.summarize_issues(issues)
+        source_hash = sars_compliance.snapshot_hash(snapshot)
+        existing = conn.execute('''SELECT * FROM sars_return_batches
+                                   WHERE company_id=? AND return_type=? AND period_start=? AND period_end=?
+                                     AND source_hash=? AND status<>'rejected'
+                                   ORDER BY version_no DESC LIMIT 1''',
+                                (cid, return_type, period_start, period_end, source_hash)).fetchone()
+        existing_integrity = _sars_snapshot_validation_state(existing) if existing else {}
+        if existing and existing_integrity.get('snapshot_integrity_ok') and existing_integrity.get('validation_integrity_ok'):
+            _sars_commit_atomic(conn)
+            payload = _sars_batch_payload(existing, include_snapshot=True, conn=conn, company_id=cid)
+            payload.update({'status': 'success', 'message': 'The current source data already has an identical stored revision.'})
+            return jsonify(payload)
+        version_row = conn.execute('''SELECT MAX(version_no) AS max_version FROM sars_return_batches
+                                      WHERE company_id=? AND return_type=? AND period_start=? AND period_end=?''',
+                                   (cid, return_type, period_start, period_end)).fetchone()
+        version_no = int(version_row['max_version'] or 0) + 1
+        now = _sars_now()
+        cur = conn.execute('''INSERT INTO sars_return_batches
+                              (company_id, return_type, period_start, period_end, period_label, version_no,
+                               status, source_hash, snapshot_json, validation_json,
+                               validation_error_count, validation_warning_count, prepared_by, prepared_by_user_id, prepared_at,
+                               submission_status)
+                              VALUES (?, ?, ?, ?, ?, ?, 'prepared', ?, ?, ?, ?, ?, ?, ?, ?, 'not_submitted')''',
+                           (cid, return_type, period_start, period_end, period_label, version_no,
+                            source_hash, sars_compliance.canonical_json(snapshot), sars_compliance.canonical_json(issues),
+                            issue_counts.get('errors', 0), issue_counts.get('warnings', 0), actor_username or 'unknown', actor_user_id, now))
+        batch_id = cur.lastrowid
+        _sars_audit_event(
+            conn,
+            'Prepared Return Review',
+            f'{return_type} {period_label} version {version_no}; validation errors: {issue_counts.get("errors", 0)}; warnings: {issue_counts.get("warnings", 0)}.',
+            'sars_return_batch',
+            batch_id,
+            cid,
+            actor_username,
+        )
+        _sars_commit_atomic(conn)
+        row = _sars_get_tenant_batch(conn, cid, batch_id)
+        payload = _sars_batch_payload(row, include_snapshot=True, conn=conn, company_id=cid)
+        payload.update({'status': 'success', 'message': 'Return review snapshot prepared. Resolve all validation errors before approval.' if issue_counts.get('errors') else 'Return review snapshot prepared and ready for independent approval.'})
+        return jsonify(payload)
+    except Exception as exc:
+        _sars_rollback_atomic(conn)
+        if _sars_is_concurrency_error(exc):
+            return jsonify({'status': 'error', 'message': 'The source or review history changed during preparation. Please prepare the return again.'}), 409
+        app.logger.exception('Failed to prepare SARS review snapshot')
+        return jsonify({'status': 'error', 'message': 'Could not prepare the return review. Please try again or contact support.'}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/sars/returns/<int:batch_id>', methods=['GET'])
+def sars_compliance_return_detail(batch_id):
+    cid = _current_company_id()
+    conn = get_db_connection()
+    try:
+        company = _sars_company_row(conn, cid)
+        if not _sars_feature_enabled(company):
+            return jsonify({'status': 'error', 'message': 'SARS Compliance Preparation is disabled for this company.'}), 403
+        row = _sars_get_tenant_batch(conn, cid, batch_id)
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Return review not found.'}), 404
+        if not _sars_company_module_enabled(company, row['return_type']):
+            return jsonify({'status': 'error', 'message': f'{_sars_type_module(row["return_type"]).title()} is disabled for this company.'}), 403
+        if not _sars_fresh_has_access(conn, cid, row['return_type'], 'read'):
+            return jsonify({'status': 'error', 'message': 'Permission denied.'}), 403
+        payload = _sars_batch_payload(row, include_snapshot=True, conn=conn, company_id=cid)
+        payload['status_code'] = payload.get('status')
+        payload['status'] = 'success'
+        return jsonify(payload)
+    finally:
+        conn.close()
+
+
+@app.route('/api/sars/returns/<int:batch_id>/approve', methods=['POST'])
+def sars_compliance_approve(batch_id):
+    cid = _current_company_id()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'status': 'error', 'message': 'Approval details must be supplied as a JSON object.'}), 400
+    conn = get_db_connection()
+    try:
+        if data.get('declaration_accepted') is not True:
+            return jsonify({'status': 'error', 'message': 'Accept the approval declaration before approving this review pack.'}), 400
+        note = _sars_limited_text(data.get('approval_note'), 'Approval note')
+        company = _sars_begin_company_write(conn, cid)
+        if not _sars_feature_enabled(company):
+            return jsonify({'status': 'error', 'message': 'SARS Compliance Preparation is disabled for this company.'}), 403
+        row = _sars_get_tenant_batch(conn, cid, batch_id, for_update=True)
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Return review not found.'}), 404
+        if not _sars_company_module_enabled(company, row['return_type']):
+            return jsonify({'status': 'error', 'message': f'{_sars_type_module(row["return_type"]).title()} is disabled for this company.'}), 403
+        if not _sars_fresh_has_access(conn, cid, row['return_type'], 'approve'):
+            return jsonify({'status': 'error', 'message': 'Only a Company Admin or Super Admin with access to this application can approve the review.'}), 403
+        current = dict(row)
+        if current.get('status') != 'prepared':
+            return jsonify({'status': 'error', 'message': 'Only a prepared return review can be approved.'}), 409
+        integrity = _sars_snapshot_validation_state(current)
+        if not integrity.get('snapshot_integrity_ok') or not integrity.get('validation_integrity_ok'):
+            return jsonify({'status': 'error', 'message': 'The stored snapshot or validation metadata failed its integrity check and cannot be approved. Reject it and prepare a new revision.'}), 409
+        if int((integrity.get('counts') or {}).get('errors') or 0):
+            return jsonify({'status': 'error', 'message': 'Resolve all validation errors and prepare a new revision before approval.'}), 409
+
+        actor_user_id, actor_username = _sars_actor_identity(conn, cid)
+        same_actor = False
+        if actor_user_id is not None and current.get('prepared_by_user_id') is not None:
+            same_actor = int(actor_user_id) == int(current.get('prepared_by_user_id'))
+        else:
+            same_actor = str(current.get('prepared_by') or '').strip().lower() == actor_username.strip().lower()
+        if same_actor:
+            return jsonify({'status': 'error', 'message': 'Four-eyes control: the person who prepared this revision cannot approve it. Ask another Company Admin or Super Admin to review it.'}), 409
+
+        # Rebuild under the tenant write lock. Approval is refused when payroll,
+        # accounting, employer settings, validation findings, or prior VAT-period
+        # approvals changed after this immutable revision was prepared.
+        current_snapshot, current_issues = _sars_build_snapshot(
+            conn,
+            cid,
+            current.get('return_type'),
+            current.get('period_start'),
+            current.get('period_end'),
+            current.get('period_label'),
+        )
+        current_snapshot['validation_results'] = current_issues
+        rebuilt_hash = sars_compliance.snapshot_hash(current_snapshot)
+        if not secrets.compare_digest(str(current.get('source_hash') or '').lower(), rebuilt_hash.lower()):
+            return jsonify({'status': 'error', 'message': 'The source records changed after this revision was prepared. Prepare and review a new revision before approval.'}), 409
+
+        now = _sars_now()
+        updated = conn.execute('''UPDATE sars_return_batches
+                                  SET status='approved', approved_by=?, approved_by_user_id=?, approved_at=?, approval_note=?
+                                  WHERE id=? AND company_id=? AND status='prepared' ''',
+                               (actor_username or 'unknown', actor_user_id, now, note, batch_id, cid))
+        if getattr(updated, 'rowcount', 1) == 0:
+            _sars_rollback_atomic(conn)
+            return jsonify({'status': 'error', 'message': 'This return review was changed by another user. Refresh and try again.'}), 409
+        _sars_audit_event(
+            conn,
+            'Approved Return Review',
+            f"{current.get('return_type')} {current.get('period_label')} version {current.get('version_no')}; review pack approved, not submitted to SARS.",
+            'sars_return_batch',
+            batch_id,
+            cid,
+            actor_username,
+        )
+        _sars_commit_atomic(conn)
+        approved = _sars_get_tenant_batch(conn, cid, batch_id)
+        payload = _sars_batch_payload(approved, include_snapshot=True, conn=conn, company_id=cid)
+        payload.update({'status': 'success', 'message': 'Review pack approved. It has not been submitted to SARS and no payment has been made.'})
+        return jsonify(payload)
+    except ValueError as exc:
+        _sars_rollback_atomic(conn)
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        _sars_rollback_atomic(conn)
+        if _sars_is_concurrency_error(exc):
+            return jsonify({'status': 'error', 'message': 'The source or review changed during approval. Refresh and prepare a new revision if needed.'}), 409
+        app.logger.exception('Failed to approve SARS review snapshot')
+        return jsonify({'status': 'error', 'message': 'Could not approve the return review. Please try again or contact support.'}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/sars/returns/<int:batch_id>/reject', methods=['POST'])
+def sars_compliance_reject(batch_id):
+    cid = _current_company_id()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'status': 'error', 'message': 'Rejection details must be supplied as a JSON object.'}), 400
+    conn = get_db_connection()
+    try:
+        reason = _sars_limited_text(data.get('reason'), 'Rejection reason')
+        if not reason:
+            return jsonify({'status': 'error', 'message': 'Enter a rejection reason.'}), 400
+        company = _sars_begin_company_write(conn, cid)
+        if not _sars_feature_enabled(company):
+            return jsonify({'status': 'error', 'message': 'SARS Compliance Preparation is disabled for this company.'}), 403
+        row = _sars_get_tenant_batch(conn, cid, batch_id, for_update=True)
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Return review not found.'}), 404
+        if not _sars_company_module_enabled(company, row['return_type']):
+            return jsonify({'status': 'error', 'message': f'{_sars_type_module(row["return_type"]).title()} is disabled for this company.'}), 403
+        if not _sars_fresh_has_access(conn, cid, row['return_type'], 'prepare'):
+            return jsonify({'status': 'error', 'message': 'Full application access is required to reject this review.'}), 403
+        current = dict(row)
+        if current.get('status') != 'prepared':
+            return jsonify({'status': 'error', 'message': 'Only a prepared return review can be rejected.'}), 409
+        actor_user_id, actor_username = _sars_actor_identity(conn, cid)
+        now = _sars_now()
+        updated = conn.execute('''UPDATE sars_return_batches
+                                  SET status='rejected', rejected_by=?, rejected_by_user_id=?, rejected_at=?, rejection_reason=?
+                                  WHERE id=? AND company_id=? AND status='prepared' ''',
+                               (actor_username or 'unknown', actor_user_id, now, reason, batch_id, cid))
+        if getattr(updated, 'rowcount', 1) == 0:
+            _sars_rollback_atomic(conn)
+            return jsonify({'status': 'error', 'message': 'This return review was changed by another user. Refresh and try again.'}), 409
+        _sars_audit_event(
+            conn,
+            'Rejected Return Review',
+            f"{current.get('return_type')} {current.get('period_label')} version {current.get('version_no')}: {reason}",
+            'sars_return_batch',
+            batch_id,
+            cid,
+            actor_username,
+        )
+        _sars_commit_atomic(conn)
+        rejected = _sars_get_tenant_batch(conn, cid, batch_id)
+        payload = _sars_batch_payload(rejected, include_snapshot=True, conn=conn, company_id=cid)
+        payload.update({'status': 'success', 'message': 'Review rejected. Correct the source records and prepare a new revision.'})
+        return jsonify(payload)
+    except ValueError as exc:
+        _sars_rollback_atomic(conn)
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        _sars_rollback_atomic(conn)
+        if _sars_is_concurrency_error(exc):
+            return jsonify({'status': 'error', 'message': 'This return review changed while it was being updated. Refresh and try again.'}), 409
+        app.logger.exception('Failed to reject SARS review snapshot')
+        return jsonify({'status': 'error', 'message': 'Could not reject the return review. Please try again or contact support.'}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/download/sars/returns/<int:batch_id>.zip', methods=['GET'])
+def download_sars_compliance_review_pack(batch_id):
+    cid = _current_company_id()
+    conn = get_db_connection()
+    try:
+        company = _sars_begin_company_write(conn, cid)
+        if not _sars_feature_enabled(company):
+            return 'SARS Compliance Preparation is disabled for this company.', 403
+        row = _sars_get_tenant_batch(conn, cid, batch_id, for_update=True)
+        if not row:
+            return 'Return review not found.', 404
+        if not _sars_company_module_enabled(company, row['return_type']):
+            return f'{_sars_type_module(row["return_type"]).title()} is disabled for this company.', 403
+        if not _sars_fresh_has_access(conn, cid, row['return_type'], 'read'):
+            return 'Forbidden', 403
+        current = dict(row)
+        if current.get('status') != 'approved':
+            return 'The return review must be independently approved before its review pack can be downloaded.', 409
+        integrity = _sars_snapshot_validation_state(current)
+        if not integrity.get('snapshot_integrity_ok') or not integrity.get('validation_integrity_ok'):
+            return 'The stored snapshot or validation metadata failed its integrity check and the review pack cannot be downloaded.', 409
+        stored_company_name = str(((integrity.get('snapshot') or {}).get('employer') or {}).get('company_name') or '')
+        pack_bytes = sars_compliance.build_review_pack(current, company_name=stored_company_name)
+        now = _sars_now()
+        actor_user_id, actor_username = _sars_actor_identity(conn, cid)
+        conn.execute('''UPDATE sars_return_batches
+                        SET exported_by=?, exported_by_user_id=?, exported_at=?, export_count=COALESCE(export_count, 0)+1
+                        WHERE id=? AND company_id=?''', (actor_username or 'unknown', actor_user_id, now, batch_id, cid))
+        _sars_audit_event(
+            conn,
+            'Downloaded Approved Review Pack',
+            f"{current.get('return_type')} {current.get('period_label')} version {current.get('version_no')}; not submitted to SARS.",
+            'sars_return_batch',
+            batch_id,
+            cid,
+            actor_username,
+        )
+        _sars_commit_atomic(conn)
+        safe_period = re.sub(r'[^0-9A-Za-z_-]+', '_', current.get('period_label') or str(batch_id)).strip('_')
+        filename = f"EasyAdmin_{current.get('return_type')}_{safe_period}_v{current.get('version_no')}_REVIEW_ONLY.zip"
+        response = Response(pack_bytes, mimetype='application/zip')
+        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response.headers['Cache-Control'] = 'private, no-store, no-cache, must-revalidate, max-age=0'
+        return response
+    except Exception as exc:
+        _sars_rollback_atomic(conn)
+        if _sars_is_concurrency_error(exc):
+            return 'This review pack changed while it was being prepared for download. Refresh and try again.', 409
+        app.logger.exception('Failed to download SARS review pack')
+        return 'Could not build the return review pack. Please try again or contact support.', 500
     finally:
         conn.close()
 

@@ -162,6 +162,9 @@
                         <small class="text-danger fw-bold">⚠️ Note: You must "Save to Ledger" for a payslip to appear on official SARS reports.</small>
                     </div>
                     <div>
+                        {% if session.get('comp_sars_compliance_enabled') and session.get('comp_can_payroll') and (session.get('is_superadmin') or session.get('can_payroll') or session.get('can_payroll_readonly')) %}
+                        <button class="btn btn-sm btn-success me-2 fw-bold" type="button" onclick="openSarsCompliance('payroll', 'EMP201')" title="Prepare and independently review SARS payroll working values">🧾 SARS Compliance</button>
+                        {% endif %}
                         <button class="btn btn-sm btn-dark me-2" onclick="openEmp201Modal()">📉 EMP201 Report</button>
                         <button class="btn btn-sm btn-outline-dark me-2 fw-bold" onclick="openUi19Modal()">📝 UI-19 Form</button>
                         <button class="btn btn-sm btn-warning text-dark me-2 fw-bold" onclick="openEmp501Modal()">📊 EMP501 Export</button>
@@ -738,7 +741,7 @@
                                     <tr id="bpReimbursableExpensesRow" style="display:none;"><td>Reimbursable Expenses (Non-taxable)</td><td class="amount text-success" id="bpReimbursableExpenses"></td><td></td></tr>
                                     <tr id="bpBonusRow" style="display:none;"><td>Bonus <span id="bpBonusTaxTreatment" class="small text-muted fst-italic"></span> <span class="sars-code" id="bpBonusCode"></span></td><td class="amount" id="bpBonus"></td><td></td></tr>
                                     <tr id="bpLeavePayoutRow" style="display:none;"><td>Annual Leave Payout <span id="bpLeavePayoutDetail" class="small text-muted"></span> <span class="sars-code">Code: 3605</span></td><td class="amount" id="bpLeavePayout"></td><td></td></tr>
-                                    <tr id="bpTransportRow" style="display:none;"><td>Transport Reimbursement (Tax Free) <span class="sars-code">Code: 3702</span></td><td class="amount text-success" id="bpTransport"></td><td></td></tr>
+                                    <tr id="bpTransportRow" style="display:none;"><td>Transport Reimbursement</td><td class="amount text-success" id="bpTransport"></td><td></td></tr>
                                     <tr><td>PAYE Tax <span class="sars-code">Code: 4102</span></td><td></td><td class="amount" id="bpPaye"></td></tr>
                                     <tr><td>UIF (Employee 1%) <span class="sars-code">Code: 4141</span></td><td></td><td class="amount" id="bpUif"></td></tr>
                                     <tr id="bpLoanRepaymentRow" style="display:none;"><td>Loan Repayment</td><td></td><td class="amount" id="bpLoanRepayment"></td></tr>
@@ -921,7 +924,7 @@
                             <tr><td class="text-muted">PAYE Withheld:</td><td class="text-end text-danger" id="e201Paye"></td></tr>
                             <tr><td class="text-muted">UIF Total (Emp + Er):</td><td class="text-end text-danger" id="e201Uif"></td></tr>
                             <tr><td class="text-muted">SDL (Employer):</td><td class="text-end text-danger" id="e201Sdl"></td></tr>
-                            <tr class="border-top border-dark fs-5 text-dark"><td class="pt-2">TOTAL PAYABLE TO SARS:</td><td class="text-end pt-2" id="e201Total"></td></tr>
+                            <tr class="border-top border-dark fs-5 text-dark"><td class="pt-2">LIABILITY BEFORE ETI, PENALTIES &amp; INTEREST:</td><td class="text-end pt-2" id="e201Total"></td></tr>
                         </table>
                         <div id="e201Warning" class="alert alert-warning small py-2 mb-0" style="display:none;"></div>
                     </div>
@@ -1014,7 +1017,7 @@
                     <tr><td><strong>3601</strong></td><td>Salary / Wages + Current-period Bonus</td><td class="amount" id="bi3601"></td></tr>
                     <tr><td><strong>3605</strong></td><td>Annual Payment</td><td class="amount" id="bi3605"></td></tr>
                     <tr><td><strong>3607</strong></td><td>Overtime</td><td class="amount" id="bi3607"></td></tr>
-                    <tr><td><strong>3702</strong></td><td>Reimbursive Travel Allowance</td><td class="amount" id="bi3702"></td></tr>
+                    <tr><td><strong>—</strong></td><td>Transport reimbursement (unclassified)</td><td class="amount" id="bi3702"></td></tr>
                     <tr class="table-secondary"><td><strong>3699</strong></td><td><strong>Gross Employment Income</strong></td><td class="amount fw-bold" id="bi3699"></td></tr>
                     <tr><td colspan="3"></td></tr>
                     <tr><td><strong>4102</strong></td><td>PAYE</td><td class="amount" id="bi4102"></td></tr>
@@ -1500,7 +1503,7 @@
                 document.getElementById('bi3601').innerText = p.code_3601;
                 document.getElementById('bi3605').innerText = p.code_3605;
                 document.getElementById('bi3607').innerText = p.code_3607;
-                document.getElementById('bi3702').innerText = p.code_3702;
+                document.getElementById('bi3702').innerText = p.transport_unclassified;
                 document.getElementById('bi3699').innerText = p.code_3699;
                 document.getElementById('bi4102').innerText = p.code_4102;
                 document.getElementById('bi4141').innerText = p.code_4141;
@@ -2347,7 +2350,7 @@
                 document.getElementById('bi3601').innerText = p.code_3601;
                 document.getElementById('bi3605').innerText = p.code_3605;
                 document.getElementById('bi3607').innerText = p.code_3607;
-                document.getElementById('bi3702').innerText = p.code_3702;
+                document.getElementById('bi3702').innerText = p.transport_unclassified;
                 document.getElementById('bi3699').innerText = p.code_3699;
                 document.getElementById('bi4102').innerText = p.code_4102;
                 document.getElementById('bi4141').innerText = p.code_4141;
@@ -2509,5 +2512,9 @@
             } 
         }
     </script>
+    {% if session.get('comp_sars_compliance_enabled') and session.get('comp_can_payroll') and (session.get('is_superadmin') or session.get('can_payroll') or session.get('can_payroll_readonly')) %}
+    {% include '_sars_compliance_modal.html' %}
+    <script src="{{ url_for('static', filename='sars-compliance.js') }}?v=20260915-sars-phase1-2"></script>
+    {% endif %}
 </body>
 </html>

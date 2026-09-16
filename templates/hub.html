@@ -805,10 +805,10 @@
                             <div class="form-check form-switch"><input class="form-check-input border-warning" type="checkbox" id="compAppFinance"><label class="form-check-label small fw-bold">Finance</label></div>
                         </div>
                         <div class="col-md-2 col-6">
-                            <div class="form-check form-switch"><input class="form-check-input border-dark" type="checkbox" id="compAppAccounting" onchange="syncCompanyAIAvailability()"><label class="form-check-label small fw-bold">Accounting</label></div>
+                            <div class="form-check form-switch"><input class="form-check-input border-dark" type="checkbox" id="compAppAccounting" onchange="syncCompanyAIAvailability(); syncCompanySarsAvailability();"><label class="form-check-label small fw-bold">Accounting</label></div>
                         </div>
                         <div class="col-md-2 col-6">
-                            <div class="form-check form-switch"><input class="form-check-input border-success" type="checkbox" id="compAppPayroll"><label class="form-check-label small fw-bold">HR & Payroll</label></div>
+                            <div class="form-check form-switch"><input class="form-check-input border-success" type="checkbox" id="compAppPayroll" onchange="syncCompanySarsAvailability();"><label class="form-check-label small fw-bold">HR & Payroll</label></div>
                         </div>
                         <div class="col-md-2 col-6">
                             <div class="form-check form-switch"><input class="form-check-input border-primary" type="checkbox" id="compAppFranchiseReports"><label class="form-check-label small fw-bold">Franchise Reports</label></div>
@@ -821,6 +821,13 @@
                             <input class="form-check-input border-info" type="checkbox" id="compCashbookAi">
                             <label class="form-check-label fw-bold text-info" for="compCashbookAi">Enable AI Cash Book Allocation</label>
                             <p id="compCashbookAiHelp" class="small text-muted mb-0">Allows this tenant to request reviewable AI account-allocation suggestions. Accounting access is required.</p>
+                        </div>
+                    </div>
+                    <div class="border rounded p-3 bg-light mb-3">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input border-success" type="checkbox" id="compSarsCompliance">
+                            <label class="form-check-label fw-bold text-success" for="compSarsCompliance">Enable SARS Compliance Preparation</label>
+                            <p id="compSarsComplianceHelp" class="small text-muted mb-0">Allows this tenant to prepare, validate, approve and download SARS review packs. Direct submission remains unavailable until SARS authorises the Easy Admin interface.</p>
                         </div>
                     </div>
                     <div class="form-check form-switch mb-3">
@@ -1679,6 +1686,7 @@
             if(c.can_finance) apps.push('finance');
             if(c.can_accounting) apps.push('accounting');
             if(c.cashbook_ai_enabled) apps.push('ai cash book');
+            if(c.sars_compliance_enabled) apps.push('sars compliance');
             if(c.can_payroll) apps.push('hr payroll');
             if(c.can_franchise_reports) apps.push('franchise reports');
             return [c.id, c.name, c.industry_template, apps.join(' '), c.website_integration_enabled ? 'website integration enabled' : 'website integration disabled'].filter(Boolean).join(' ').toLowerCase();
@@ -1698,6 +1706,7 @@
                 if(c.can_finance) apps.push('Finance');
                 if(c.can_accounting) apps.push('Accounting');
                 if(c.cashbook_ai_enabled) apps.push('AI Cash Book');
+                if(c.sars_compliance_enabled) apps.push('SARS Compliance');
                 if(c.can_payroll) apps.push('Payroll');
                 if(c.can_franchise_reports) apps.push('Franchise Reports');
                 tbody.innerHTML += `
@@ -1785,6 +1794,17 @@
                 : 'Enable the Accounting application before enabling AI Cash Book Allocation.';
         }
 
+        function syncCompanySarsAvailability() {
+            const moduleEnabled = document.getElementById('compAppAccounting').checked || document.getElementById('compAppPayroll').checked;
+            const toggle = document.getElementById('compSarsCompliance');
+            const help = document.getElementById('compSarsComplianceHelp');
+            toggle.disabled = !moduleEnabled;
+            if(!moduleEnabled) toggle.checked = false;
+            if(help) help.textContent = moduleEnabled
+                ? 'Allows this tenant to prepare, validate, approve and download SARS review packs. Direct submission remains unavailable until SARS authorises the Easy Admin interface.'
+                : 'Enable HR & Payroll or Accounting before enabling SARS Compliance Preparation.';
+        }
+
         function openCompanyForm(company) {
             companiesModal.hide();
             document.getElementById('companyFormTitle').innerText = company ? "Edit Company" : "New Company";
@@ -1823,6 +1843,8 @@
             document.getElementById('compAppFranchiseReports').checked = company ? !!company.can_franchise_reports : false;
             document.getElementById('compCashbookAi').checked = company ? !!company.cashbook_ai_enabled : false;
             syncCompanyAIAvailability();
+            document.getElementById('compSarsCompliance').checked = company ? !!company.sars_compliance_enabled : false;
+            syncCompanySarsAvailability();
             
             document.getElementById('compGoogleSync').checked = company ? company.google_calendar_sync : false;
             currentCompanyWebsiteIntegration = company && company.website_integration_key_id ? {
@@ -1877,6 +1899,7 @@
             fd.append('can_payroll', document.getElementById('compAppPayroll').checked);
             fd.append('can_franchise_reports', document.getElementById('compAppFranchiseReports').checked);
             fd.append('cashbook_ai_enabled', document.getElementById('compCashbookAi').checked);
+            fd.append('sars_compliance_enabled', document.getElementById('compSarsCompliance').checked);
             
             fd.append('google_calendar_sync', document.getElementById('compGoogleSync').checked);
             fd.append('website_integration_enabled', document.getElementById('compWebsiteIntegration').checked);
