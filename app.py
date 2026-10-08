@@ -17,6 +17,7 @@ import time
 import uuid
 import base64
 import html
+import hashlib
 from urllib.parse import quote, unquote
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
@@ -2499,6 +2500,37 @@ def init_db():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         completed_at TEXT
     )""")
+    # AI invoice-payment matches are kept separate from the invoice payment
+    # ledger until an authorised Invoicing user explicitly accepts them.  The
+    # source snapshot and fingerprint make the later review deterministic and
+    # prevent a changed bank line from being accepted accidentally.
+    conn.execute("""CREATE TABLE IF NOT EXISTS invoice_payment_suggestions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        batch_id INTEGER NOT NULL,
+        cashbook_line_id INTEGER NOT NULL,
+        invoice_id INTEGER NOT NULL,
+        ai_run_id INTEGER,
+        invoice_number TEXT,
+        deposit_date TEXT NOT NULL,
+        deposit_description TEXT,
+        deposit_amount REAL NOT NULL DEFAULT 0,
+        outstanding_amount REAL NOT NULL DEFAULT 0,
+        line_fingerprint TEXT NOT NULL,
+        confidence REAL DEFAULT 0,
+        reason TEXT,
+        match_method TEXT,
+        model TEXT,
+        response_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        reviewed_by TEXT,
+        reviewed_at TEXT,
+        payment_id INTEGER,
+        rejection_reason TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(company_id, cashbook_line_id, invoice_id)
+    )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS accounting_transaction_files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         company_id INTEGER NOT NULL,
@@ -2569,6 +2601,18 @@ def init_db():
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_accounting_cashbook_lines_batch ON accounting_cashbook_lines(company_id, batch_id, status)')
     except sqlite3.OperationalError: pass
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_accounting_ai_runs_company_batch ON accounting_ai_allocation_runs(company_id, batch_id, created_at)')
+    except Exception: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_payment_suggestions_company_status ON invoice_payment_suggestions(company_id, status, created_at)')
+    except Exception: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_payment_suggestions_batch_status ON invoice_payment_suggestions(company_id, batch_id, status)')
+    except Exception: pass
+    try: conn.execute('CREATE INDEX IF NOT EXISTS idx_invoice_payment_suggestions_line ON invoice_payment_suggestions(company_id, cashbook_line_id)')
+    except Exception: pass
+    try: conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_payment_suggestions_payment_unique ON invoice_payment_suggestions(payment_id) WHERE payment_id IS NOT NULL')
+    except Exception: pass
+    try: conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_payment_suggestions_accepted_line_unique ON invoice_payment_suggestions(company_id, cashbook_line_id) WHERE status='accepted'")
+    except Exception: pass
+    try: conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_payment_suggestions_accepted_invoice_unique ON invoice_payment_suggestions(company_id, invoice_id) WHERE status='accepted'")
     except Exception: pass
     try: conn.execute('CREATE INDEX IF NOT EXISTS idx_accounting_transaction_files_link ON accounting_transaction_files(company_id, linked_type, linked_id)')
     except sqlite3.OperationalError: pass
@@ -5388,11 +5432,11 @@ def restrict_access():
         if not _session_has_hr_module_read_access():
             return _access_denied("Access Denied: You do not have permissions to access HR documents.")
 
-    invoicing_read_prefixes = ['/api/uninvoiced', '/api/client_statement', '/api/receipt', '/download/invoice', '/download/quote', '/download/receipt', '/download/credit_note', '/download/client_statement.pdf']
+    invoicing_read_prefixes = ['/api/uninvoiced', '/api/client_statement', '/api/receipt', '/api/invoice-payment-suggestions', '/download/invoice', '/download/quote', '/download/receipt', '/download/credit_note', '/download/client_statement.pdf']
     if path == '/invoicing' or any(path.startswith(prefix) for prefix in invoicing_read_prefixes) or ((path.startswith('/api/invoice') or path.startswith('/api/quote') or path.startswith('/api/credit_note')) and request.method == 'GET'):
         if not _session_has_app_read('invoicing'):
             return _access_denied("Access Denied: You do not have permissions to access Invoicing & Quotes.")
-    invoicing_write_prefixes = ['/api/save_invoice', '/api/save_quote', '/api/email_invoice_pdf', '/api/email_quote_pdf', '/api/email_receipt_pdf', '/api/email_credit_note_pdf', '/api/email_client_statement_pdf']
+    invoicing_write_prefixes = ['/api/save_invoice', '/api/save_quote', '/api/invoice-payment-suggestions/', '/api/email_invoice_pdf', '/api/email_quote_pdf', '/api/email_receipt_pdf', '/api/email_credit_note_pdf', '/api/email_client_statement_pdf']
     if any(path.startswith(prefix) for prefix in invoicing_write_prefixes) or path == '/api/save_invoice_settings' or path == '/api/email_document' or ((path.startswith('/api/invoice') or path.startswith('/api/quote') or path.startswith('/api/credit_note')) and request.method != 'GET'):
         if not _session_has_app_full('invoicing'):
             return _access_denied("Access Denied: Full Invoicing & Quotes access is required for this action.")
@@ -10327,10 +10371,11 @@ def _system_ai_settings(conn):
 
 def _cashbook_ai_company_status(conn, company_id):
     settings = _system_ai_settings(conn)
-    company = conn.execute('SELECT cashbook_ai_enabled, can_accounting FROM companies WHERE id=?', (company_id,)).fetchone()
+    company = conn.execute('SELECT cashbook_ai_enabled, can_accounting, can_invoicing FROM companies WHERE id=?', (company_id,)).fetchone()
     company_data = dict(company) if company else {}
     tenant_enabled = bool(company_data.get('cashbook_ai_enabled')) and bool(company_data.get('can_accounting'))
     settings['tenant_enabled'] = tenant_enabled
+    settings['invoice_payment_matching_enabled'] = bool(tenant_enabled and company_data.get('can_invoicing'))
     settings['available'] = bool(tenant_enabled and settings['enabled'] and settings['configured'])
     if not tenant_enabled:
         settings['availability_message'] = 'AI cash-book allocation is not enabled for this company.'
@@ -17003,7 +17048,13 @@ def invoicing_index():
         d = dict(q)
         d['formatted_num'] = _billing_document_formatted_number(conn, cid, 'quote', d)
         formatted_quotes.append(d)
-    
+
+    # The dashboard can render its AI-payment notification state without first
+    # calling a feature-gated endpoint. Read-only Invoicing users may view the
+    # suggestions; only full Invoicing users may accept or reject them.
+    invoice_payment_ai_status = _cashbook_ai_company_status(conn, cid)
+    can_review_invoice_payment_suggestions = _session_has_app_full('invoicing')
+
     conn.close()
     return render_template(
         'invoicing_index.html',
@@ -17026,6 +17077,8 @@ def invoicing_index():
         quote_start=quote_start,
         website_integration_enabled=bool(website_integration and website_integration.get('enabled')),
         website_integration=_website_integration_public_summary(website_integration),
+        cashbook_ai=invoice_payment_ai_status,
+        can_review_invoice_payment_suggestions=can_review_invoice_payment_suggestions,
         session=session,
     )
 
@@ -20630,13 +20683,60 @@ def accounting_cashbook_save(batch_id):
             except Exception:
                 conn.close()
                 return jsonify({'status': 'error', 'message': f'Cash book line {idx} has an invalid line ID.'}), 400
-            line_row = conn.execute("""SELECT id, ai_suggested_account_id, ai_suggested_at
+            line_row = conn.execute("""SELECT id, transaction_date, description, debit, credit, vat_amount,
+                                              allocated_account_id, ai_suggested_account_id, ai_suggested_at
                                        FROM accounting_cashbook_lines
                                        WHERE id=? AND batch_id=? AND company_id=? AND status!='posted'""",
                                     (line_id, batch_id, cid)).fetchone()
             if not line_row:
                 conn.close()
                 return jsonify({'status': 'error', 'message': f'Cash book line {idx} was not found or has already been posted.'}), 400
+            accepted_payment = conn.execute('''SELECT id, line_fingerprint FROM invoice_payment_suggestions
+                                               WHERE company_id=? AND cashbook_line_id=? AND status='accepted'
+                                               ORDER BY id DESC LIMIT 1''', (cid, line_id)).fetchone()
+            if accepted_payment:
+                ar_setting = conn.execute('SELECT receivables_account_id FROM accounting_settings WHERE company_id=?', (cid,)).fetchone()
+                ar_account_id = int(ar_setting['receivables_account_id'] or 0) if ar_setting else 0
+                existing_line = dict(line_row)
+                proposed_account_id = int(account_id) if account_id else 0
+                source_changed = (
+                    str(existing_line.get('transaction_date') or '') != transaction_date
+                    or str(existing_line.get('description') or '').strip() != description
+                    or _money_float(existing_line.get('debit')) != debit
+                    or _money_float(existing_line.get('credit')) != credit
+                    or _money_float(existing_line.get('vat_amount')) != vat_amount
+                    or vat_amount != 0
+                    or _invoice_payment_line_fingerprint(existing_line) != str(accepted_payment['line_fingerprint'] or '')
+                )
+                if source_changed or not ar_account_id or proposed_account_id != ar_account_id:
+                    conn.close()
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'Cash book line {idx} is linked to an accepted invoice payment and its date, description, amount and Accounts Receivable allocation cannot be changed.'
+                    }), 409
+            pending_payment = conn.execute('''SELECT id, line_fingerprint FROM invoice_payment_suggestions
+                                              WHERE company_id=? AND cashbook_line_id=? AND status='pending'
+                                              ORDER BY id DESC LIMIT 1''', (cid, line_id)).fetchone()
+            if pending_payment:
+                ar_setting = conn.execute('SELECT receivables_account_id FROM accounting_settings WHERE company_id=?', (cid,)).fetchone()
+                ar_account_id = int(ar_setting['receivables_account_id'] or 0) if ar_setting else 0
+                proposed_fingerprint = _invoice_payment_line_fingerprint({
+                    'transaction_date': transaction_date,
+                    'description': description,
+                    'debit': debit,
+                    'credit': credit,
+                    'vat_amount': vat_amount,
+                })
+                proposed_account_id = int(account_id) if account_id else 0
+                if (proposed_fingerprint != str(pending_payment['line_fingerprint'] or '')
+                        or not ar_account_id or proposed_account_id != ar_account_id):
+                    stale_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    conn.execute('''UPDATE invoice_payment_suggestions
+                                    SET status='stale', reviewed_by=?, reviewed_at=?,
+                                        rejection_reason='The linked cash-book line was changed during allocation review.',
+                                        updated_at=?
+                                    WHERE id=? AND company_id=? AND status='pending' ''',
+                                 (session.get('username'), stale_now, stale_now, int(pending_payment['id']), cid))
             conn.execute('''UPDATE accounting_cashbook_lines
                             SET line_no=?, transaction_date=?, description=?, debit=?, credit=?, allocated_account_id=?, vat_amount=?, notes=?, cash_flow_section=?, status=CASE WHEN ? IS NULL THEN 'draft' ELSE 'allocated' END
                             WHERE id=? AND batch_id=? AND company_id=? AND status!='posted' ''',
@@ -20677,6 +20777,165 @@ def accounting_cashbook_save(batch_id):
     conn.close()
     payload['status'] = 'success'
     return jsonify(payload)
+
+
+def _invoice_payment_line_fingerprint(line):
+    """Return a stable fingerprint for the bank-line facts reviewed by AI."""
+    data = dict(line) if line is not None and not isinstance(line, dict) else (line or {})
+    canonical = json.dumps({
+        'transaction_date': str(data.get('transaction_date') or '').strip(),
+        'description': str(data.get('description') or '').strip(),
+        'debit': f"{_money_float(data.get('debit')):.2f}",
+        'credit': f"{_money_float(data.get('credit')):.2f}",
+        'vat_amount': f"{_money_float(data.get('vat_amount')):.2f}",
+    }, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def _invoice_payment_ai_public_status(feature):
+    feature = feature or {}
+    return {
+        'tenant_enabled': bool(feature.get('tenant_enabled')),
+        'enabled': bool(feature.get('enabled')),
+        'configured': bool(feature.get('configured')),
+        'available': bool(feature.get('available')),
+        'invoice_payment_matching_enabled': bool(feature.get('invoice_payment_matching_enabled')),
+        'model': feature.get('model') or cashbook_ai.DEFAULT_MODEL,
+        'availability_message': feature.get('availability_message') or '',
+    }
+
+
+def _invoice_payment_ai_gate_response(feature, require_service=False):
+    """Gate tenant review access; optionally require the live OpenAI service.
+
+    Reviewing an already-saved suggestion does not call OpenAI, so a global
+    outage or missing API key must not trap a pending cash-book batch.
+    """
+    public_status = _invoice_payment_ai_public_status(feature)
+    if not public_status['tenant_enabled']:
+        return jsonify({
+            'status': 'error',
+            'message': 'AI cash-book allocation is not enabled for this company.',
+            'feature': public_status,
+        }), 403
+    if not public_status['invoice_payment_matching_enabled']:
+        return jsonify({
+            'status': 'error',
+            'message': 'AI invoice-payment matching requires the Invoicing & Quotes application to be enabled for this company.',
+            'feature': public_status,
+        }), 403
+    if require_service and not public_status['enabled']:
+        return jsonify({
+            'status': 'error',
+            'message': 'AI cash-book allocation is disabled globally by the Super Admin.',
+            'feature': public_status,
+        }), 403
+    if require_service and not public_status['configured']:
+        return jsonify({
+            'status': 'error',
+            'message': 'The Easy Admin OpenAI service account is not configured on the server.',
+            'feature': public_status,
+        }), 503
+    return None
+
+
+def _outstanding_invoices_for_ai(conn, company_id):
+    """Return live, positive invoice balances for safe AI candidate matching."""
+    rows = conn.execute('''SELECT i.*,
+                                  COALESCE(p.paid, 0) AS paid_total,
+                                  COALESCE(c.credited, 0) AS credited_total
+                           FROM invoices i
+                           LEFT JOIN (
+                               SELECT company_id, invoice_id, SUM(amount) AS paid
+                               FROM invoice_payments
+                               GROUP BY company_id, invoice_id
+                           ) p ON p.company_id=i.company_id AND p.invoice_id=i.id
+                           LEFT JOIN (
+                               SELECT company_id, invoice_id, SUM(amount) AS credited
+                               FROM invoice_credit_notes
+                               GROUP BY company_id, invoice_id
+                           ) c ON c.company_id=i.company_id AND c.invoice_id=i.id
+                           WHERE i.company_id=?
+                           ORDER BY i.id DESC''', (company_id,)).fetchall()
+    invoices = []
+    for row in rows:
+        invoice = dict(row)
+        outstanding = round(max(
+            _money_float(invoice.get('total'))
+            - _money_float(invoice.get('paid_total'))
+            - _money_float(invoice.get('credited_total')),
+            0.0,
+        ), 2)
+        if outstanding <= 0:
+            continue
+        number = _billing_document_formatted_number(conn, company_id, 'invoice', invoice)
+        invoices.append({
+            'invoice_id': int(invoice['id']),
+            'id': int(invoice['id']),
+            'invoice_number': number,
+            'number': number,
+            'client_name': invoice.get('client_name') or '',
+            'outstanding_amount': outstanding,
+            'balance_due': outstanding,
+        })
+    return invoices
+
+
+def _persist_invoice_payment_suggestion(conn, company_id, batch_id, run_id, line, invoice,
+                                        suggestion, model, response_id, now):
+    """Idempotently save one validated match without reviving rejected history."""
+    line_id = int(line['id'])
+    invoice_id = int(invoice['invoice_id'])
+    fingerprint = _invoice_payment_line_fingerprint(line)
+    deposit_amount = _money_float(line.get('credit'))
+    outstanding = _money_float(invoice.get('outstanding_amount'))
+    confidence = max(0.0, min(1.0, float(suggestion.get('confidence') or 0)))
+    reason = str(suggestion.get('reason') or '')[:500]
+    match_method = str(suggestion.get('match_method') or 'ai_reference')[:50]
+
+    # A bank line and an invoice can each have only one active proposal. Older
+    # pending candidates are retained as stale audit history, never deleted.
+    conn.execute('''UPDATE invoice_payment_suggestions
+                    SET status='stale', reviewed_by=NULL, reviewed_at=?,
+                        rejection_reason='Replaced by a newer AI match.', updated_at=?
+                    WHERE company_id=? AND status='pending'
+                      AND ((cashbook_line_id=? AND invoice_id<>?)
+                           OR (invoice_id=? AND cashbook_line_id<>?))''',
+                 (now, now, company_id, line_id, invoice_id, invoice_id, line_id))
+
+    existing = conn.execute('''SELECT id, status FROM invoice_payment_suggestions
+                               WHERE company_id=? AND cashbook_line_id=? AND invoice_id=?
+                               ORDER BY id DESC LIMIT 1''',
+                            (company_id, line_id, invoice_id)).fetchone()
+    if existing and str(existing['status'] or '') in ('accepted', 'rejected'):
+        return {'saved': False, 'status': str(existing['status']), 'id': int(existing['id'])}
+
+    values = (
+        batch_id, run_id, invoice.get('invoice_number'),
+        str(line.get('transaction_date') or ''), str(line.get('description') or '')[:1000],
+        deposit_amount, outstanding, fingerprint, confidence, reason,
+        match_method, model, response_id, now,
+    )
+    if existing:
+        conn.execute('''UPDATE invoice_payment_suggestions
+                        SET batch_id=?, ai_run_id=?, invoice_number=?, deposit_date=?,
+                            deposit_description=?, deposit_amount=?, outstanding_amount=?,
+                            line_fingerprint=?, confidence=?, reason=?, match_method=?,
+                            model=?, response_id=?, status='pending', reviewed_by=NULL,
+                            reviewed_at=NULL, payment_id=NULL, rejection_reason=NULL,
+                            updated_at=?
+                        WHERE id=? AND company_id=?''', values + (int(existing['id']), company_id))
+        suggestion_id = int(existing['id'])
+    else:
+        cur = conn.execute('''INSERT INTO invoice_payment_suggestions
+                              (company_id, batch_id, cashbook_line_id, invoice_id, ai_run_id,
+                               invoice_number, deposit_date, deposit_description, deposit_amount,
+                               outstanding_amount, line_fingerprint, confidence, reason,
+                               match_method, model, response_id, status, updated_at)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)''',
+                           (company_id, batch_id, line_id, invoice_id, run_id) + values[2:])
+        suggestion_id = int(cur.lastrowid)
+    return {'saved': True, 'status': 'pending', 'id': suggestion_id}
 
 
 def _cashbook_ai_history(conn, company_id, exclude_batch_id, limit=1500):
@@ -20732,31 +20991,74 @@ def accounting_cashbook_ai_allocate(batch_id):
                                                                 AND allocated_account_id IS NULL
                                                               ORDER BY line_no, id LIMIT ?''',
                                                            (cid, batch_id, max_lines)).fetchall()]
-        if not transactions:
-            return jsonify({'status': 'error', 'message': 'This batch has no unallocated draft lines for AI to review.'}), 400
+        # Invoice matching also reviews already-allocated money-in rows. This
+        # permits a payment suggestion run even when every general-ledger line
+        # has already been allocated, while never changing a user-saved account.
+        deposits = []
+        if feature.get('invoice_payment_matching_enabled'):
+            deposits = [dict(row) for row in conn.execute('''SELECT id, id AS line_id, transaction_date,
+                                                                    description, debit, credit,
+                                                                    vat_amount, allocated_account_id, status
+                                                             FROM accounting_cashbook_lines
+                                                             WHERE company_id=? AND batch_id=? AND status!='posted'
+                                                               AND COALESCE(credit, 0)>0
+                                                               AND COALESCE(debit, 0)<=0
+                                                               AND COALESCE(vat_amount, 0)=0
+                                                             ORDER BY line_no, id LIMIT ?''',
+                                                          (cid, batch_id, max_lines)).fetchall()]
+        if not transactions and not deposits:
+            return jsonify({'status': 'error', 'message': 'This batch has no draft allocation lines or eligible money-in deposits for AI to review.'}), 400
         accounts = [dict(row) for row in conn.execute('''SELECT id, account_code, account_name, account_type, report_section,
                                                                 cash_flow_category, is_cash_equivalent
                                                          FROM accounting_accounts
                                                          WHERE company_id=? AND active=1
                                                          ORDER BY account_code, account_name''', (cid,)).fetchall()]
         history = _cashbook_ai_history(conn, cid, batch_id)
+        outstanding_invoices = _outstanding_invoices_for_ai(conn, cid) if deposits else []
+        posting_settings = _accounting_posting_settings(conn, cid)
+        receivables_account_id = int(posting_settings['receivables_account_id'])
+        requested_line_count = len(set(
+            [int(item['line_id']) for item in transactions]
+            + [int(item['line_id']) for item in deposits]
+        ))
         cur = conn.execute('''INSERT INTO accounting_ai_allocation_runs
                               (company_id, batch_id, requested_by, status, model, line_count)
                               VALUES (?, ?, ?, 'running', ?, ?)''',
-                           (cid, batch_id, session.get('username'), feature.get('model'), len(transactions)))
+                           (cid, batch_id, session.get('username'), feature.get('model'), requested_line_count))
         run_id = cur.lastrowid
         conn.commit()
     finally:
         conn.close()
 
     try:
-        ai_result = cashbook_ai.suggest_allocations(
-            model=feature.get('model'),
-            bank_account_id=int(batch_data['bank_account_id']),
-            accounts=accounts,
-            transactions=transactions,
-            history=history,
-        )
+        if transactions:
+            ai_result = cashbook_ai.suggest_allocations(
+                model=feature.get('model'),
+                bank_account_id=int(batch_data['bank_account_id']),
+                accounts=accounts,
+                transactions=transactions,
+                history=history,
+            )
+        else:
+            ai_result = {
+                'allocations': [],
+                'usage': {},
+                'model': feature.get('model'),
+                'response_id': None,
+            }
+        if deposits:
+            invoice_ai_result = cashbook_ai.suggest_invoice_payments(
+                model=feature.get('model'),
+                deposits=deposits,
+                outstanding_invoices=outstanding_invoices,
+            )
+        else:
+            invoice_ai_result = {
+                'suggestions': [],
+                'usage': {},
+                'model': feature.get('model'),
+                'response_id': None,
+            }
     except cashbook_ai.CashbookAIError as exc:
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         conn = get_db_connection()
@@ -20799,9 +21101,10 @@ def accounting_cashbook_ai_allocate(batch_id):
         }
         requested_lines = {int(item['line_id']): item for item in transactions}
         requested_line_ids = set(requested_lines)
+        requested_deposits = {int(item['line_id']): item for item in deposits}
         current_lines = {
             int(row['id']): dict(row)
-            for row in conn.execute('''SELECT id, transaction_date, description, debit, credit,
+            for row in conn.execute('''SELECT id, transaction_date, description, debit, credit, vat_amount,
                                               allocated_account_id, status
                                        FROM accounting_cashbook_lines
                                        WHERE company_id=? AND batch_id=?''', (cid, batch_id)).fetchall()
@@ -20855,16 +21158,128 @@ def accounting_cashbook_ai_allocate(batch_id):
                 no_suggestion_count += 1
             saved_count += 1
 
+        # Revalidate every deposit against its immutable AI input snapshot before
+        # saving a payment suggestion. A rerun stales superseded pending matches;
+        # accepted and rejected audit records are never overwritten.
+        unchanged_deposit_ids = set()
+        for line_id, requested_deposit in requested_deposits.items():
+            current_line = current_lines.get(line_id)
+            if (not current_line or current_line.get('status') == 'posted'
+                    or _invoice_payment_line_fingerprint(current_line)
+                    != _invoice_payment_line_fingerprint(requested_deposit)):
+                changed_during_review_count += 1
+                continue
+            unchanged_deposit_ids.add(line_id)
+            conn.execute('''UPDATE invoice_payment_suggestions
+                            SET status='stale', reviewed_by=NULL, reviewed_at=?,
+                                rejection_reason='No longer matched by the latest AI review.', updated_at=?
+                            WHERE company_id=? AND cashbook_line_id=? AND status='pending' ''',
+                         (now, now, cid, line_id))
+
+        live_invoices = {
+            int(item['invoice_id']): item
+            for item in _outstanding_invoices_for_ai(conn, cid)
+        }
+        requested_invoices = {
+            int(item['invoice_id']): item
+            for item in outstanding_invoices
+        }
+        invoice_match_count = 0
+        invoice_terminal_count = 0
+        invoice_invalid_count = 0
+        matched_line_ids = set()
+        matched_invoice_ids = set()
+        invoice_model = invoice_ai_result.get('model') or feature.get('model')
+        invoice_response_id = invoice_ai_result.get('response_id')
+
+        for suggestion in invoice_ai_result.get('suggestions') or []:
+            try:
+                line_id = int(suggestion.get('line_id') or 0)
+                invoice_id = int(suggestion.get('invoice_id') or 0)
+            except (TypeError, ValueError):
+                invoice_invalid_count += 1
+                continue
+            if not invoice_id:
+                continue
+            if (line_id not in unchanged_deposit_ids
+                    or line_id in matched_line_ids
+                    or invoice_id in matched_invoice_ids):
+                invoice_invalid_count += 1
+                continue
+            line = current_lines.get(line_id)
+            requested_invoice = requested_invoices.get(invoice_id)
+            live_invoice = live_invoices.get(invoice_id)
+            if not line or not requested_invoice or not live_invoice:
+                invoice_invalid_count += 1
+                continue
+            deposit_amount = _money_float(line.get('credit'))
+            if (deposit_amount <= 0
+                    or deposit_amount != _money_float(requested_invoice.get('outstanding_amount'))
+                    or deposit_amount != _money_float(live_invoice.get('outstanding_amount'))):
+                invoice_invalid_count += 1
+                continue
+
+            saved = _persist_invoice_payment_suggestion(
+                conn, cid, batch_id, run_id, line, live_invoice, suggestion,
+                invoice_model, invoice_response_id, now,
+            )
+            matched_line_ids.add(line_id)
+            matched_invoice_ids.add(invoice_id)
+            if not saved.get('saved'):
+                invoice_terminal_count += 1
+                continue
+
+            invoice_match_count += 1
+            # Invoice evidence is stronger than a general allocation guess. If
+            # this row was unallocated when the run started, set AR as a pending
+            # allocation for the Accounting user to review and save. A concurrent
+            # user allocation is protected by the WHERE clause and is not changed.
+            if line_id in requested_line_ids:
+                ar_account = active_accounts.get(receivables_account_id)
+                if ar_account:
+                    ar_cash_flow = (ar_account.get('cash_flow_category') or 'operating').strip()
+                    if ar_cash_flow not in ['operating', 'investing', 'financing', 'non_cash']:
+                        ar_cash_flow = 'operating'
+                    conn.execute('''UPDATE accounting_cashbook_lines
+                                    SET allocated_account_id=?, cash_flow_section=?, status='allocated',
+                                        ai_suggested_account_id=?, ai_confidence=?, ai_reason=?, ai_model=?,
+                                        ai_suggested_at=?, ai_run_id=?, ai_review_status='pending',
+                                        ai_reviewed_by=NULL, ai_reviewed_at=NULL
+                                    WHERE id=? AND company_id=? AND batch_id=? AND status!='posted'
+                                      AND (allocated_account_id IS NULL OR ai_run_id=?)''',
+                                 (receivables_account_id, ar_cash_flow, receivables_account_id,
+                                  max(0.0, min(1.0, float(suggestion.get('confidence') or 0))),
+                                  str(suggestion.get('reason') or '')[:300], invoice_model,
+                                  now, run_id, line_id, cid, batch_id, run_id))
+
+        # Recalculate the final allocation count because an invoice match may
+        # intentionally replace a general AI allocation with Accounts Receivable.
+        allocated_count = int(conn.execute('''SELECT COUNT(*) FROM accounting_cashbook_lines
+                                               WHERE company_id=? AND batch_id=? AND ai_run_id=?
+                                                 AND ai_suggested_account_id IS NOT NULL
+                                                 AND ai_review_status='pending' ''',
+                                            (cid, batch_id, run_id)).fetchone()[0] or 0)
+
         remaining = conn.execute('''SELECT COUNT(*) FROM accounting_cashbook_lines
                                     WHERE company_id=? AND batch_id=? AND status!='posted'
                                       AND allocated_account_id IS NULL''', (cid, batch_id)).fetchone()[0]
-        usage = ai_result.get('usage') or {}
+        allocation_usage = ai_result.get('usage') or {}
+        invoice_usage = invoice_ai_result.get('usage') or {}
+        usage = {
+            'input_tokens': int(allocation_usage.get('input_tokens') or 0) + int(invoice_usage.get('input_tokens') or 0),
+            'output_tokens': int(allocation_usage.get('output_tokens') or 0) + int(invoice_usage.get('output_tokens') or 0),
+            'total_tokens': int(allocation_usage.get('total_tokens') or 0) + int(invoice_usage.get('total_tokens') or 0),
+        }
+        response_ids = {
+            'allocation': ai_result.get('response_id'),
+            'invoice_payment': invoice_response_id,
+        }
         conn.execute('''UPDATE accounting_ai_allocation_runs
                         SET status='completed', model=?, response_id=?, allocated_count=?, skipped_count=?,
                             input_tokens=?, output_tokens=?, total_tokens=?, completed_at=?
                         WHERE id=? AND company_id=? AND batch_id=?''',
-                     (ai_result.get('model'), ai_result.get('response_id'), allocated_count,
-                      no_suggestion_count + changed_during_review_count,
+                     (invoice_model or ai_result.get('model'), json.dumps(response_ids), allocated_count,
+                      no_suggestion_count + changed_during_review_count + invoice_invalid_count,
                       int(usage.get('input_tokens') or 0), int(usage.get('output_tokens') or 0),
                       int(usage.get('total_tokens') or 0), now, run_id, cid, batch_id))
         conn.commit()
@@ -20875,13 +21290,13 @@ def accounting_cashbook_ai_allocate(batch_id):
     log_action(
         'Accounting',
         'Generated AI Cash Book Allocations',
-        f'Batch {batch_id}; run {run_id}; reviewed {saved_count}; suggested {allocated_count}; no suggestion {no_suggestion_count}; changed during review {changed_during_review_count}; remaining {remaining}.',
+        f'Batch {batch_id}; run {run_id}; allocation lines reviewed {saved_count}; allocations suggested {allocated_count}; invoice payments suggested {invoice_match_count}; terminal invoice matches skipped {invoice_terminal_count}; invalid or stale invoice matches {invoice_invalid_count}; changed during review {changed_during_review_count}; remaining {remaining}.',
         record_type='cashbook_batch',
         record_id=batch_id,
     )
     payload.update({
         'status': 'success',
-        'message': f'AI reviewed {saved_count} line(s) and suggested {allocated_count} allocation(s). Review them and select Save Allocations before posting.',
+        'message': f'AI suggested {allocated_count} cash-book allocation(s) and {invoice_match_count} invoice payment match(es). Review and save cash-book allocations, then accept or reject invoice matches in Invoicing & Quotes before posting.',
         'ai_summary': {
             'run_id': run_id,
             'processed_count': saved_count,
@@ -20889,11 +21304,411 @@ def accounting_cashbook_ai_allocate(batch_id):
             'no_suggestion_count': no_suggestion_count,
             'changed_during_review_count': changed_during_review_count,
             'remaining_unallocated_count': int(remaining or 0),
-            'model': ai_result.get('model'),
-            'requires_review': True,
+            'invoice_payment_suggestion_count': invoice_match_count,
+            'invoice_payment_terminal_count': invoice_terminal_count,
+            'invoice_payment_invalid_count': invoice_invalid_count,
+            'model': invoice_model or ai_result.get('model'),
+            'requires_review': bool(allocated_count or invoice_match_count),
         },
     })
     return jsonify(payload)
+
+
+@app.route('/api/invoice-payment-suggestions', methods=['GET'])
+def invoice_payment_suggestions_list():
+    if not _session_has_app_read('invoicing'):
+        return jsonify({'status': 'error', 'message': 'Invoicing & Quotes access is required.'}), 403
+    cid = _current_company_id()
+    conn = get_db_connection()
+    try:
+        feature = _cashbook_ai_company_status(conn, cid)
+        unavailable = _invoice_payment_ai_gate_response(feature)
+        if unavailable:
+            return unavailable
+
+        status_filter = str(request.args.get('status') or 'all').strip().lower()
+        allowed_statuses = {'pending', 'accepted', 'rejected', 'stale'}
+        try:
+            limit = max(1, min(int(request.args.get('limit') or 200), 500))
+        except (TypeError, ValueError):
+            limit = 200
+        where = 's.company_id=?'
+        params = [cid]
+        if status_filter in allowed_statuses:
+            where += ' AND s.status=?'
+            params.append(status_filter)
+        rows = conn.execute(f'''SELECT s.*, i.client_name,
+                                       l.transaction_date AS current_transaction_date,
+                                       l.description AS current_description,
+                                       l.debit AS current_debit,
+                                       l.credit AS current_credit,
+                                       l.vat_amount AS current_vat_amount,
+                                       l.allocated_account_id,
+                                       l.ai_review_status AS allocation_review_status,
+                                       l.status AS cashbook_line_status,
+                                       b.status AS cashbook_batch_status
+                                FROM invoice_payment_suggestions s
+                                LEFT JOIN invoices i ON i.id=s.invoice_id AND i.company_id=s.company_id
+                                LEFT JOIN accounting_cashbook_lines l
+                                  ON l.id=s.cashbook_line_id AND l.company_id=s.company_id
+                                LEFT JOIN accounting_cashbook_batches b
+                                  ON b.id=s.batch_id AND b.company_id=s.company_id
+                                WHERE {where}
+                                ORDER BY CASE WHEN s.status='pending' THEN 0 ELSE 1 END,
+                                         s.created_at DESC, s.id DESC
+                                LIMIT ?''', params + [limit]).fetchall()
+
+        setting = conn.execute('SELECT receivables_account_id FROM accounting_settings WHERE company_id=?', (cid,)).fetchone()
+        receivables_account_id = int(setting['receivables_account_id'] or 0) if setting else 0
+        can_review = _session_has_app_full('invoicing')
+        suggestions = []
+        for raw_row in rows:
+            row = dict(raw_row)
+            current_line = {
+                'transaction_date': row.get('current_transaction_date'),
+                'description': row.get('current_description'),
+                'debit': row.get('current_debit'),
+                'credit': row.get('current_credit'),
+                'vat_amount': row.get('current_vat_amount'),
+            }
+            source_exists = row.get('current_transaction_date') is not None
+            source_matches = bool(
+                source_exists
+                and row.get('line_fingerprint') == _invoice_payment_line_fingerprint(current_line)
+                and _money_float(row.get('current_credit')) == _money_float(row.get('deposit_amount'))
+                and _money_float(row.get('current_debit')) <= 0
+                and _money_float(row.get('current_vat_amount')) == 0
+                and str(row.get('cashbook_line_status') or '') != 'posted'
+                and str(row.get('cashbook_batch_status') or '') != 'posted'
+            )
+            totals = get_invoice_financial_totals(conn, cid, int(row.get('invoice_id') or 0))
+            current_outstanding = _money_float(totals.get('outstanding'))
+            balance_matches = bool(
+                current_outstanding > 0
+                and current_outstanding == _money_float(row.get('outstanding_amount'))
+                and current_outstanding == _money_float(row.get('deposit_amount'))
+            )
+            allocation_saved = bool(
+                receivables_account_id
+                and int(row.get('allocated_account_id') or 0) == receivables_account_id
+                and str(row.get('allocation_review_status') or '') != 'pending'
+            )
+            can_accept = bool(
+                can_review and str(row.get('status')) == 'pending'
+                and source_matches and balance_matches and allocation_saved
+            )
+            accept_block_reason = ''
+            if str(row.get('status')) != 'pending':
+                accept_block_reason = 'This suggestion has already been reviewed.'
+            elif not source_matches:
+                accept_block_reason = 'The linked bank transaction changed or has already been posted.'
+            elif not balance_matches:
+                accept_block_reason = 'The invoice outstanding balance no longer matches the deposit.'
+            elif not allocation_saved:
+                accept_block_reason = 'Review and save the cash-book line to Accounts Receivable first.'
+            elif not can_review:
+                accept_block_reason = 'Full Invoicing & Quotes access is required to review this suggestion.'
+
+            item = {
+                'id': int(row['id']),
+                'status': row.get('status') or 'pending',
+                'batch_id': int(row.get('batch_id') or 0),
+                'cashbook_line_id': int(row.get('cashbook_line_id') or 0),
+                'invoice_id': int(row.get('invoice_id') or 0),
+                'invoice_number': row.get('invoice_number') or _invoice_formatted_number(conn, cid, row.get('invoice_id')),
+                'client_name': row.get('client_name') or '',
+                'deposit_date': row.get('deposit_date') or '',
+                'deposit_description': row.get('deposit_description') or '',
+                'deposit_amount': _money_float(row.get('deposit_amount')),
+                'outstanding_amount': _money_float(row.get('outstanding_amount')),
+                'current_outstanding_amount': current_outstanding,
+                'confidence': float(row.get('confidence') or 0),
+                'reason': row.get('reason') or '',
+                'match_method': row.get('match_method') or '',
+                'created_at': row.get('created_at'),
+                'reviewed_by': row.get('reviewed_by'),
+                'reviewed_at': row.get('reviewed_at'),
+                'payment_id': int(row['payment_id']) if row.get('payment_id') else None,
+                'allocation_account_id': int(row['allocated_account_id']) if row.get('allocated_account_id') else None,
+                'allocation_review_status': row.get('allocation_review_status'),
+                'can_accept': can_accept,
+                'accept_block_reason': accept_block_reason,
+                # Backwards-friendly aliases for dashboard clients.
+                'transaction_date': row.get('deposit_date') or '',
+                'bank_description': row.get('deposit_description') or '',
+                'suggested_amount': _money_float(row.get('deposit_amount')),
+            }
+            suggestions.append(item)
+
+        summary_rows = conn.execute('''SELECT status, COUNT(*) AS item_count,
+                                              COALESCE(SUM(deposit_amount), 0) AS amount_total
+                                       FROM invoice_payment_suggestions
+                                       WHERE company_id=?
+                                       GROUP BY status''', (cid,)).fetchall()
+        summary = {
+            'pending_count': 0,
+            'pending_total': 0.0,
+            'accepted_count': 0,
+            'rejected_count': 0,
+            'stale_count': 0,
+            'total_count': 0,
+        }
+        for summary_row in summary_rows:
+            row_status = str(summary_row['status'] or '')
+            count = int(summary_row['item_count'] or 0)
+            summary['total_count'] += count
+            if row_status in allowed_statuses:
+                summary[f'{row_status}_count'] = count
+            if row_status == 'pending':
+                summary['pending_total'] = _money_float(summary_row['amount_total'])
+        return jsonify({
+            'status': 'success',
+            'feature': _invoice_payment_ai_public_status(feature),
+            'can_review': can_review,
+            'summary': summary,
+            'suggestions': suggestions,
+            'pending_suggestions': [item for item in suggestions if item['status'] == 'pending'],
+        })
+    finally:
+        conn.close()
+
+
+@app.route('/api/invoice-payment-suggestions/<int:suggestion_id>/accept', methods=['POST'])
+def invoice_payment_suggestion_accept(suggestion_id):
+    if not _session_has_app_full('invoicing'):
+        return jsonify({'status': 'error', 'message': 'Full Invoicing & Quotes access is required.'}), 403
+    cid = _current_company_id()
+    conn = get_db_connection()
+    payment_id = None
+    invoice_id = None
+    invoice_number = None
+    try:
+        feature = _cashbook_ai_company_status(conn, cid)
+        unavailable = _invoice_payment_ai_gate_response(feature)
+        if unavailable:
+            return unavailable
+        exists = conn.execute('''SELECT id, status, batch_id, cashbook_line_id, ai_run_id
+                                 FROM invoice_payment_suggestions WHERE id=? AND company_id=?''',
+                              (suggestion_id, cid)).fetchone()
+        if not exists:
+            return jsonify({'status': 'error', 'message': 'Invoice payment suggestion not found.'}), 404
+        if str(exists['status']) != 'pending':
+            return jsonify({'status': 'error', 'message': 'This invoice payment suggestion has already been reviewed.'}), 409
+
+        _begin_atomic_write(conn)
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        claim = conn.execute('''UPDATE invoice_payment_suggestions
+                                SET status='processing', reviewed_by=?, reviewed_at=?, updated_at=?
+                                WHERE id=? AND company_id=? AND status='pending' ''',
+                             (session.get('username'), now, now, suggestion_id, cid))
+        if claim.rowcount != 1:
+            _rollback_atomic_write(conn)
+            return jsonify({'status': 'error', 'message': 'This suggestion was reviewed by another user. Refresh the dashboard.'}), 409
+
+        raw = conn.execute('''SELECT s.*, l.transaction_date AS current_transaction_date,
+                                     l.description AS current_description,
+                                     l.debit AS current_debit, l.credit AS current_credit,
+                                     l.vat_amount AS current_vat_amount,
+                                     l.allocated_account_id, l.ai_review_status AS allocation_review_status,
+                                     l.status AS cashbook_line_status, b.status AS cashbook_batch_status,
+                                     i.client_name
+                              FROM invoice_payment_suggestions s
+                              LEFT JOIN accounting_cashbook_lines l
+                                ON l.id=s.cashbook_line_id AND l.company_id=s.company_id
+                              LEFT JOIN accounting_cashbook_batches b
+                                ON b.id=s.batch_id AND b.company_id=s.company_id
+                              LEFT JOIN invoices i ON i.id=s.invoice_id AND i.company_id=s.company_id
+                              WHERE s.id=? AND s.company_id=?''', (suggestion_id, cid)).fetchone()
+        suggestion = dict(raw) if raw else {}
+        invoice_id = int(suggestion.get('invoice_id') or 0)
+        current_line = {
+            'transaction_date': suggestion.get('current_transaction_date'),
+            'description': suggestion.get('current_description'),
+            'debit': suggestion.get('current_debit'),
+            'credit': suggestion.get('current_credit'),
+            'vat_amount': suggestion.get('current_vat_amount'),
+        }
+
+        stale_message = None
+        if not suggestion.get('current_transaction_date'):
+            stale_message = 'The linked bank transaction no longer exists.'
+        elif (str(suggestion.get('cashbook_line_status') or '') == 'posted'
+              or str(suggestion.get('cashbook_batch_status') or '') == 'posted'):
+            stale_message = 'The linked cash-book transaction has already been posted.'
+        elif suggestion.get('line_fingerprint') != _invoice_payment_line_fingerprint(current_line):
+            stale_message = 'The linked bank transaction changed after AI created this suggestion.'
+        elif (_money_float(suggestion.get('current_credit')) != _money_float(suggestion.get('deposit_amount'))
+              or _money_float(suggestion.get('current_debit')) > 0
+              or _money_float(suggestion.get('current_vat_amount')) != 0):
+            stale_message = 'The linked bank transaction amount, direction or VAT treatment changed.'
+
+        invoice = conn.execute('SELECT * FROM invoices WHERE id=? AND company_id=?', (invoice_id, cid)).fetchone()
+        if not stale_message and not invoice:
+            stale_message = 'The linked invoice no longer exists.'
+        duplicate = conn.execute('''SELECT id, cashbook_line_id, invoice_id
+                                    FROM invoice_payment_suggestions
+                                    WHERE company_id=? AND status='accepted' AND id<>?
+                                      AND (cashbook_line_id=? OR invoice_id=?)
+                                    ORDER BY id DESC LIMIT 1''',
+                                 (cid, suggestion_id, suggestion.get('cashbook_line_id'), invoice_id)).fetchone()
+        if not stale_message and duplicate:
+            if int(duplicate['cashbook_line_id'] or 0) == int(suggestion.get('cashbook_line_id') or 0):
+                stale_message = 'This bank deposit has already been accepted as an invoice payment.'
+            else:
+                stale_message = 'This invoice already has an accepted AI bank-payment suggestion.'
+        totals = get_invoice_financial_totals(conn, cid, invoice_id) if invoice else {'outstanding': 0}
+        current_outstanding = _money_float(totals.get('outstanding'))
+        if (not stale_message and (
+                current_outstanding <= 0
+                or current_outstanding != _money_float(suggestion.get('outstanding_amount'))
+                or current_outstanding != _money_float(suggestion.get('deposit_amount')))):
+            stale_message = 'The invoice outstanding balance no longer matches the bank deposit.'
+
+        if stale_message:
+            conn.execute('''UPDATE invoice_payment_suggestions
+                            SET status='stale', reviewed_by=?, reviewed_at=?,
+                                rejection_reason=?, updated_at=?
+                            WHERE id=? AND company_id=? AND status='processing' ''',
+                         (session.get('username'), now, stale_message, now, suggestion_id, cid))
+            _commit_atomic_write(conn)
+            log_action(
+                'Invoicing', 'AI Invoice Payment Suggestion Became Stale',
+                f'Suggestion {suggestion_id}: {stale_message}',
+                record_type='invoice_payment_suggestion', record_id=suggestion_id,
+            )
+            return jsonify({'status': 'error', 'message': stale_message, 'suggestion_status': 'stale'}), 409
+
+        setting = conn.execute('SELECT receivables_account_id FROM accounting_settings WHERE company_id=?', (cid,)).fetchone()
+        receivables_account_id = int(setting['receivables_account_id'] or 0) if setting else 0
+        allocation_review_status = str(suggestion.get('allocation_review_status') or '')
+        if (not receivables_account_id
+                or int(suggestion.get('allocated_account_id') or 0) != receivables_account_id
+                or allocation_review_status == 'pending'):
+            _rollback_atomic_write(conn)
+            return jsonify({
+                'status': 'error',
+                'message': 'Review and save the cash-book allocation to Accounts Receivable before accepting this payment suggestion.'
+            }), 409
+
+        payment_date = _normalise_accounting_date(suggestion.get('current_transaction_date'))
+        if not _is_iso_accounting_date(payment_date):
+            conn.execute('''UPDATE invoice_payment_suggestions
+                            SET status='stale', reviewed_by=?, reviewed_at=?,
+                                rejection_reason=?, updated_at=?
+                            WHERE id=? AND company_id=? AND status='processing' ''',
+                         (session.get('username'), now, 'The bank transaction date is invalid.', now, suggestion_id, cid))
+            _commit_atomic_write(conn)
+            return jsonify({'status': 'error', 'message': 'The linked bank transaction date is invalid.', 'suggestion_status': 'stale'}), 409
+
+        invoice_number = _billing_document_formatted_number(conn, cid, 'invoice', invoice)
+        amount = _money_float(suggestion.get('deposit_amount'))
+        bank_description = str(suggestion.get('current_description') or '').strip()
+        payment_reference = bank_description[:250] or f'Cash book batch {suggestion.get("batch_id")}'
+        cur = conn.execute('''INSERT INTO invoice_payments
+                              (company_id, invoice_id, payment_date, amount, payment_method, reference, notes)
+                              VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                           (cid, invoice_id, payment_date, amount, 'Bank Transfer', payment_reference, ''))
+        payment_id = int(cur.lastrowid)
+        update_invoice_payment_status(conn, cid, invoice_id)
+        completed = conn.execute('''UPDATE invoice_payment_suggestions
+                                    SET status='accepted', reviewed_by=?, reviewed_at=?, payment_id=?,
+                                        rejection_reason=NULL, updated_at=?
+                                    WHERE id=? AND company_id=? AND status='processing' ''',
+                                 (session.get('username'), now, payment_id, now, suggestion_id, cid))
+        if completed.rowcount != 1:
+            raise RuntimeError('The invoice payment suggestion changed before it could be accepted.')
+        _commit_atomic_write(conn)
+    except Exception as exc:
+        _rollback_atomic_write(conn)
+        conflict_text = str(exc or '').lower()
+        if (
+            'idx_invoice_payment_suggestions_accepted_line_unique' in conflict_text
+            or 'idx_invoice_payment_suggestions_accepted_invoice_unique' in conflict_text
+            or ('unique constraint failed' in conflict_text and 'invoice_payment_suggestions.company_id' in conflict_text)
+        ):
+            return jsonify({
+                'status': 'error',
+                'message': 'This bank deposit or invoice was accepted by another user. Refresh the payment suggestions.'
+            }), 409
+        app.logger.exception('Accepting AI invoice payment suggestion failed suggestion_id=%s company_id=%s', suggestion_id, cid)
+        return jsonify({'status': 'error', 'message': 'Could not accept the invoice payment suggestion. Please refresh and try again.'}), 500
+    finally:
+        conn.close()
+
+    log_action(
+        'Invoicing', 'Accepted AI Invoice Payment Suggestion',
+        f'Accepted suggestion {suggestion_id}; recorded payment R{amount:.2f} for Invoice {invoice_number} from cash-book line {suggestion.get("cashbook_line_id")}.',
+        record_type='invoice_payment_suggestion', record_id=suggestion_id,
+    )
+    return jsonify({
+        'status': 'success',
+        'message': f'Payment of R{amount:.2f} was recorded against Invoice {invoice_number}.',
+        'suggestion_id': suggestion_id,
+        'invoice_id': invoice_id,
+        'invoice_number': invoice_number,
+        'payment_id': payment_id,
+    })
+
+
+@app.route('/api/invoice-payment-suggestions/<int:suggestion_id>/reject', methods=['POST'])
+def invoice_payment_suggestion_reject(suggestion_id):
+    if not _session_has_app_full('invoicing'):
+        return jsonify({'status': 'error', 'message': 'Full Invoicing & Quotes access is required.'}), 403
+    cid = _current_company_id()
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get('reason') or 'Rejected by user.').strip()[:500] or 'Rejected by user.'
+    conn = get_db_connection()
+    try:
+        feature = _cashbook_ai_company_status(conn, cid)
+        unavailable = _invoice_payment_ai_gate_response(feature)
+        if unavailable:
+            return unavailable
+        exists = conn.execute('''SELECT id, status, batch_id, cashbook_line_id, ai_run_id
+                                 FROM invoice_payment_suggestions WHERE id=? AND company_id=?''',
+                              (suggestion_id, cid)).fetchone()
+        if not exists:
+            return jsonify({'status': 'error', 'message': 'Invoice payment suggestion not found.'}), 404
+        if str(exists['status']) != 'pending':
+            return jsonify({'status': 'error', 'message': 'This invoice payment suggestion has already been reviewed.'}), 409
+        _begin_atomic_write(conn)
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        updated = conn.execute('''UPDATE invoice_payment_suggestions
+                                  SET status='rejected', reviewed_by=?, reviewed_at=?,
+                                      rejection_reason=?, updated_at=?
+                                  WHERE id=? AND company_id=? AND status='pending' ''',
+                               (session.get('username'), now, reason, now, suggestion_id, cid))
+        if updated.rowcount != 1:
+            _rollback_atomic_write(conn)
+            return jsonify({'status': 'error', 'message': 'This suggestion was reviewed by another user. Refresh the dashboard.'}), 409
+        ar_setting = conn.execute('SELECT receivables_account_id FROM accounting_settings WHERE company_id=?', (cid,)).fetchone()
+        receivables_account_id = int(ar_setting['receivables_account_id'] or 0) if ar_setting else 0
+        if receivables_account_id:
+            conn.execute('''UPDATE accounting_cashbook_lines
+                            SET ai_review_status='pending',
+                                ai_reason='Invoice payment match rejected; reconfirm or change the Accounts Receivable allocation.',
+                                ai_reviewed_by=NULL, ai_reviewed_at=NULL
+                            WHERE id=? AND batch_id=? AND company_id=? AND status!='posted'
+                              AND allocated_account_id=? AND ai_suggested_account_id=?''',
+                         (exists['cashbook_line_id'], exists['batch_id'], cid,
+                          receivables_account_id, receivables_account_id))
+        _commit_atomic_write(conn)
+    except Exception as exc:
+        _rollback_atomic_write(conn)
+        app.logger.exception('Rejecting AI invoice payment suggestion failed suggestion_id=%s company_id=%s', suggestion_id, cid)
+        return jsonify({'status': 'error', 'message': 'Could not reject the invoice payment suggestion. Please refresh and try again.'}), 500
+    finally:
+        conn.close()
+
+    log_action(
+        'Invoicing', 'Rejected AI Invoice Payment Suggestion',
+        f'Rejected suggestion {suggestion_id}. Reason: {reason}',
+        record_type='invoice_payment_suggestion', record_id=suggestion_id,
+    )
+    return jsonify({
+        'status': 'success',
+        'message': 'The invoice payment suggestion was rejected. No invoice payment was recorded.',
+        'suggestion_id': suggestion_id,
+    })
 
 
 @app.route('/api/accounting/cashbook/batches/<int:batch_id>/post', methods=['POST'])
@@ -20907,6 +21722,22 @@ def accounting_cashbook_post(batch_id):
     if str(batch['status']) == 'posted':
         conn.close()
         return jsonify({'status': 'error', 'message': 'Cash book batch already posted.'}), 400
+    company_ai = conn.execute('SELECT cashbook_ai_enabled, can_accounting, can_invoicing FROM companies WHERE id=?', (cid,)).fetchone()
+    company_ai_enabled = bool(
+        company_ai and company_ai['cashbook_ai_enabled'] and company_ai['can_accounting']
+    )
+    invoice_payment_review_enabled = bool(company_ai_enabled and company_ai['can_invoicing'])
+    pending_invoice_payment_reviews = 0
+    if invoice_payment_review_enabled:
+        pending_invoice_payment_reviews = conn.execute('''SELECT COUNT(*) FROM invoice_payment_suggestions
+                                                           WHERE company_id=? AND batch_id=? AND status='pending' ''',
+                                                        (cid, batch_id)).fetchone()[0]
+    if pending_invoice_payment_reviews:
+        conn.close()
+        return jsonify({
+            'status': 'error',
+            'message': f'Review the {pending_invoice_payment_reviews} AI invoice payment suggestion(s) in Invoicing & Quotes before posting this cash book.'
+        }), 400
     pending_ai_reviews = conn.execute('''SELECT COUNT(*) FROM accounting_cashbook_lines
                                          WHERE company_id=? AND batch_id=? AND status!='posted'
                                            AND ai_review_status='pending' ''', (cid, batch_id)).fetchone()[0]
@@ -21006,6 +21837,13 @@ def accounting_cashbook_post(batch_id):
                             VALUES (?, ?, ?, ?, ?, 0, ?, ?)''', (cid, journal_id, line_no, batch['bank_account_id'], desc, amount, cf_section))
         conn.execute('''UPDATE accounting_cashbook_lines SET status='posted', linked_journal_id=? WHERE id=? AND batch_id=? AND company_id=?''', (journal_id, line.get('id'), batch_id, cid))
         created_journals.append(journal_id)
+    if not invoice_payment_review_enabled:
+        conn.execute('''UPDATE invoice_payment_suggestions
+                        SET status='stale', reviewed_by=?, reviewed_at=?,
+                            rejection_reason='AI invoice-payment review was unavailable when the source batch was posted.',
+                            updated_at=?
+                        WHERE company_id=? AND batch_id=? AND status='pending' ''',
+                     (session.get('username'), now, now, cid, batch_id))
     conn.execute('''UPDATE accounting_cashbook_batches SET status='posted', posted_by=?, posted_at=? WHERE id=? AND company_id=?''', (session.get('username'), now, batch_id, cid))
     conn.commit()
     payload = _cashbook_batch_payload(conn, cid, batch_id)

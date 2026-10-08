@@ -232,6 +232,7 @@
                             <div id="cashbookAIStatus" class="alert alert-info small py-2">
                                 <strong>AI allocation:</strong> {{ cashbook_ai.get('availability_message') }}
                             </div>
+                            <div id="cashbookInvoiceMatchStatus" class="alert alert-success small py-2 d-none" role="status" aria-live="polite"></div>
                             {% endif %}
                             <div class="table-responsive" style="max-height:560px; overflow:auto;">
                                 <table class="table table-bordered table-sm align-middle cashbook-table">
@@ -1139,6 +1140,61 @@ function saveCashbookAllocations() {
         });
 }
 
+function renderCashbookInvoiceMatchSummary(data) {
+    const box = document.getElementById('cashbookInvoiceMatchStatus');
+    if(!box) return;
+
+    const aiSummary = data && typeof data.ai_summary === 'object' ? data.ai_summary : {};
+    const summary = data?.invoice_match_summary
+        || data?.invoice_payment_summary
+        || data?.payment_suggestion_summary
+        || aiSummary.invoice_match_summary
+        || aiSummary.invoice_payment_summary
+        || null;
+    const suggestions = Array.isArray(data?.invoice_payment_suggestions)
+        ? data.invoice_payment_suggestions
+        : (Array.isArray(data?.invoice_matches) ? data.invoice_matches : []);
+    const hasSummary = !!summary
+        || suggestions.length > 0
+        || aiSummary.invoice_match_count !== undefined
+        || aiSummary.invoice_payment_suggestion_count !== undefined;
+
+    if(!hasSummary) {
+        box.classList.add('d-none');
+        box.innerHTML = '';
+        return;
+    }
+
+    const count = Number(
+        summary?.suggested_count
+        ?? summary?.created_count
+        ?? summary?.pending_count
+        ?? summary?.match_count
+        ?? aiSummary.invoice_match_count
+        ?? aiSummary.invoice_payment_suggestion_count
+        ?? suggestions.length
+        ?? 0
+    ) || 0;
+    const amount = Number(
+        summary?.suggested_amount
+        ?? summary?.total_amount
+        ?? summary?.pending_amount
+        ?? suggestions.reduce((total, item) => total + Number(item.suggested_amount ?? item.deposit_amount ?? item.amount ?? 0), 0)
+    ) || 0;
+    const reviewedDeposits = Number(summary?.reviewed_deposit_count ?? summary?.reviewed_count ?? 0) || 0;
+
+    box.classList.remove('d-none', 'alert-success', 'alert-secondary');
+    if(count > 0) {
+        box.classList.add('alert-success');
+        const amountText = amount > 0 ? ` totalling R ${money(amount)}` : '';
+        box.innerHTML = `<strong>Invoice payment matches:</strong> ${count} review suggestion${count === 1 ? '' : 's'} created${amountText}. Open Invoicing &amp; Quotes to accept or reject ${count === 1 ? 'it' : 'them'}.`;
+    } else {
+        box.classList.add('alert-secondary');
+        const reviewedText = reviewedDeposits > 0 ? ` across ${reviewedDeposits} deposit${reviewedDeposits === 1 ? '' : 's'}` : '';
+        box.innerHTML = `<strong>Invoice payment matches:</strong> No exact outstanding-invoice matches were found${reviewedText}.`;
+    }
+}
+
 function requestAICashbookAllocations() {
     if(!cashbookAIAvailable) return alert(cashbookAIAvailabilityMessage || 'AI cash-book allocation is not available.');
     if(!cashbookBatchId) return alert('Upload or open a cash book batch first.');
@@ -1150,6 +1206,7 @@ function requestAICashbookAllocations() {
         button.textContent = 'Reviewing...';
     }
     if(statusBox) statusBox.innerHTML = '<strong>AI allocation:</strong> Reviewing unallocated draft lines. Nothing will be posted.';
+    renderCashbookInvoiceMatchSummary(null);
 
     // Save the screen first so the model never overwrites a user's existing allocation.
     fetch(`/api/accounting/cashbook/batches/${cashbookBatchId}/save`, {method:'POST', body:cashbookSaveFormData()})
@@ -1164,6 +1221,7 @@ function requestAICashbookAllocations() {
             cashbookLines = data.lines || [];
             renderCashbookBatch(data.batch, cashbookLines);
             loadCashbookBatches();
+            renderCashbookInvoiceMatchSummary(data);
             if(statusBox) statusBox.innerHTML = `<strong>AI allocation:</strong> ${esc(data.message || 'Suggestions saved for review.')}`;
             alert(data.message || 'AI suggestions were saved. Review them and select Save Allocations before posting.');
         })

@@ -54,6 +54,13 @@
         .invoice-list-table .invoice-number { word-break: normal; overflow-wrap: anywhere; }
         .invoice-list-table .date-wrap { display: inline-block; min-width: 76px; }
         .invoice-list-table .dropdown-menu { font-size: 0.9rem; }
+        .ai-payment-dashboard { background: #fff; border: 1px solid #dee2e6; border-top: 4px solid #0dcaf0; border-radius: 6px; box-shadow: 0 .125rem .25rem rgba(0,0,0,.075); }
+        .ai-payment-metric { height: 100%; padding: 12px; border: 1px solid #dee2e6; border-radius: 6px; background: #f8f9fa; }
+        .ai-payment-metric .metric-value { font-size: 1.35rem; line-height: 1.2; font-weight: 700; }
+        .ai-payment-metric .metric-label { margin-top: 3px; color: #6c757d; font-size: .78rem; font-weight: 600; text-transform: uppercase; }
+        .ai-payment-table { font-size: .88rem; }
+        .ai-payment-table th, .ai-payment-table td { vertical-align: middle; }
+        .ai-payment-description, .ai-payment-reason { min-width: 190px; white-space: normal; }
     </style>
 </head>
 <body>
@@ -75,6 +82,47 @@
                 <a href="/logout" class="btn btn-outline-danger">Logout</a>
             </div>
         </div>
+
+        {% if cashbook_ai is defined and cashbook_ai.get('tenant_enabled') %}
+        <section id="aiPaymentSuggestionsDashboard" class="ai-payment-dashboard p-3 mb-4" aria-labelledby="aiPaymentSuggestionsTitle">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+                <div>
+                    <h4 id="aiPaymentSuggestionsTitle" class="text-info mb-1">AI Payment Suggestions</h4>
+                    <div class="small text-muted">Review bank deposits that may settle outstanding invoices. Nothing is marked paid until an authorised user accepts a suggestion.</div>
+                </div>
+                <button id="aiPaymentSuggestionsRefresh" type="button" class="btn btn-sm btn-outline-info fw-bold" onclick="loadInvoicePaymentSuggestions()">Refresh</button>
+            </div>
+
+            <div class="row g-2 mb-3">
+                <div class="col-6 col-lg-3"><div class="ai-payment-metric"><div id="aiPaymentPendingCount" class="metric-value text-warning">–</div><div class="metric-label">Pending Review</div></div></div>
+                <div class="col-6 col-lg-3"><div class="ai-payment-metric"><div id="aiPaymentPendingAmount" class="metric-value text-danger">–</div><div class="metric-label">Suggested Value</div></div></div>
+                <div class="col-6 col-lg-3"><div class="ai-payment-metric"><div id="aiPaymentAcceptedCount" class="metric-value text-success">–</div><div class="metric-label">Accepted</div></div></div>
+                <div class="col-6 col-lg-3"><div class="ai-payment-metric"><div id="aiPaymentRejectedCount" class="metric-value text-secondary">–</div><div class="metric-label">Rejected</div></div></div>
+            </div>
+
+            <div id="aiPaymentSuggestionsStatus" class="alert alert-light border small py-2 mb-3" role="status" aria-live="polite">Loading AI payment suggestions...</div>
+            <div class="table-responsive border rounded">
+                <table class="table table-hover table-sm ai-payment-table mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Date</th>
+                            <th class="ai-payment-description">Bank Description</th>
+                            <th class="text-end">Deposit</th>
+                            <th>Invoice</th>
+                            <th>Client</th>
+                            <th class="text-end">Outstanding</th>
+                            <th>Confidence</th>
+                            <th class="ai-payment-reason">Reason</th>
+                            <th class="text-center">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="aiPaymentSuggestionsBody">
+                        <tr><td colspan="9" class="text-center text-muted py-4">Loading suggestions...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        {% endif %}
 
         <ul class="nav nav-tabs nav-fill" id="invTabs" role="tablist">
             <li class="nav-item" role="presentation">
@@ -1066,6 +1114,13 @@
         const invoiceStart = "{{ inv_start }}";
         const quotePrefix = "{{ quote_prefix }}";
         const quoteStart = "{{ quote_start }}";
+        {% if cashbook_ai is defined and cashbook_ai.get('tenant_enabled') %}
+        const invoicePaymentSuggestionsEnabled = true;
+        const canReviewInvoicePaymentSuggestions = {{ (can_review_invoice_payment_suggestions|default(false))|tojson }};
+        {% else %}
+        const invoicePaymentSuggestionsEnabled = false;
+        const canReviewInvoicePaymentSuggestions = false;
+        {% endif %}
         let quoteServices = {{ services | tojson | safe }};
         const websiteIntegrationEnabled = {{ website_integration_enabled | tojson }};
         const invoiceProjects = {{ projects | tojson | safe }};
@@ -1092,6 +1147,8 @@
         let quoteBookingConversionReference = "";
         let quoteBookingConversionOpening = false;
         let quoteBookingConversionSubmitting = false;
+        let invoicePaymentSuggestionsLoading = false;
+        let invoicePaymentSuggestionsById = {};
         
         let currentStmtEmail = "";
         let currentStmtClient = "";
@@ -1295,6 +1352,154 @@
             return String(value || '').replace(/[&<>"']/g, function(ch) {
                 return ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'})[ch];
             });
+        }
+
+        function invoicePaymentSuggestionItems(data) {
+            if(Array.isArray(data)) return data;
+            if(Array.isArray(data?.suggestions)) return data.suggestions;
+            if(Array.isArray(data?.pending_suggestions)) return data.pending_suggestions;
+            if(Array.isArray(data?.invoice_payment_suggestions)) return data.invoice_payment_suggestions;
+            return [];
+        }
+
+        function invoicePaymentSuggestionAmount(item) {
+            return Number(item?.suggested_amount ?? item?.deposit_amount ?? item?.amount ?? item?.cashbook_amount ?? 0) || 0;
+        }
+
+        function setInvoicePaymentSuggestionMetrics(data, pendingItems) {
+            const summary = data && !Array.isArray(data) && typeof data.summary === 'object'
+                ? data.summary
+                : (data && !Array.isArray(data) && typeof data.metrics === 'object' ? data.metrics : {});
+            const pendingCount = Number(summary.pending_count ?? summary.pending ?? pendingItems.length) || 0;
+            const pendingAmount = Number(
+                summary.pending_amount
+                ?? summary.suggested_amount
+                ?? summary.pending_total
+                ?? pendingItems.reduce((total, item) => total + invoicePaymentSuggestionAmount(item), 0)
+            ) || 0;
+            const acceptedCount = Number(summary.accepted_count ?? summary.accepted ?? 0) || 0;
+            const rejectedCount = Number(summary.rejected_count ?? summary.rejected ?? 0) || 0;
+            document.getElementById('aiPaymentPendingCount').textContent = pendingCount;
+            document.getElementById('aiPaymentPendingAmount').textContent = `R ${money(pendingAmount)}`;
+            document.getElementById('aiPaymentAcceptedCount').textContent = acceptedCount;
+            document.getElementById('aiPaymentRejectedCount').textContent = rejectedCount;
+        }
+
+        function renderInvoicePaymentSuggestions(data) {
+            const body = document.getElementById('aiPaymentSuggestionsBody');
+            const statusBox = document.getElementById('aiPaymentSuggestionsStatus');
+            if(!body || !statusBox) return;
+
+            const items = invoicePaymentSuggestionItems(data);
+            const pendingItems = items.filter(item => String(item?.status || 'pending').toLowerCase() === 'pending');
+            invoicePaymentSuggestionsById = {};
+            pendingItems.forEach(item => {
+                const id = Number(item?.id ?? item?.suggestion_id ?? 0);
+                if(Number.isInteger(id) && id > 0) invoicePaymentSuggestionsById[id] = item;
+            });
+            setInvoicePaymentSuggestionMetrics(data, pendingItems);
+
+            statusBox.className = 'alert alert-light border small py-2 mb-3';
+            if(!pendingItems.length) {
+                statusBox.innerHTML = '<strong>Up to date:</strong> There are no AI invoice-payment suggestions awaiting review.';
+                body.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No pending payment suggestions.</td></tr>';
+                return;
+            }
+
+            statusBox.className = `alert ${canReviewInvoicePaymentSuggestions ? 'alert-info' : 'alert-secondary'} small py-2 mb-3`;
+            statusBox.innerHTML = canReviewInvoicePaymentSuggestions
+                ? `<strong>Review required:</strong> ${pendingItems.length} bank deposit suggestion${pendingItems.length === 1 ? '' : 's'} must be accepted or rejected.`
+                : `<strong>Read-only:</strong> ${pendingItems.length} bank deposit suggestion${pendingItems.length === 1 ? '' : 's'} await review by a user with full Invoicing access.`;
+
+            body.innerHTML = pendingItems.map(item => {
+                const suggestionId = Number(item?.id ?? item?.suggestion_id ?? 0);
+                const invoiceId = Number(item?.invoice_id ?? item?.matched_invoice_id ?? 0);
+                const invoiceNumber = item?.invoice_number ?? item?.formatted_invoice_number ?? item?.detected_invoice_number ?? (invoiceId > 0 ? `Invoice #${invoiceId}` : '—');
+                const transactionDate = item?.deposit_date ?? item?.transaction_date ?? item?.payment_date ?? item?.bank_transaction_date ?? '';
+                const description = item?.deposit_description ?? item?.bank_description ?? item?.description ?? item?.cashbook_description ?? '';
+                const clientName = item?.client_name ?? item?.invoice_client_name ?? '';
+                const outstanding = Number(item?.current_outstanding_amount ?? item?.outstanding_amount ?? item?.current_outstanding ?? item?.invoice_outstanding ?? 0) || 0;
+                const rawConfidence = Number(item?.confidence ?? item?.ai_confidence ?? 0) || 0;
+                const confidence = Math.max(0, Math.min(100, rawConfidence <= 1 ? rawConfidence * 100 : rawConfidence));
+                const reason = item?.reason ?? item?.ai_reason ?? item?.match_reason ?? '';
+                const canAct = canReviewInvoicePaymentSuggestions && Number.isInteger(suggestionId) && suggestionId > 0;
+                const canAccept = canAct && item?.can_accept !== false;
+                const acceptBlockReason = item?.accept_block_reason ?? 'This suggestion must be refreshed before it can be accepted.';
+                const viewButton = invoiceId > 0
+                    ? `<button type="button" class="btn btn-sm btn-outline-dark" onclick="viewInvoice(${invoiceId}, false)">View Invoice</button>`
+                    : '';
+                const reviewButtons = canAct
+                    ? `<button type="button" class="btn btn-sm btn-outline-success ai-payment-review-btn" onclick="reviewInvoicePaymentSuggestion(${suggestionId}, 'accept', this)" ${canAccept ? '' : `disabled title="${escapeJsHtml(acceptBlockReason)}"`}>Accept</button>
+                       <button type="button" class="btn btn-sm btn-outline-danger ai-payment-review-btn" onclick="reviewInvoicePaymentSuggestion(${suggestionId}, 'reject', this)">Reject</button>`
+                    : '<span class="badge bg-secondary">View only</span>';
+                return `<tr data-suggestion-id="${suggestionId > 0 ? suggestionId : ''}">
+                    <td class="text-nowrap">${escapeJsHtml(fmtDate(transactionDate) || '—')}</td>
+                    <td class="ai-payment-description">${escapeJsHtml(description || '—')}</td>
+                    <td class="text-end fw-bold text-success text-nowrap">R ${money(invoicePaymentSuggestionAmount(item))}</td>
+                    <td><strong class="text-info">${escapeJsHtml(invoiceNumber)}</strong></td>
+                    <td>${escapeJsHtml(clientName || '—')}</td>
+                    <td class="text-end text-nowrap">R ${money(outstanding)}</td>
+                    <td><span class="badge bg-info text-dark">${Math.round(confidence)}%</span></td>
+                    <td class="ai-payment-reason" title="${escapeJsHtml(reason)}">${escapeJsHtml(reason || '—')}</td>
+                    <td class="text-center"><div class="d-flex flex-wrap justify-content-center gap-1">${viewButton}${reviewButtons}</div></td>
+                </tr>`;
+            }).join('');
+        }
+
+        async function loadInvoicePaymentSuggestions() {
+            if(!invoicePaymentSuggestionsEnabled || invoicePaymentSuggestionsLoading) return;
+            const body = document.getElementById('aiPaymentSuggestionsBody');
+            const statusBox = document.getElementById('aiPaymentSuggestionsStatus');
+            const refreshButton = document.getElementById('aiPaymentSuggestionsRefresh');
+            if(!body || !statusBox) return;
+            invoicePaymentSuggestionsLoading = true;
+            if(refreshButton) refreshButton.disabled = true;
+            statusBox.className = 'alert alert-light border small py-2 mb-3';
+            statusBox.textContent = 'Loading AI payment suggestions...';
+            body.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">Loading suggestions...</td></tr>';
+            try {
+                const response = await fetch('/api/invoice-payment-suggestions', {cache: 'no-store'});
+                const data = await response.json().catch(() => ({status: 'error', message: 'Server returned an invalid response.'}));
+                if(!response.ok || data?.status === 'error') throw new Error(data?.message || 'Could not load AI payment suggestions.');
+                renderInvoicePaymentSuggestions(data);
+            } catch(error) {
+                statusBox.className = 'alert alert-danger small py-2 mb-3';
+                statusBox.innerHTML = `<strong>Could not load suggestions:</strong> ${escapeJsHtml(error.message || 'Please try again.')}`;
+                body.innerHTML = '<tr><td colspan="9" class="text-center text-danger py-4">Suggestions could not be loaded. Select Refresh to try again.</td></tr>';
+                ['aiPaymentPendingCount','aiPaymentPendingAmount','aiPaymentAcceptedCount','aiPaymentRejectedCount'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if(el) el.textContent = '–';
+                });
+            } finally {
+                invoicePaymentSuggestionsLoading = false;
+                if(refreshButton) refreshButton.disabled = false;
+            }
+        }
+
+        async function reviewInvoicePaymentSuggestion(suggestionId, action, button) {
+            if(!canReviewInvoicePaymentSuggestions) return alert('Full Invoicing access is required to review payment suggestions.');
+            const suggestion = invoicePaymentSuggestionsById[Number(suggestionId)] || {};
+            const isAccept = action === 'accept';
+            const invoiceNumber = suggestion.invoice_number ?? suggestion.formatted_invoice_number ?? suggestion.detected_invoice_number ?? 'the proposed invoice';
+            const actionLabel = isAccept ? 'accept this suggestion and record the invoice payment' : 'reject this payment suggestion';
+            if(!confirm(`Are you sure you want to ${actionLabel} for ${invoiceNumber}?`)) return;
+            if(button) button.disabled = true;
+            try {
+                const response = await fetch(`/api/invoice-payment-suggestions/${encodeURIComponent(suggestionId)}/${isAccept ? 'accept' : 'reject'}`, {method: 'POST'});
+                const data = await response.json().catch(() => ({status: 'error', message: 'Server returned an invalid response.'}));
+                if(!response.ok || data?.status === 'error') throw new Error(data?.message || `Could not ${action} the payment suggestion.`);
+                await loadInvoicePaymentSuggestions();
+                await refreshInvoicingLists();
+                alert(data?.message || (isAccept ? 'Payment suggestion accepted and the invoice payment was recorded.' : 'Payment suggestion rejected.'));
+            } catch(error) {
+                const statusBox = document.getElementById('aiPaymentSuggestionsStatus');
+                if(statusBox) {
+                    statusBox.className = 'alert alert-danger small py-2 mb-3';
+                    statusBox.innerHTML = `<strong>Review failed:</strong> ${escapeJsHtml(error.message || 'Please try again.')}`;
+                }
+                alert(error.message || `Could not ${action} the payment suggestion.`);
+                if(button) button.disabled = false;
+            }
         }
 
         function renderServiceMarginsTable(services) {
@@ -2709,6 +2914,8 @@
                     btn.innerText = "📧 Email Document"; btn.disabled = false;
                 });
         }
+
+        if(invoicePaymentSuggestionsEnabled) loadInvoicePaymentSuggestions();
 
     </script>
     <script src="{{ url_for('static', filename='easyadmin-formatters.js') }}?v=20260622-format"></script>
