@@ -33,7 +33,7 @@ from app_modules.pagination import get_page_args, like_filter, pagination_meta
 from app_modules.jobs import job_manager
 from app_modules.db_compat import connect_database, is_postgres_enabled, table_exists as compat_table_exists, table_columns as compat_table_columns
 from app_modules.pdf_standard import validate_pdf_bytes as _standard_validate_pdf_bytes, build_table_report_pdf as _standard_table_pdf, build_payslip_pdf as _standard_payslip_pdf, build_irp5_pdf as _standard_irp5_pdf
-from app_modules import cashbook_ai, sars_compliance
+from app_modules import bank_exports, cashbook_ai, sars_compliance
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -2959,6 +2959,11 @@ def init_db():
         try: conn.execute(sql)
         except sqlite3.Error: pass
 
+    # Global, versioned bank-payment export definitions are seeded once and are
+    # managed only from Super Admin Controls. They are declarative data; no bank
+    # report file, script or uploaded code is executed by Easy Admin.
+    bank_exports.ensure_schema(conn, actor='system')
+
     conn.commit()
     conn.close()
 
@@ -5365,7 +5370,9 @@ def restrict_access():
     if path.startswith('/admin/'):
         if not session.get('is_company_admin'):
             return "Access Denied: Admin privileges required.", 403
-        if path in ['/admin/companies', '/admin/companies/save', '/admin/switch_company', '/admin/tax_config', '/admin/holidays'] or path.startswith('/admin/ai-config'):
+        if (path in ['/admin/companies', '/admin/companies/save', '/admin/switch_company', '/admin/tax_config', '/admin/holidays']
+                or path.startswith('/admin/ai-config')
+                or path.startswith('/admin/bank-export-templates')):
             return "Access Denied: Superadmin privileges required.", 403
         return 
 
@@ -14395,6 +14402,7 @@ def payroll_index():
     interviews = conn.execute("SELECT * FROM interviews WHERE company_id=? ORDER BY interview_datetime DESC", (cid,)).fetchall() if can_hiring else []
     interview_scorecard = get_tenant_scorecard_template(conn, cid)
     interview_scorecard_max_score = get_scorecard_max_score(interview_scorecard)
+    bank_export_template_options = get_bank_export_templates(conn)
     
     conn.close()
     return render_template(
@@ -14411,6 +14419,7 @@ def payroll_index():
         can_hiring=can_hiring,
         can_hr_payroll_write=can_hr_payroll_write,
         can_hiring_write=can_hiring_write,
+        bank_export_templates=bank_export_template_options,
         session=session
     )
 
@@ -14776,6 +14785,295 @@ def email_payslip():
         return jsonify({"message": f"Error sending email: {str(e)}"}), 500
 
 
+def _bank_export_version_by_number(conn, template_key, version_number):
+    try:
+        wanted = int(version_number)
+    except (TypeError, ValueError):
+        return None
+    for version in bank_exports.get_versions(conn, template_key):
+        if int(version.get('version_number') or 0) == wanted:
+            return version
+    return None
+
+
+def _bank_export_admin_result(message, *, error=False, template_key=None, version_number=None, preview=False):
+    session['bank_export_error' if error else 'bank_export_success'] = str(message or '')[:1200]
+    params = {}
+    if template_key:
+        params['template'] = template_key
+    if version_number:
+        params['version'] = version_number
+    if preview:
+        params['preview'] = '1'
+    return redirect(url_for('admin_bank_export_templates', **params))
+
+
+def _log_bank_export_action(action, details, record_id=None, app_name='System'):
+    try:
+        log_action(
+            app_name,
+            action,
+            details,
+            record_type='bank_export_template',
+            record_id=record_id,
+        )
+    except Exception:
+        # Template lifecycle events are committed in their dedicated event table.
+        # A secondary audit-log outage must not make a completed update look failed.
+        app.logger.exception('Failed to write secondary bank export audit event')
+
+
+@app.route('/admin/bank-export-templates', methods=['GET'])
+def admin_bank_export_templates():
+    if not session.get('is_superadmin'):
+        return 'Access Denied: Only Super Admins can manage Bank Payment Export Templates.', 403
+    conn = get_db_connection()
+    try:
+        templates = bank_exports.list_templates(conn, include_inactive=True)
+        new_mode = request.args.get('new') == '1'
+        selected_template = None
+        selected_version = None
+        versions = []
+        definition = bank_exports.blank_definition()
+        preview = ''
+
+        if not new_mode and templates:
+            requested_key = (request.args.get('template') or '').strip().lower()
+            selected_template = next(
+                (item for item in templates if item.get('template_key') == requested_key),
+                templates[0],
+            )
+            template_key = selected_template.get('template_key')
+            versions = bank_exports.get_versions(conn, template_key)
+            requested_number = request.args.get('version')
+            if requested_number:
+                selected_version = _bank_export_version_by_number(conn, template_key, requested_number)
+            if not selected_version:
+                selected_version = next((item for item in versions if item.get('status') == 'draft'), None)
+            if not selected_version and selected_template.get('active_version_id'):
+                selected_version = bank_exports.get_version(conn, selected_template.get('active_version_id'))
+            if not selected_version and versions:
+                selected_version = versions[0]
+            if selected_version and selected_version.get('definition'):
+                definition = selected_version['definition']
+                if request.args.get('preview') == '1':
+                    sample_rows = bank_exports.synthetic_rows(definition)
+                    sample_context = {
+                        'company_id': 'TEST',
+                        'company_name': 'EasyAdminTest',
+                        'period': datetime.now().strftime('%Y-%m'),
+                        'template_key': template_key,
+                    }
+                    issues = bank_exports.validate_rows(definition, sample_rows, context=sample_context)
+                    if not issues:
+                        preview = bank_exports.render_export(definition, sample_rows, context=sample_context)
+
+        return render_template(
+            'admin_bank_export_templates.html',
+            templates=templates,
+            selected_template=selected_template,
+            selected_version=selected_version,
+            versions=versions,
+            definition=definition,
+            source_fields=bank_exports.SOURCE_FIELD_OPTIONS,
+            format_options=bank_exports.FORMAT_OPTIONS,
+            preview=preview,
+            success_msg=session.pop('bank_export_success', None),
+            error_msg=session.pop('bank_export_error', None),
+            session=session,
+        )
+    finally:
+        conn.close()
+
+
+@app.route('/admin/bank-export-templates/save', methods=['POST'])
+def admin_bank_export_template_save():
+    if not session.get('is_superadmin'):
+        return 'Access Denied: Only Super Admins can manage Bank Payment Export Templates.', 403
+    template_key = (request.form.get('template_key') or '').strip().lower()
+    try:
+        raw_definition = request.form.get('definition_json') or ''
+        if len(raw_definition) > 100000:
+            raise bank_exports.BankExportError('The bank export template definition is too large.')
+        definition = json.loads(raw_definition)
+    except json.JSONDecodeError:
+        return _bank_export_admin_result('The bank export template definition is not valid.', error=True, template_key=template_key)
+    except bank_exports.BankExportError as exc:
+        return _bank_export_admin_result(str(exc), error=True, template_key=template_key)
+
+    conn = get_db_connection()
+    try:
+        saved = bank_exports.save_draft(
+            conn,
+            template_key,
+            definition,
+            version_id=(request.form.get('version_id') or None),
+            display_name=request.form.get('display_name'),
+            bank_name=request.form.get('bank_name'),
+            description=request.form.get('description'),
+            change_note=request.form.get('change_note'),
+            source_reference_url=request.form.get('source_reference_url'),
+            source_document_name=request.form.get('source_document_name'),
+            actor=session.get('username'),
+        )
+        version_number = saved.get('version_number')
+        _log_bank_export_action(
+            'Saved Bank Export Template Draft',
+            f"Saved {template_key} version {version_number} as a draft.",
+            record_id=saved.get('template_id'),
+        )
+        return _bank_export_admin_result(
+            f"Draft version {version_number} saved. Test it before activation.",
+            template_key=template_key,
+            version_number=version_number,
+        )
+    except bank_exports.BankExportError as exc:
+        conn.rollback()
+        return _bank_export_admin_result(str(exc), error=True, template_key=template_key)
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Failed to save bank export template draft')
+        return _bank_export_admin_result('The bank export template could not be saved. Please try again.', error=True, template_key=template_key)
+    finally:
+        conn.close()
+
+
+@app.route('/admin/bank-export-templates/<template_key>/<int:version_number>/test', methods=['POST'])
+def admin_bank_export_template_test(template_key, version_number):
+    if not session.get('is_superadmin'):
+        return 'Access Denied: Only Super Admins can manage Bank Payment Export Templates.', 403
+    conn = get_db_connection()
+    try:
+        version = _bank_export_version_by_number(conn, template_key, version_number)
+        if not version:
+            raise bank_exports.BankExportError('Template version was not found.')
+        result = bank_exports.test_version(conn, version['id'], actor=session.get('username'))
+        if not result.get('valid'):
+            messages = [str(item.get('message') or '') for item in result.get('errors', [])[:5]]
+            message = 'Test failed. ' + ' '.join(message for message in messages if message)
+            return _bank_export_admin_result(message, error=True, template_key=template_key, version_number=version_number)
+        _log_bank_export_action(
+            'Tested Bank Export Template',
+            f"Tested {template_key} version {version_number}; {result.get('byte_length', 0)} output bytes.",
+            record_id=version.get('template_id'),
+        )
+        return _bank_export_admin_result(
+            f"Version {version_number} passed validation and is ready to activate.",
+            template_key=template_key,
+            version_number=version_number,
+            preview=True,
+        )
+    except bank_exports.BankExportError as exc:
+        conn.rollback()
+        return _bank_export_admin_result(str(exc), error=True, template_key=template_key, version_number=version_number)
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Failed to test bank export template')
+        return _bank_export_admin_result('The template test could not be completed.', error=True, template_key=template_key, version_number=version_number)
+    finally:
+        conn.close()
+
+
+@app.route('/admin/bank-export-templates/<template_key>/<int:version_number>/activate', methods=['POST'])
+def admin_bank_export_template_activate(template_key, version_number):
+    if not session.get('is_superadmin'):
+        return 'Access Denied: Only Super Admins can manage Bank Payment Export Templates.', 403
+    conn = get_db_connection()
+    try:
+        version = _bank_export_version_by_number(conn, template_key, version_number)
+        if not version:
+            raise bank_exports.BankExportError('Template version was not found.')
+        bank_exports.activate_version(
+            conn,
+            template_key,
+            version['id'],
+            actor=session.get('username'),
+            change_note=request.form.get('activation_note'),
+        )
+        _log_bank_export_action(
+            'Activated Bank Export Template',
+            f"Activated {template_key} version {version_number} for future payroll downloads.",
+            record_id=version.get('template_id'),
+        )
+        return _bank_export_admin_result(
+            f"Version {version_number} is now active for future payroll downloads.",
+            template_key=template_key,
+            version_number=version_number,
+        )
+    except bank_exports.BankExportError as exc:
+        conn.rollback()
+        return _bank_export_admin_result(str(exc), error=True, template_key=template_key, version_number=version_number)
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Failed to activate bank export template')
+        return _bank_export_admin_result('The bank export template could not be activated.', error=True, template_key=template_key, version_number=version_number)
+    finally:
+        conn.close()
+
+
+@app.route('/admin/bank-export-templates/<template_key>/rollback', methods=['POST'])
+def admin_bank_export_template_rollback(template_key):
+    if not session.get('is_superadmin'):
+        return 'Access Denied: Only Super Admins can manage Bank Payment Export Templates.', 403
+    conn = get_db_connection()
+    try:
+        restored = bank_exports.rollback_template(
+            conn,
+            template_key,
+            actor=session.get('username'),
+            change_note=request.form.get('change_note'),
+        )
+        version_number = restored.get('version_number')
+        _log_bank_export_action(
+            'Rolled Back Bank Export Template',
+            f"Rolled {template_key} back to version {version_number}.",
+            record_id=restored.get('id'),
+        )
+        return _bank_export_admin_result(
+            f"{template_key} was rolled back to version {version_number}.",
+            template_key=template_key,
+            version_number=version_number,
+        )
+    except bank_exports.BankExportError as exc:
+        conn.rollback()
+        return _bank_export_admin_result(str(exc), error=True, template_key=template_key)
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Failed to roll back bank export template')
+        return _bank_export_admin_result('The bank export template could not be rolled back.', error=True, template_key=template_key)
+    finally:
+        conn.close()
+
+
+@app.route('/admin/bank-export-templates/<template_key>/toggle', methods=['POST'])
+def admin_bank_export_template_toggle(template_key):
+    if not session.get('is_superadmin'):
+        return 'Access Denied: Only Super Admins can manage Bank Payment Export Templates.', 403
+    enabled = str(request.form.get('enabled') or '').strip() == '1'
+    conn = get_db_connection()
+    try:
+        updated = bank_exports.set_template_active(conn, template_key, enabled, actor=session.get('username'))
+        state = 'enabled' if enabled else 'disabled'
+        _log_bank_export_action(
+            'Changed Bank Export Template Availability',
+            f"{template_key} was {state} for payroll downloads.",
+            record_id=updated.get('id'),
+        )
+        return _bank_export_admin_result(
+            f"{updated.get('display_name') or template_key} was {state}.",
+            template_key=template_key,
+        )
+    except bank_exports.BankExportError as exc:
+        conn.rollback()
+        return _bank_export_admin_result(str(exc), error=True, template_key=template_key)
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Failed to change bank export template availability')
+        return _bank_export_admin_result('The bank export template availability could not be changed.', error=True, template_key=template_key)
+    finally:
+        conn.close()
+
+
 def compose_bank_details(data):
     parts = [
         data.get('bank_name') or '',
@@ -14797,14 +15095,18 @@ def normalise_account_type(value):
         return 'Credit'
     return (value.title() if value else '')
 
-def get_bank_export_templates():
-    return {
-        'generic_csv': 'Generic CSV',
-        'fnb_enterprise_csv': 'FNB Enterprise CSV',
-        'absa_bio_csv': 'ABSA BIO CSV',
-        'standard_bank_bol_csv': 'Standard Bank Business Online CSV',
-        'nedbank_acb_csv': 'Nedbank / ACB-style CSV'
-    }
+def get_bank_export_templates(conn=None):
+    should_close = conn is None
+    if conn is None:
+        conn = get_db_connection()
+    try:
+        return {
+            item['template_key']: item['display_name']
+            for item in bank_exports.get_active_templates(conn)
+        }
+    finally:
+        if should_close:
+            conn.close()
 
 def payroll_payment_rows(conn, company_id, month_str):
     # Bank exports use finalised ledger rows only. Historical adjustment rows remain included.
@@ -14820,42 +15122,40 @@ def payroll_payment_rows(conn, company_id, month_str):
         ORDER BY e.name ASC
     ''', (company_id, f"{month_str}%")).fetchall()
 
-def validate_payroll_bank_rows(rows):
-    missing = []
-    for r in rows:
-        required = ['bank_name', 'account_holder', 'account_number', 'branch_code', 'account_type']
-        empty = [f for f in required if not str(r[f] or '').strip()]
-        if empty:
-            missing.append(f"{r['name']}: " + ', '.join(empty))
-    return missing
+def validate_payroll_bank_rows(rows, definition=None, month_str='', company_name='Company'):
+    if definition is None:
+        conn = get_db_connection()
+        try:
+            template = bank_exports.get_export_template(conn, 'generic_csv')
+        finally:
+            conn.close()
+        definition = template.get('definition') if template else bank_exports.blank_definition()
+    issues = bank_exports.validate_rows(
+        definition,
+        rows,
+        context={'period': month_str, 'company_name': company_name},
+    )
+    return [str(issue.get('message') or 'Invalid bank payment row.') for issue in issues]
+
 
 def build_payroll_bank_csv(rows, template_key, month_str, company_name):
-    si = io.StringIO()
-    cw = csv.writer(si)
-    label = get_bank_export_templates().get(template_key, 'Generic CSV')
-
-    if template_key == 'fnb_enterprise_csv':
-        cw.writerow(['Recipient Name', 'Bank Name', 'Account Number', 'Branch Code', 'Account Type', 'Amount', 'Recipient Reference', 'Own Reference'])
-        for r in rows:
-            cw.writerow([r['account_holder'] or r['name'], r['bank_name'], r['account_number'], r['branch_code'], normalise_account_type(r['account_type']), f"{float(r['net_salary'] or 0):.2f}", r['payment_reference'] or f"Salary {month_str}", f"{company_name} Payroll"])
-    elif template_key == 'absa_bio_csv':
-        cw.writerow(['Account Holder', 'Bank', 'Branch Code', 'Account Number', 'Account Type', 'Amount', 'Statement Reference', 'Employee Number'])
-        for r in rows:
-            cw.writerow([r['account_holder'] or r['name'], r['bank_name'], r['branch_code'], r['account_number'], normalise_account_type(r['account_type']), f"{float(r['net_salary'] or 0):.2f}", r['payment_reference'] or f"Salary {month_str}", r['emp_number']])
-    elif template_key == 'standard_bank_bol_csv':
-        cw.writerow(['Beneficiary Name', 'Beneficiary Bank', 'Branch Code', 'Account Number', 'Account Type', 'Payment Amount', 'Reference'])
-        for r in rows:
-            cw.writerow([r['account_holder'] or r['name'], r['bank_name'], r['branch_code'], r['account_number'], normalise_account_type(r['account_type']), f"{float(r['net_salary'] or 0):.2f}", r['payment_reference'] or f"Salary {month_str}"])
-    elif template_key == 'nedbank_acb_csv':
-        cw.writerow(['Record Type', 'Account Name', 'Bank', 'Branch Code', 'Account Number', 'Account Type', 'Amount', 'Reference'])
-        for r in rows:
-            cw.writerow(['PAYMENT', r['account_holder'] or r['name'], r['bank_name'], r['branch_code'], r['account_number'], normalise_account_type(r['account_type']), f"{float(r['net_salary'] or 0):.2f}", r['payment_reference'] or f"Salary {month_str}"])
-    else:
-        cw.writerow(['Employee Number', 'Employee Name', 'Bank Name', 'Account Holder', 'Account Number', 'Branch Code', 'Account Type', 'Amount', 'Payment Reference'])
-        for r in rows:
-            cw.writerow([r['emp_number'], r['name'], r['bank_name'], r['account_holder'] or r['name'], r['account_number'], r['branch_code'], normalise_account_type(r['account_type']), f"{float(r['net_salary'] or 0):.2f}", r['payment_reference'] or f"Salary {month_str}"])
-
-    return si.getvalue(), label
+    conn = get_db_connection()
+    try:
+        template = bank_exports.get_export_template(conn, template_key)
+    finally:
+        conn.close()
+    if not template:
+        raise bank_exports.BankExportError('Unknown or disabled bank export template.')
+    content = bank_exports.render_export(
+        template['definition'],
+        rows,
+        context={
+            'period': month_str,
+            'company_name': company_name,
+            'template_key': template_key,
+        },
+    )
+    return content, template['display_name']
 
 @app.route('/update_employee', methods=['POST'])
 def update_employee():
@@ -16618,29 +16918,63 @@ def export_payroll_bank_file():
     if not _session_has_payroll_read_access():
         return "Forbidden", 403
     month_str = (request.args.get('month') or '').strip()
-    template_key = (request.args.get('template') or 'generic_csv').strip()
-    templates = get_bank_export_templates()
-    if template_key not in templates:
-        return jsonify({"message": "Unknown bank export template."}), 400
-    if not month_str or len(month_str) != 7:
+    template_key = (request.args.get('template') or 'generic_csv').strip().lower()
+    if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', month_str):
         return jsonify({"message": "Payroll month must be in YYYY-MM format."}), 400
 
     conn = get_db_connection()
-    rows = payroll_payment_rows(conn, session['company_id'], month_str)
-    conn.close()
+    try:
+        template = bank_exports.get_export_template(conn, template_key)
+        if not template:
+            return jsonify({"message": "Unknown or disabled bank export template."}), 400
+        rows = payroll_payment_rows(conn, session['company_id'], month_str)
+    finally:
+        conn.close()
 
     if not rows:
         return jsonify({"message": "No saved payslips found for the selected month. Save payslips to the ledger first."}), 400
 
-    missing = validate_payroll_bank_rows(rows)
-    if missing:
-        return jsonify({"message": "Bank details missing or incomplete.", "missing": missing}), 400
+    company_name = session.get('company_name', 'Company')
+    context = {
+        'company_id': session.get('company_id'),
+        'company_name': company_name,
+        'period': month_str,
+        'current_date': datetime.now().strftime('%Y-%m-%d'),
+        'template_key': template_key,
+    }
+    issues = bank_exports.validate_rows(template['definition'], rows, context=context)
+    if issues:
+        messages = [str(issue.get('message') or 'Invalid payment row.') for issue in issues]
+        return jsonify({
+            "message": "Bank payment data does not meet the selected bank format. No partial file was generated.",
+            "missing": messages,
+        }), 400
 
-    csv_data, label = build_payroll_bank_csv(rows, template_key, month_str, session.get('company_name', 'Company'))
-    log_action('HR & Payroll', 'Exported Payroll Bank File', f"Exported {label} for {month_str}")
-    output = Response(csv_data, mimetype='text/csv')
-    safe_label = template_key.replace('/', '_')
-    output.headers['Content-Disposition'] = f'attachment; filename=Payroll_Bank_Export_{safe_label}_{month_str}.csv'
+    try:
+        file_bytes = bank_exports.render_export_bytes(template['definition'], rows, context=context)
+        filename = bank_exports.build_filename(template, context=context)
+    except bank_exports.BankExportValidationError as exc:
+        return jsonify({
+            "message": "Bank payment data does not meet the selected bank format. No partial file was generated.",
+            "missing": [str(issue.get('message') or 'Invalid payment row.') for issue in exc.issues],
+        }), 400
+    except bank_exports.BankExportError:
+        app.logger.exception('Active bank export template is invalid')
+        return jsonify({"message": "The selected bank format is not valid. Ask the Super Admin to review and test it."}), 400
+
+    row_count = len(rows)
+    total_value = sum(float(row['net_salary'] or 0) for row in rows)
+    version_number = template.get('version_number') or ''
+    _log_bank_export_action(
+        'Exported Payroll Bank File',
+        f"Exported {template['display_name']} version {version_number} for {month_str}; {row_count} payment(s), total R{total_value:.2f}.",
+        record_id=template.get('id'),
+        app_name='HR & Payroll',
+    )
+    encoding = template['definition'].get('encoding') or 'utf-8'
+    output = Response(file_bytes, content_type=f'text/csv; charset={encoding}')
+    output.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    output.headers['Cache-Control'] = 'private, no-store, no-cache, must-revalidate, max-age=0'
     return output
 
 def _build_employee_activity_report(emp_id, emp_name, s_date, e_date):

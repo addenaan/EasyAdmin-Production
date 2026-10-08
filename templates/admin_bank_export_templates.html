@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bank Payment Export Templates | Easy Admin</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; padding-top: 30px; font-family: Arial, sans-serif; }
+        .settings-card { background: #fff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,.05); margin-bottom: 20px; }
+        .section-header { border-bottom: 2px solid #dee2e6; padding-bottom: 10px; margin-bottom: 20px; color: #212529; font-weight: bold; }
+        .template-table th { white-space: nowrap; }
+        .template-table td { vertical-align: middle; }
+        .selected-row > * { background-color: #fff7d6 !important; }
+        .column-row { border: 1px solid #dee2e6; border-radius: 8px; background: #f8f9fa; padding: 16px; margin-bottom: 12px; }
+        .column-number { min-width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; }
+        .form-label { margin-bottom: .35rem; }
+        .csv-preview { background: #111827; color: #e5e7eb; border-radius: 8px; min-height: 130px; max-height: 420px; overflow: auto; padding: 18px; white-space: pre; tab-size: 4; font: 13px/1.5 Consolas, "Courier New", monospace; }
+        .action-form { display: inline-block; margin: 2px 0; }
+        .sticky-save { position: sticky; bottom: 12px; z-index: 10; }
+        .sticky-save .inner { background: rgba(255,255,255,.96); backdrop-filter: blur(3px); border: 1px solid #dee2e6; border-radius: 10px; padding: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+        .required-mark { color: #dc3545; }
+        .small-note { font-size: .82rem; }
+        @media (max-width: 767.98px) {
+            body { padding-top: 16px; }
+            .settings-card { padding: 18px; }
+            .page-actions { margin-top: 12px; }
+        }
+    </style>
+</head>
+<body>
+    {% set current_key = (selected_template.template_key or selected_template.key or '') if selected_template else '' %}
+    {% set current_version = (selected_version.version_number or selected_version.version or '') if selected_version else '' %}
+    {% set current_definition = definition or {} %}
+    {% set editor_display_name = (selected_version.display_name or selected_template.display_name or '') if selected_version and selected_template else (selected_template.display_name or '' if selected_template else '') %}
+    {% set editor_bank_name = (selected_version.bank_name or selected_template.bank_name or '') if selected_version and selected_template else (selected_template.bank_name or '' if selected_template else '') %}
+    {% set editor_description = (selected_version.description if selected_version.description is not none else selected_template.description) if selected_version and selected_template else (selected_template.description or '' if selected_template else '') %}
+
+    <div class="container-fluid mb-5" style="max-width: 1500px;">
+        <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center mb-4 pb-3 border-bottom">
+            <div>
+                <h2 class="mb-0 fw-bold">Bank Payment Export Templates</h2>
+                <span class="text-muted">Super Admin management of the bank files available in Payroll</span>
+            </div>
+            <div class="page-actions d-flex gap-2">
+                <a href="/admin/bank-export-templates?new=1" class="btn btn-success fw-bold">＋ New Template</a>
+                <a href="/hub" class="btn btn-secondary fw-bold">🔙 Back to Hub</a>
+            </div>
+        </div>
+
+        {% if success_msg %}
+        <div class="alert alert-success shadow-sm fw-bold">✅ {{ success_msg }}</div>
+        {% endif %}
+        {% if error_msg %}
+        <div class="alert alert-danger shadow-sm fw-bold">❌ {{ error_msg }}</div>
+        {% endif %}
+
+        <div class="alert alert-warning small shadow-sm">
+            <strong>Security:</strong> these templates contain structured field mappings only. Easy Admin does not accept executable report definitions, scripts, macros, SQL, or bank-program files. A new version must be tested before it is activated.
+        </div>
+
+        <div class="settings-card border-top border-dark border-4">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h4 class="section-header flex-grow-1 mb-0">🏦 Available Bank Formats</h4>
+            </div>
+            {% if templates %}
+            <div class="table-responsive mt-3">
+                <table class="table table-hover template-table mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Bank / Format</th>
+                            <th>Template Key</th>
+                            <th>Active Version</th>
+                            <th>Status</th>
+                            <th>Last Updated</th>
+                            <th class="text-end">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for item in templates %}
+                        {% set item_key = item.template_key or item.key %}
+                        {% set item_name = item.display_name or item.name or item_key %}
+                        {% set item_bank = item.bank_name or item.bank or '' %}
+                        {% set item_active_version = item.active_version_number or item.version_number or item.version or '—' %}
+                        {% set item_is_active = item.is_active %}
+                        <tr class="{% if item_key == current_key %}selected-row{% endif %}">
+                            <td>
+                                <div class="fw-bold">{{ item_name }}</div>
+                                {% if item_bank and item_bank != item_name %}<div class="small text-muted">{{ item_bank }}</div>{% endif %}
+                            </td>
+                            <td><code>{{ item_key }}</code></td>
+                            <td>v{{ item_active_version }}</td>
+                            <td>
+                                {% if item_is_active %}
+                                <span class="badge text-bg-success">Available in Payroll</span>
+                                {% else %}
+                                <span class="badge text-bg-secondary">Disabled</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div>{{ item.updated_at or item.created_at or '—' }}</div>
+                                {% if item.updated_by %}<div class="small text-muted">by {{ item.updated_by }}</div>{% endif %}
+                            </td>
+                            <td class="text-end">
+                                <a href="/admin/bank-export-templates?template={{ item_key }}" class="btn btn-sm btn-outline-dark">View / Edit</a>
+                                {% if item_active_version != '—' %}
+                                <form method="post" action="/admin/bank-export-templates/{{ item_key }}/rollback" class="action-form" onsubmit="return confirmRollback(this);">
+                                    <button type="submit" class="btn btn-sm btn-outline-warning">Roll Back</button>
+                                </form>
+                                {% endif %}
+                                <form method="post" action="/admin/bank-export-templates/{{ item_key }}/toggle" class="action-form" onsubmit="return confirmToggle({{ 'true' if item_is_active else 'false' }});">
+                                    <input type="hidden" name="enabled" value="{{ '0' if item_is_active else '1' }}">
+                                    <button type="submit" class="btn btn-sm {% if item_is_active %}btn-outline-danger{% else %}btn-outline-success{% endif %}">
+                                        {{ 'Disable' if item_is_active else 'Enable' }}
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="text-center text-muted py-4">
+                No bank payment export templates are available yet. Select <strong>New Template</strong> to create the first one.
+            </div>
+            {% endif %}
+        </div>
+
+        <form method="post" action="/admin/bank-export-templates/save" id="templateEditorForm" novalidate>
+            <input type="hidden" name="definition_json" id="definitionJson">
+            <input type="hidden" name="version_id" value="{{ selected_version.id if selected_version and selected_version.status == 'draft' else '' }}">
+
+            <div class="settings-card border-top border-primary border-4">
+                <h4 class="section-header">
+                    {% if current_key %}✏️ Create Draft Version for {{ selected_template.display_name or selected_template.name or current_key }}{% else %}➕ New Bank Export Template{% endif %}
+                </h4>
+                <div class="alert alert-info small">
+                    Saving an existing template creates or updates a <strong>draft version</strong>. It does not alter the active Payroll export until that version is tested and activated.
+                </div>
+
+                <div class="row">
+                    <div class="col-lg-4 mb-3">
+                        <label for="templateKey" class="form-label fw-bold small">Template Key <span class="required-mark">*</span></label>
+                        <input type="text" class="form-control" id="templateKey" name="template_key" value="{{ current_key }}" placeholder="e.g., capitec_business_acb_csv" pattern="[a-z][a-z0-9_]{1,63}" {% if current_key %}readonly{% endif %} required>
+                        <div class="form-text">Use 2–64 lowercase letters, numbers and underscores, starting with a letter. It cannot be changed after creation.</div>
+                    </div>
+                    <div class="col-lg-4 mb-3">
+                        <label for="displayName" class="form-label fw-bold small">Display Name <span class="required-mark">*</span></label>
+                        <input type="text" class="form-control" id="displayName" name="display_name" value="{{ editor_display_name }}" placeholder="e.g., Capitec Business ACB (CSV)" required>
+                    </div>
+                    <div class="col-lg-4 mb-3">
+                        <label for="bankName" class="form-label fw-bold small">Bank Name <span class="required-mark">*</span></label>
+                        <input type="text" class="form-control" id="bankName" name="bank_name" value="{{ editor_bank_name }}" placeholder="e.g., Capitec Business" required>
+                    </div>
+                    <div class="col-lg-8 mb-3">
+                        <label for="description" class="form-label fw-bold small">Description</label>
+                        <textarea class="form-control" id="description" name="description" rows="2" placeholder="Describe when this format must be used.">{{ editor_description }}</textarea>
+                    </div>
+                    <div class="col-lg-4 mb-3">
+                        <label for="sourceReferenceUrl" class="form-label fw-bold small">Specification Reference URL</label>
+                        <input type="url" class="form-control" id="sourceReferenceUrl" name="source_reference_url" value="{{ selected_version.source_reference_url or '' if selected_version else '' }}" placeholder="https://...">
+                        <div class="form-text">For audit reference only. Easy Admin does not fetch or execute this content.</div>
+                    </div>
+                    <div class="col-lg-8 mb-3">
+                        <label for="changeNote" class="form-label fw-bold small">Version Update Note <span class="required-mark">*</span></label>
+                        <input type="text" class="form-control" id="changeNote" name="change_note" value="" placeholder="Summarise what changed and why" required>
+                    </div>
+                    <div class="col-lg-4 mb-3">
+                        <label for="sourceDocumentName" class="form-label fw-bold small">Source Document Name</label>
+                        <input type="text" class="form-control" id="sourceDocumentName" name="source_document_name" value="{{ selected_version.source_document_name or '' if selected_version else '' }}" placeholder="e.g., Capitec ACB specification">
+                    </div>
+                </div>
+            </div>
+
+            <div class="settings-card border-top border-info border-4">
+                <h4 class="section-header">📄 File Format</h4>
+                <div class="row">
+                    <div class="col-md-3 col-lg-2 mb-3">
+                        <label for="delimiter" class="form-label fw-bold small">Delimiter <span class="required-mark">*</span></label>
+                        <select id="delimiter" class="form-select" required>
+                            <option value=",">Comma (,)</option>
+                            <option value=";">Semicolon (;)</option>
+                            <option value="\t">Tab</option>
+                            <option value="|">Pipe (|)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3 col-lg-2 mb-3">
+                        <label for="quoteMode" class="form-label fw-bold small">Quote Mode</label>
+                        <select id="quoteMode" class="form-select">
+                            <option value="minimal">When required</option>
+                            <option value="all">All fields</option>
+                            <option value="none">Never</option>
+                            <option value="nonnumeric">Quote non-numeric fields</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3 col-lg-2 mb-3">
+                        <label for="encoding" class="form-label fw-bold small">Encoding <span class="required-mark">*</span></label>
+                        <select id="encoding" class="form-select" required>
+                            <option value="utf-8">UTF-8</option>
+                            <option value="utf-8-sig">UTF-8 with BOM</option>
+                            <option value="ascii">ASCII</option>
+                            <option value="windows-1252">Windows-1252</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3 col-lg-2 mb-3">
+                        <label for="lineEnding" class="form-label fw-bold small">Line Ending <span class="required-mark">*</span></label>
+                        <select id="lineEnding" class="form-select" required>
+                            <option value="CRLF">Windows (CRLF)</option>
+                            <option value="LF">Unix (LF)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4 col-lg-2 mb-3">
+                        <label for="fileExtension" class="form-label fw-bold small">File Extension <span class="required-mark">*</span></label>
+                        <input type="text" id="fileExtension" class="form-control" value=".csv" placeholder=".csv" pattern="\.[A-Za-z0-9]{1,8}" required>
+                    </div>
+                    <div class="col-md-4 col-lg-2 mb-3 d-flex align-items-end">
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" role="switch" id="includeHeader">
+                            <label class="form-check-label fw-bold small" for="includeHeader">Include header row</label>
+                        </div>
+                    </div>
+                    <div class="col-md-8 mb-3">
+                        <label for="filenamePattern" class="form-label fw-bold small">Filename Pattern <span class="required-mark">*</span></label>
+                        <input type="text" id="filenamePattern" class="form-control" value="payroll_{company}_{month}" placeholder="payroll_{company}_{month}" required>
+                        <div class="form-text">Allowed placeholders are controlled by the server, for example <code>{company}</code>, <code>{month}</code>, and <code>{date}</code>.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="settings-card border-top border-success border-4">
+                <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center section-header">
+                    <div>
+                        <h4 class="mb-1 fw-bold">🧩 Export Columns</h4>
+                        <div class="small text-muted fw-normal">Rows are written from top to bottom, left to right, in this exact order.</div>
+                    </div>
+                    <button type="button" class="btn btn-success fw-bold mt-2 mt-md-0" id="addColumnButton">＋ Add Column</button>
+                </div>
+
+                <div id="columnRows"></div>
+                <div id="noColumnsMessage" class="text-center text-muted border rounded py-4 d-none">
+                    No columns have been configured. Add at least one column before saving.
+                </div>
+                <div class="alert alert-light border small mt-3 mb-0">
+                    A <strong>source field</strong> reads an approved payroll value. A <strong>literal value</strong> writes the same fixed value on every row. Use either a source field or a literal value, not both. Transformations are selected from the approved list only; custom code is not supported.
+                </div>
+            </div>
+
+            <div class="sticky-save mb-4">
+                <div class="inner d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-2">
+                    <div class="small text-muted">Saving keeps the version in draft status. Test it from Version History before activation.</div>
+                    <button type="submit" class="btn btn-dark btn-lg fw-bold px-5 shadow" id="saveTemplateButton">Save Draft Version</button>
+                </div>
+            </div>
+        </form>
+
+        {% if current_key %}
+        <div class="settings-card border-top border-warning border-4">
+            <h4 class="section-header">🧪 Version History and Testing</h4>
+            {% if versions %}
+            <div class="table-responsive">
+                <table class="table table-hover template-table mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Version</th>
+                            <th>Status</th>
+                            <th>Update Note</th>
+                            <th>Created</th>
+                            <th class="text-end">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for version_item in versions %}
+                        {% set version_no = version_item.version_number or version_item.version %}
+                        {% set version_status = (version_item.status or 'draft')|lower %}
+                        <tr class="{% if version_no|string == current_version|string %}selected-row{% endif %}">
+                            <td class="fw-bold">v{{ version_no }}</td>
+                            <td>
+                                {% if version_status == 'active' %}
+                                <span class="badge text-bg-success">Active</span>
+                                {% elif version_status == 'draft' or version_status == 'testing' %}
+                                <span class="badge text-bg-warning">{{ version_status|title }}</span>
+                                {% else %}
+                                <span class="badge text-bg-secondary">{{ version_status|title }}</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ version_item.change_note or '—' }}</td>
+                            <td>
+                                <div>{{ version_item.created_at or '—' }}</div>
+                                {% if version_item.created_by %}<div class="small text-muted">by {{ version_item.created_by }}</div>{% endif %}
+                            </td>
+                            <td class="text-end">
+                                <a href="/admin/bank-export-templates?template={{ current_key }}&version={{ version_no }}" class="btn btn-sm btn-outline-dark">View</a>
+                                <form method="post" action="/admin/bank-export-templates/{{ current_key }}/{{ version_no }}/test" class="action-form">
+                                    <button type="submit" class="btn btn-sm btn-outline-primary">Test &amp; Preview</button>
+                                </form>
+                                {% if version_status != 'active' %}
+                                <form method="post" action="/admin/bank-export-templates/{{ current_key }}/{{ version_no }}/activate" class="action-form" onsubmit="return confirmActivation('{{ current_key|e }}', '{{ version_no|e }}');">
+                                    <button type="submit" class="btn btn-sm btn-success">Activate</button>
+                                </form>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="text-center text-muted py-4">No saved versions are available for this template.</div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="settings-card border-top border-secondary border-4">
+            <div class="d-flex justify-content-between align-items-center section-header">
+                <div>
+                    <h4 class="mb-1 fw-bold">🔎 Exact CSV Preview</h4>
+                    <div class="small text-muted fw-normal">Generated with safe test data. Spaces, delimiters, quotes, and line breaks are shown exactly as produced.</div>
+                </div>
+                {% if preview %}<button type="button" class="btn btn-sm btn-outline-secondary" id="copyPreviewButton">Copy Preview</button>{% endif %}
+            </div>
+            {% if preview %}
+            <pre class="csv-preview mb-0" id="csvPreview">{{ preview }}</pre>
+            {% else %}
+            <div class="csv-preview text-secondary" id="csvPreview">No preview is available. Save the draft, then select “Test &amp; Preview” for that version.</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <template id="columnRowTemplate">
+        <div class="column-row" data-column-row>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge rounded-pill text-bg-dark column-number">1</span>
+                    <strong>Column</strong>
+                </div>
+                <div class="btn-group btn-group-sm" role="group" aria-label="Reorder or remove column">
+                    <button type="button" class="btn btn-outline-secondary move-up" title="Move up" aria-label="Move column up">↑</button>
+                    <button type="button" class="btn btn-outline-secondary move-down" title="Move down" aria-label="Move column down">↓</button>
+                    <button type="button" class="btn btn-outline-danger remove-column" title="Remove" aria-label="Remove column">Remove</button>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-4 col-lg-3 mb-3">
+                    <label class="form-label fw-bold small">Header / Field Name</label>
+                    <input type="text" class="form-control form-control-sm column-header" placeholder="e.g., Branch Code">
+                </div>
+                <div class="col-md-4 col-lg-3 mb-3">
+                    <label class="form-label fw-bold small">Source Field</label>
+                    <select class="form-select form-select-sm column-source"></select>
+                </div>
+                <div class="col-md-4 col-lg-3 mb-3">
+                    <label class="form-label fw-bold small">Format / Transformation</label>
+                    <select class="form-select form-select-sm column-format"></select>
+                </div>
+                <div class="col-md-4 col-lg-3 mb-3">
+                    <label class="form-label fw-bold small">Literal Value</label>
+                    <input type="text" class="form-control form-control-sm column-literal" placeholder="Optional fixed value">
+                </div>
+                <div class="col-6 col-md-3 col-lg-2 mb-3">
+                    <label class="form-label fw-bold small">Exact Length</label>
+                    <input type="number" min="1" step="1" class="form-control form-control-sm column-exact-length" placeholder="Optional">
+                </div>
+                <div class="col-6 col-md-3 col-lg-2 mb-3">
+                    <label class="form-label fw-bold small">Maximum Length</label>
+                    <input type="number" min="1" step="1" class="form-control form-control-sm column-max-length" placeholder="Optional">
+                </div>
+                <div class="col-6 col-md-3 col-lg-2 mb-3">
+                    <label class="form-label fw-bold small">Pad Character</label>
+                    <input type="text" maxlength="1" class="form-control form-control-sm column-pad-character" value="0">
+                </div>
+                <div class="col-md-4 col-lg-3 mb-3">
+                    <label class="form-label fw-bold small">Default if Empty</label>
+                    <input type="text" class="form-control form-control-sm column-default" placeholder="Optional default">
+                </div>
+                <div class="col-6 col-md-3 col-lg-2 mb-3">
+                    <label class="form-label fw-bold small">Minimum Value</label>
+                    <input type="number" step="0.01" class="form-control form-control-sm column-min-value" placeholder="Optional">
+                </div>
+                <div class="col-6 col-md-3 col-lg-2 mb-3">
+                    <label class="form-label fw-bold small">Maximum Value</label>
+                    <input type="number" step="0.01" class="form-control form-control-sm column-max-value" placeholder="Optional">
+                </div>
+                <div class="col-12 col-lg-3 mb-3 d-flex align-items-end">
+                    <div class="d-flex flex-wrap gap-3 pb-1">
+                        <div class="form-check">
+                            <input class="form-check-input column-required" type="checkbox">
+                            <label class="form-check-label small fw-bold">Required</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input column-pad-left" type="checkbox">
+                            <label class="form-check-label small fw-bold">Pad Left</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input column-truncate" type="checkbox">
+                            <label class="form-check-label small fw-bold">Allow Truncate</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <script>
+        const initialDefinition = {{ current_definition | tojson }};
+        const rawSourceFields = {{ (source_fields or {}) | tojson }};
+        const rawFormatOptions = {{ (format_options or {}) | tojson }};
+
+        const fallbackSourceFields = [
+            { value: '', label: 'None / Literal only' },
+            { value: 'branch_code', label: 'Branch Code' },
+            { value: 'account_number', label: 'Account Number' },
+            { value: 'account_holder', label: 'Account Holder' },
+            { value: 'net_salary', label: 'Net Salary' },
+            { value: 'payment_reference', label: 'Payment Reference' },
+            { value: 'beneficiary_reference', label: 'Beneficiary Reference' },
+            { value: 'surname_initials', label: 'Surname and Initials' }
+        ];
+        const fallbackFormatOptions = [
+            { value: '', label: 'No transformation' },
+            { value: 'trim', label: 'Trim spaces' },
+            { value: 'uppercase', label: 'Uppercase' },
+            { value: 'digits_only', label: 'Digits only' },
+            { value: 'fixed_2', label: 'Amount (2 decimals)' },
+            { value: 'alphanumeric', label: 'Letters and numbers only' }
+        ];
+
+        function normaliseOptions(raw, fallback) {
+            if (!raw || (Array.isArray(raw) && raw.length === 0) || (!Array.isArray(raw) && Object.keys(raw).length === 0)) {
+                return fallback;
+            }
+            if (Array.isArray(raw)) {
+                return raw.map(item => {
+                    if (typeof item === 'string') return { value: item, label: item };
+                    return {
+                        value: item.value ?? item.key ?? item.name ?? '',
+                        label: item.label ?? item.display_name ?? item.name ?? item.value ?? item.key ?? ''
+                    };
+                });
+            }
+            return Object.entries(raw).map(([value, label]) => ({
+                value,
+                label: typeof label === 'object' ? (label.label ?? label.display_name ?? value) : label
+            }));
+        }
+
+        const sourceFieldOptions = normaliseOptions(rawSourceFields, fallbackSourceFields);
+        const formatOptions = normaliseOptions(rawFormatOptions, fallbackFormatOptions);
+        const columnRows = document.getElementById('columnRows');
+        const noColumnsMessage = document.getElementById('noColumnsMessage');
+
+        function appendOptions(select, options, selectedValue, includeBlank) {
+            select.innerHTML = '';
+            if (includeBlank && !options.some(item => String(item.value) === '')) {
+                const blank = document.createElement('option');
+                blank.value = '';
+                blank.textContent = 'None';
+                select.appendChild(blank);
+            }
+            options.forEach(item => {
+                const option = document.createElement('option');
+                option.value = String(item.value ?? '');
+                option.textContent = String(item.label ?? item.value ?? '');
+                option.selected = String(item.value ?? '') === String(selectedValue ?? '');
+                select.appendChild(option);
+            });
+            if (selectedValue && !Array.from(select.options).some(option => option.value === String(selectedValue))) {
+                const legacyOption = document.createElement('option');
+                legacyOption.value = String(selectedValue);
+                legacyOption.textContent = String(selectedValue) + ' (existing value)';
+                legacyOption.selected = true;
+                select.appendChild(legacyOption);
+            }
+        }
+
+        function setNumberValue(input, value) {
+            input.value = value === null || value === undefined || value === '' ? '' : value;
+        }
+
+        function addColumn(column = {}) {
+            const fragment = document.getElementById('columnRowTemplate').content.cloneNode(true);
+            const row = fragment.querySelector('[data-column-row]');
+            row.querySelector('.column-header').value = column.header ?? column.name ?? '';
+            appendOptions(row.querySelector('.column-source'), sourceFieldOptions, column.source ?? '', true);
+            appendOptions(row.querySelector('.column-format'), formatOptions, column.format ?? '', true);
+            row.querySelector('.column-literal').value = column.literal ?? '';
+            setNumberValue(row.querySelector('.column-exact-length'), column.exact_length);
+            setNumberValue(row.querySelector('.column-max-length'), column.max_length);
+            row.querySelector('.column-pad-character').value = column.pad_character ?? '0';
+            row.querySelector('.column-default').value = column.default ?? '';
+            row.querySelector('.column-min-value').value = column.min_value ?? '';
+            row.querySelector('.column-max-value').value = column.max_value ?? '';
+            row.querySelector('.column-required').checked = Boolean(column.required);
+            row.querySelector('.column-pad-left').checked = Boolean(column.pad_left);
+            row.querySelector('.column-truncate').checked = Boolean(column.truncate);
+            row.querySelector('.remove-column').addEventListener('click', () => {
+                row.remove();
+                refreshColumnNumbers();
+            });
+            row.querySelector('.move-up').addEventListener('click', () => {
+                const previous = row.previousElementSibling;
+                if (previous) columnRows.insertBefore(row, previous);
+                refreshColumnNumbers();
+            });
+            row.querySelector('.move-down').addEventListener('click', () => {
+                const next = row.nextElementSibling;
+                if (next) columnRows.insertBefore(next, row);
+                refreshColumnNumbers();
+            });
+            columnRows.appendChild(fragment);
+            refreshColumnNumbers();
+        }
+
+        function refreshColumnNumbers() {
+            const rows = Array.from(columnRows.querySelectorAll('[data-column-row]'));
+            rows.forEach((row, index) => {
+                row.querySelector('.column-number').textContent = String(index + 1);
+                row.querySelector('.move-up').disabled = index === 0;
+                row.querySelector('.move-down').disabled = index === rows.length - 1;
+            });
+            noColumnsMessage.classList.toggle('d-none', rows.length !== 0);
+        }
+
+        function setSelectValue(selectId, value, fallbackValue) {
+            const select = document.getElementById(selectId);
+            const candidate = value ?? fallbackValue;
+            const serialised = candidate === '\t' ? '\\t' : String(candidate);
+            if (!Array.from(select.options).some(option => option.value === serialised)) {
+                const option = document.createElement('option');
+                option.value = serialised;
+                option.textContent = serialised + ' (existing value)';
+                select.appendChild(option);
+            }
+            select.value = serialised;
+        }
+
+        function loadDefinition(definition) {
+            setSelectValue('delimiter', definition.delimiter, ',');
+            setSelectValue('quoteMode', definition.quote_mode, 'minimal');
+            setSelectValue('encoding', definition.encoding, 'utf-8');
+            setSelectValue('lineEnding', definition.line_ending, 'CRLF');
+            document.getElementById('includeHeader').checked = Boolean(definition.include_header);
+            document.getElementById('filenamePattern').value = definition.filename_pattern || 'payroll_{company}_{month}';
+            document.getElementById('fileExtension').value = definition.file_extension || '.csv';
+            const columns = Array.isArray(definition.columns) ? definition.columns : [];
+            if (columns.length) columns.forEach(addColumn);
+            else addColumn();
+        }
+
+        function optionalPositiveInteger(input) {
+            if (input.value === '') return null;
+            const value = Number.parseInt(input.value, 10);
+            return Number.isFinite(value) ? value : null;
+        }
+
+        function buildDefinition() {
+            const delimiterValue = document.getElementById('delimiter').value;
+            return {
+                schema_version: initialDefinition.schema_version || 1,
+                delimiter: delimiterValue === '\\t' ? '\t' : delimiterValue,
+                quote_mode: document.getElementById('quoteMode').value,
+                encoding: document.getElementById('encoding').value,
+                line_ending: document.getElementById('lineEnding').value,
+                include_header: document.getElementById('includeHeader').checked,
+                filename_pattern: document.getElementById('filenamePattern').value.trim(),
+                file_extension: document.getElementById('fileExtension').value.trim(),
+                columns: Array.from(columnRows.querySelectorAll('[data-column-row]')).map(row => ({
+                    header: row.querySelector('.column-header').value.trim(),
+                    source: row.querySelector('.column-source').value,
+                    format: row.querySelector('.column-format').value,
+                    required: row.querySelector('.column-required').checked,
+                    exact_length: optionalPositiveInteger(row.querySelector('.column-exact-length')),
+                    max_length: optionalPositiveInteger(row.querySelector('.column-max-length')),
+                    pad_left: row.querySelector('.column-pad-left').checked,
+                    pad_character: row.querySelector('.column-pad-character').value || '0',
+                    truncate: row.querySelector('.column-truncate').checked,
+                    default: row.querySelector('.column-default').value,
+                    literal: row.querySelector('.column-literal').value,
+                    min_value: row.querySelector('.column-min-value').value || null,
+                    max_value: row.querySelector('.column-max-value').value || null
+                }))
+            };
+        }
+
+        function validateDefinition(definition) {
+            if (!definition.columns.length) return 'Add at least one export column.';
+            for (let index = 0; index < definition.columns.length; index += 1) {
+                const column = definition.columns[index];
+                if (!column.source && !column.literal) {
+                    return `Column ${index + 1} must have a source field or a literal value.`;
+                }
+                if (column.source && column.literal) {
+                    return `Column ${index + 1} cannot use both a source field and a literal value.`;
+                }
+                if (column.source === 'beneficiary_reference' && !column.default) {
+                    return `Column ${index + 1} must provide a default for Beneficiary / Employer Reference.`;
+                }
+                if (definition.include_header && !column.header) {
+                    return `Column ${index + 1} requires a header because the header row is enabled.`;
+                }
+                if (column.pad_left && !column.exact_length && !column.max_length) {
+                    return `Column ${index + 1} must have an exact or maximum length before left padding can be used.`;
+                }
+                if (column.pad_character.length !== 1) {
+                    return `Column ${index + 1} must use exactly one padding character.`;
+                }
+                if (column.exact_length && column.max_length && column.exact_length > column.max_length) {
+                    return `Column ${index + 1} has an exact length greater than its maximum length.`;
+                }
+            }
+            return '';
+        }
+
+        document.getElementById('addColumnButton').addEventListener('click', () => addColumn());
+        document.getElementById('templateKey').addEventListener('input', event => {
+            if (!event.target.readOnly) {
+                event.target.value = event.target.value.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+            }
+        });
+
+        document.getElementById('templateEditorForm').addEventListener('submit', event => {
+            const form = event.currentTarget;
+            if (!form.checkValidity()) {
+                event.preventDefault();
+                event.stopPropagation();
+                form.classList.add('was-validated');
+                return;
+            }
+            const definition = buildDefinition();
+            const error = validateDefinition(definition);
+            if (error) {
+                event.preventDefault();
+                window.alert(error);
+                return;
+            }
+            document.getElementById('definitionJson').value = JSON.stringify(definition);
+            document.getElementById('saveTemplateButton').disabled = true;
+            document.getElementById('saveTemplateButton').textContent = 'Saving Draft...';
+        });
+
+        function confirmActivation(key, version) {
+            return window.confirm(`Activate ${key} version ${version}? Future Payroll downloads will immediately use this version.`);
+        }
+
+        function confirmRollback(form) {
+            const confirmed = window.confirm('Roll back to the previous active version? Future Payroll downloads will use that earlier version.');
+            if (!confirmed) return false;
+            const note = window.prompt('Enter a required reason for this rollback:');
+            if (!note || !note.trim()) return false;
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'change_note';
+            input.value = note.trim();
+            form.appendChild(input);
+            return true;
+        }
+
+        function confirmToggle(currentlyActive) {
+            const action = currentlyActive ? 'disable' : 'enable';
+            return window.confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} this bank export template? ${currentlyActive ? 'It will no longer be available for new Payroll exports.' : 'It will become available for Payroll exports.'}`);
+        }
+
+        const copyPreviewButton = document.getElementById('copyPreviewButton');
+        if (copyPreviewButton) {
+            copyPreviewButton.addEventListener('click', async () => {
+                try {
+                    await navigator.clipboard.writeText(document.getElementById('csvPreview').textContent);
+                    copyPreviewButton.textContent = 'Copied';
+                    setTimeout(() => { copyPreviewButton.textContent = 'Copy Preview'; }, 1500);
+                } catch (_) {
+                    window.alert('The preview could not be copied automatically. Select the preview text and copy it manually.');
+                }
+            });
+        }
+
+        loadDefinition(initialDefinition || {});
+    </script>
+</body>
+</html>

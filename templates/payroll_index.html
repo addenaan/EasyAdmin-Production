@@ -462,11 +462,11 @@
                     <div class="mb-3">
                         <label class="small fw-bold">Bank Template</label>
                         <select class="form-select" id="bankExportTemplate">
-                            <option value="generic_csv">Generic CSV</option>
-                            <option value="fnb_enterprise_csv">FNB Enterprise CSV</option>
-                            <option value="absa_bio_csv">ABSA BIO CSV</option>
-                            <option value="standard_bank_bol_csv">Standard Bank Business Online CSV</option>
-                            <option value="nedbank_acb_csv">Nedbank / ACB-style CSV</option>
+                            {% for template_key, template_name in bank_export_templates.items() %}
+                            <option value="{{ template_key }}" {% if template_key == 'generic_csv' %}selected{% endif %}>{{ template_name }}</option>
+                            {% else %}
+                            <option value="" disabled selected>No active bank templates available</option>
+                            {% endfor %}
                         </select>
                     </div>
                     <div id="bankExportStatus" class="small fw-bold text-danger"></div>
@@ -1229,6 +1229,10 @@
                 status.innerText = 'Please select a payroll month.';
                 return;
             }
+            if(!template) {
+                status.innerText = 'No active bank payment export template is available. Ask the Super Admin to enable one.';
+                return;
+            }
             const url = `/export_payroll_bank_file?month=${encodeURIComponent(month)}&template=${encodeURIComponent(template)}`;
             const res = await fetch(url);
             if(!res.ok) {
@@ -1241,7 +1245,9 @@
             const blob = await res.blob();
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
-            a.download = `Payroll_Bank_Export_${template}_${month}.csv`;
+            const disposition = res.headers.get('Content-Disposition') || '';
+            const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+            a.download = filenameMatch ? filenameMatch[1] : `Payroll_Bank_Export_${template}_${month}.csv`;
             document.body.appendChild(a);
             a.click();
             a.remove();
