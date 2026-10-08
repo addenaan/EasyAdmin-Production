@@ -5433,7 +5433,7 @@ def restrict_access():
             return _access_denied("Access Denied: You do not have permissions to access HR documents.")
 
     invoicing_read_prefixes = ['/api/uninvoiced', '/api/client_statement', '/api/receipt', '/api/invoice-payment-suggestions', '/download/invoice', '/download/quote', '/download/receipt', '/download/credit_note', '/download/client_statement.pdf']
-    if path == '/invoicing' or any(path.startswith(prefix) for prefix in invoicing_read_prefixes) or ((path.startswith('/api/invoice') or path.startswith('/api/quote') or path.startswith('/api/credit_note')) and request.method == 'GET'):
+    if path == '/invoicing' or path.startswith('/invoicing/') or any(path.startswith(prefix) for prefix in invoicing_read_prefixes) or ((path.startswith('/api/invoice') or path.startswith('/api/quote') or path.startswith('/api/credit_note')) and request.method == 'GET'):
         if not _session_has_app_read('invoicing'):
             return _access_denied("Access Denied: You do not have permissions to access Invoicing & Quotes.")
     invoicing_write_prefixes = ['/api/save_invoice', '/api/save_quote', '/api/invoice-payment-suggestions/', '/api/email_invoice_pdf', '/api/email_quote_pdf', '/api/email_receipt_pdf', '/api/email_credit_note_pdf', '/api/email_client_statement_pdf']
@@ -16963,8 +16963,88 @@ def _billing_document_formatted_number(conn, company_id, document_type, document
 # ==========================================================
 # 4. INVOICING & QUOTES ROUTES
 # ==========================================================
+def _invoicing_dashboard_summary(conn, company_id):
+    """Return tenant-bound financial totals for the invoicing landing page."""
+    invoice_rows = conn.execute('''SELECT i.id, i.total,
+                                          COALESCE(p.paid_total, 0) AS paid_total,
+                                          COALESCE(c.credited_total, 0) AS credited_total
+                                   FROM invoices i
+                                   LEFT JOIN (
+                                       SELECT company_id, invoice_id, SUM(amount) AS paid_total
+                                       FROM invoice_payments
+                                       GROUP BY company_id, invoice_id
+                                   ) p ON p.company_id=i.company_id AND p.invoice_id=i.id
+                                   LEFT JOIN (
+                                       SELECT company_id, invoice_id, SUM(amount) AS credited_total
+                                       FROM invoice_credit_notes
+                                       GROUP BY company_id, invoice_id
+                                   ) c ON c.company_id=i.company_id AND c.invoice_id=i.id
+                                   WHERE i.company_id=?''', (company_id,)).fetchall()
+    outstanding_count = 0
+    outstanding_total = 0.0
+    for invoice_row in invoice_rows:
+        invoice = dict(invoice_row)
+        outstanding = round(max(
+            _money_float(invoice.get('total'))
+            - _money_float(invoice.get('paid_total'))
+            - _money_float(invoice.get('credited_total')),
+            0.0,
+        ), 2)
+        if outstanding > 0:
+            outstanding_count += 1
+            outstanding_total = round(outstanding_total + outstanding, 2)
+
+    pending_quotes = conn.execute('''SELECT COUNT(*) AS quote_count,
+                                            COALESCE(SUM(total), 0) AS quote_total
+                                     FROM quotes
+                                     WHERE company_id=?
+                                       AND LOWER(TRIM(COALESCE(NULLIF(status, ''), 'Pending'))) IN ('pending', 'sent') ''',
+                                  (company_id,)).fetchone()
+    pending_ai = conn.execute('''SELECT COUNT(*) AS suggestion_count,
+                                        COUNT(DISTINCT invoice_id) AS invoice_count,
+                                        COALESCE(SUM(deposit_amount), 0) AS payment_total
+                                 FROM invoice_payment_suggestions
+                                 WHERE company_id=? AND status='pending' ''',
+                              (company_id,)).fetchone()
+
+    return {
+        'outstanding_invoice_count': outstanding_count,
+        'outstanding_invoice_total': round(outstanding_total, 2),
+        'pending_quote_count': int(pending_quotes['quote_count'] or 0),
+        'pending_quote_total': _money_float(pending_quotes['quote_total']),
+        'pending_ai_invoice_count': int(pending_ai['invoice_count'] or 0),
+        'pending_ai_suggestion_count': int(pending_ai['suggestion_count'] or 0),
+        'pending_ai_payment_total': _money_float(pending_ai['payment_total']),
+    }
+
+
 @app.route('/invoicing')
 def invoicing_index():
+    conn = get_db_connection()
+    cid = session['company_id']
+    try:
+        comp = conn.execute("SELECT * FROM companies WHERE id=?", (cid,)).fetchone()
+        refresh_expired_quotes(conn, cid)
+        conn.commit()
+        cashbook_ai_status = _cashbook_ai_company_status(conn, cid)
+        summary = _invoicing_dashboard_summary(conn, cid)
+        return render_template(
+            'invoicing_dashboard.html',
+            company=dict(comp),
+            summary=summary,
+            cashbook_ai=cashbook_ai_status,
+            can_manage_invoicing=_session_has_app_full('invoicing'),
+            session=session,
+        )
+    finally:
+        conn.close()
+
+
+@app.route('/invoicing/<section>')
+def invoicing_workspace(section):
+    section = str(section or '').strip().lower()
+    if section not in {'invoices', 'quotes', 'payment-suggestions'}:
+        return "Page not found.", 404
     conn = get_db_connection()
     cid = session['company_id']
     comp = conn.execute("SELECT * FROM companies WHERE id=?", (cid,)).fetchone()
@@ -17055,6 +17135,10 @@ def invoicing_index():
     invoice_payment_ai_status = _cashbook_ai_company_status(conn, cid)
     can_review_invoice_payment_suggestions = _session_has_app_full('invoicing')
 
+    if section == 'payment-suggestions' and not invoice_payment_ai_status.get('tenant_enabled'):
+        conn.close()
+        return redirect(url_for('invoicing_index'))
+
     conn.close()
     return render_template(
         'invoicing_index.html',
@@ -17079,6 +17163,8 @@ def invoicing_index():
         website_integration=_website_integration_public_summary(website_integration),
         cashbook_ai=invoice_payment_ai_status,
         can_review_invoice_payment_suggestions=can_review_invoice_payment_suggestions,
+        can_manage_invoicing=_session_has_app_full('invoicing'),
+        active_section=section,
         session=session,
     )
 

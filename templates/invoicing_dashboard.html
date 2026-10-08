@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ session.get('company_name') }} | Invoicing &amp; Quotes</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; padding-top: 30px; font-family: sans-serif; }
+        .summary-card {
+            height: 100%;
+            background: #fff;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            box-shadow: 0 .125rem .25rem rgba(0,0,0,.075);
+            overflow: hidden;
+        }
+        .summary-card.invoice-card { border-top: 4px solid #0dcaf0; }
+        .summary-card.ai-card { border-top: 4px solid #ffc107; }
+        .summary-card.quote-card { border-top: 4px solid #0d6efd; }
+        .summary-label { color: #6c757d; font-size: .78rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+        .summary-count { color: #212529; font-size: 2.25rem; font-weight: 700; line-height: 1; }
+        .summary-value { font-size: 1.15rem; font-weight: 700; }
+        .quick-actions { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; box-shadow: 0 .125rem .25rem rgba(0,0,0,.075); }
+        .dashboard-link { min-width: 170px; }
+    </style>
+</head>
+<body>
+    <div class="container mb-5">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4 pb-3 border-bottom">
+            <div class="d-flex align-items-center">
+                {% if session.company_logo %}
+                    <img src="/uploads/logos/{{ session.company_logo }}" alt="Logo" class="shadow-sm me-3" style="width: 60px; height: 60px; object-fit: contain; border-radius: 8px; background-color: white;">
+                {% else %}
+                    <div class="bg-info text-white d-flex align-items-center justify-content-center rounded me-3 shadow-sm" style="width: 60px; height: 60px; font-size: 28px; font-weight: bold;">
+                        {{ session.company_name[0] }}
+                    </div>
+                {% endif %}
+                <div>
+                    <h2 class="mb-0 text-info fw-bold">Invoicing &amp; Quotes</h2>
+                    <span class="text-muted">{{ session.company_name }} &middot; Summary</span>
+                </div>
+            </div>
+            <div>
+                <a href="/hub" class="btn btn-secondary me-2">&#x1F519; Hub</a>
+                <a href="{{ url_for('change_password') }}" class="btn btn-outline-primary me-2">Change Password</a>
+                <a href="/logout" class="btn btn-outline-danger">Logout</a>
+            </div>
+        </div>
+
+        <div class="mb-4">
+            <h4 class="mb-1 text-secondary">Financial Overview</h4>
+            <p class="text-muted mb-0">A current summary of invoices, payment suggestions and quotes requiring attention.</p>
+        </div>
+
+        <div class="row g-3 mb-4">
+            <div class="col-12 {% if cashbook_ai.get('tenant_enabled') %}col-lg-4{% else %}col-lg-6{% endif %}">
+                <section class="summary-card invoice-card p-4" aria-labelledby="outstandingInvoicesTitle">
+                    <div class="summary-label mb-2" id="outstandingInvoicesTitle">Outstanding Invoices</div>
+                    <div class="summary-count mb-3">{{ summary.outstanding_invoice_count }}</div>
+                    <div class="text-muted small">Total value outstanding</div>
+                    <div class="summary-value text-danger mb-4">R {{ summary.outstanding_invoice_total|fmt_money }}</div>
+                    <a href="{{ url_for('invoicing_workspace', section='invoices') }}" class="btn btn-info text-white fw-bold dashboard-link">View All Invoices</a>
+                </section>
+            </div>
+
+            {% if cashbook_ai.get('tenant_enabled') %}
+            <div class="col-12 col-lg-4">
+                <section class="summary-card ai-card p-4" aria-labelledby="pendingAiTitle">
+                    <div class="summary-label mb-2" id="pendingAiTitle">AI Payment Approvals</div>
+                    <div class="summary-count mb-3">{{ summary.pending_ai_invoice_count }}</div>
+                    <div class="text-muted small">Suggested payment value awaiting review</div>
+                    <div class="summary-value text-warning-emphasis mb-4">R {{ summary.pending_ai_payment_total|fmt_money }}</div>
+                    <a href="{{ url_for('invoicing_workspace', section='payment-suggestions') }}" class="btn btn-warning fw-bold dashboard-link">Review AI Suggestions</a>
+                    <div class="small text-muted mt-3">Payments are recorded only after an authorised user accepts a suggestion.</div>
+                </section>
+            </div>
+            {% endif %}
+
+            <div class="col-12 {% if cashbook_ai.get('tenant_enabled') %}col-lg-4{% else %}col-lg-6{% endif %}">
+                <section class="summary-card quote-card p-4" aria-labelledby="pendingQuotesTitle">
+                    <div class="summary-label mb-2" id="pendingQuotesTitle">Pending Quotes</div>
+                    <div class="summary-count mb-3">{{ summary.pending_quote_count }}</div>
+                    <div class="text-muted small">Total value of pending quotes</div>
+                    <div class="summary-value text-primary mb-4">R {{ summary.pending_quote_total|fmt_money }}</div>
+                    <a href="{{ url_for('invoicing_workspace', section='quotes') }}" class="btn btn-primary fw-bold dashboard-link">View All Quotes</a>
+                </section>
+            </div>
+        </div>
+
+        <section class="quick-actions p-4" aria-labelledby="quickActionsTitle">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
+                <div>
+                    <h4 id="quickActionsTitle" class="mb-1 text-secondary">Quick Actions</h4>
+                    <div class="small text-muted">Open the existing invoice or quote drafting form.</div>
+                </div>
+                {% if can_manage_invoicing %}
+                <div class="d-flex flex-wrap gap-2">
+                    <a href="{{ url_for('invoicing_workspace', section='invoices', action='new') }}" class="btn btn-info text-white fw-bold px-4">+ Draft New Invoice</a>
+                    <a href="{{ url_for('invoicing_workspace', section='quotes', action='new') }}" class="btn btn-primary fw-bold px-4">+ Draft New Quote</a>
+                </div>
+                {% else %}
+                <span class="badge bg-secondary p-2">Read-only access</span>
+                {% endif %}
+            </div>
+        </section>
+    </div>
+</body>
+</html>
