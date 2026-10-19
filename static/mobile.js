@@ -224,7 +224,7 @@
         state.routeSettings = null;
         openSheet('Daily Route Planner', 'Booking & Ops', `<div class="route-planner-mobile">
             <label>Select Date<input id="mobileRouteDate" type="date" value="${safe(mobileRouteDateValue())}"></label>
-            <label>Plan Route For<select id="mobileRouteEmployee"><option value="">All bookings</option></select></label>
+            <label>Plan Route For<select id="mobileRouteEmployee"><option value="">All company transport bookings</option></select></label>
             <label>Starting Point (e.g., Office Address)<input id="mobileRouteStart" type="text" value="${safe(getRememberedRouteStart())}" placeholder="Enter office or starting address"></label>
             <button class="primary-btn" type="button" data-route-load>Load bookings</button>
             <div id="mobileRouteStatus"></div>
@@ -257,7 +257,7 @@
         const select = $('mobileRouteEmployee');
         if (!select) return;
         const selected = select.value;
-        const options = ['<option value="">All bookings</option>'];
+        const options = ['<option value="">All company transport bookings</option>'];
         (Array.isArray(employees) ? employees : []).forEach((employee) => {
             options.push(`<option value="${safe(employee)}">${safe(employee)}</option>`);
         });
@@ -311,7 +311,7 @@
         const list = $('mobileRouteList');
         if (!list) return;
         if (!state.routeData.length) {
-            list.innerHTML = empty('No bookings found for this date.');
+            list.innerHTML = empty('No company-transport bookings found for this date.');
             return;
         }
         list.innerHTML = state.routeData.map((booking, index) => {

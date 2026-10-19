@@ -35,6 +35,16 @@
         .weekly-summary-table td { vertical-align: middle; font-size: 0.84rem; }
         .weekly-summary-tags .badge { font-weight: 500; margin: 0 3px 3px 0; }
         .weekly-summary-empty { padding: 24px; color: #6c757d; text-align: center; }
+        .calendar-transport-legend { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0.65rem; margin-right: 0.65rem; color: #495057; font-size: 0.78rem; white-space: nowrap; }
+        .calendar-transport-legend-item { display: inline-flex; align-items: center; gap: 0.3rem; }
+        .calendar-transport-swatch { width: 0.75rem; height: 0.75rem; border-radius: 0.2rem; display: inline-block; }
+        .calendar-transport-swatch-company { background: #0d6efd; }
+        .calendar-transport-swatch-none { background: #198754; }
+        .calendar-toolbar-with-legend { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+        @media (max-width: 900px) {
+            .fc .fc-toolbar { align-items: flex-start; flex-wrap: wrap; gap: 0.6rem; }
+            .calendar-transport-legend { width: 100%; margin: 0 0 0.35rem; }
+        }
     </style>
 </head>
 <body>
@@ -75,6 +85,67 @@
                     <button class="btn btn-secondary w-100 dash-btn" onclick="openRoutePlannerModal()" style="height: 60px; flex-direction: row; gap: 10px;">
                         <span>🗺️</span> Plan Daily Route
                     </button>
+                </div>
+            </div>
+
+            <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+                <h4 class="mb-0 fw-bold text-dark">Daily {{ booking_label }} Overview</h4>
+                <span class="badge bg-dark-subtle text-dark border px-3 py-2" id="dailyBookingDate">Loading today...</span>
+            </div>
+
+            <div class="row g-3 mb-4">
+                <div class="col-12 col-xxl-7">
+                    <div class="main-card weekly-summary-card border-top border-primary border-4">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <div>
+                                <h4 class="text-primary mb-1">Daily {{ employee_label }} Summary</h4>
+                                <div class="small text-muted">Today's contract and ad hoc assignments for active {{ employee_label|lower }}s.</div>
+                            </div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-6 col-lg-3"><div class="weekly-summary-metric"><div class="metric-value text-dark" id="metricDailyActiveEmployees">–</div><div class="metric-label">Active {{ employee_label }}s</div></div></div>
+                            <div class="col-6 col-lg-3"><div class="weekly-summary-metric"><div class="metric-value text-primary" id="metricDailyBookedEmployees">–</div><div class="metric-label">Booked Today</div></div></div>
+                            <div class="col-6 col-lg-3"><div class="weekly-summary-metric"><div class="metric-value text-warning" id="metricDailyUnbookedEmployees">–</div><div class="metric-label">Without Bookings</div></div></div>
+                            <div class="col-6 col-lg-3"><div class="weekly-summary-metric"><div class="metric-value text-success" id="metricDailyEmployeeAssignments">–</div><div class="metric-label">Total Assignments</div></div></div>
+                        </div>
+
+                        <div class="table-responsive border rounded">
+                            <table class="table table-hover weekly-summary-table">
+                                <thead><tr><th>{{ employee_label }}</th><th class="text-center">Contract</th><th class="text-center">Ad hoc</th><th class="text-center">Total</th><th>{{ client_label }}s</th></tr></thead>
+                                <tbody id="employeeDailySummaryBody"><tr><td colspan="5" class="weekly-summary-empty">Loading daily {{ employee_label|lower }} summary...</td></tr></tbody>
+                            </table>
+                        </div>
+
+                        <div class="alert alert-light border mt-3 mb-0">
+                            <div class="fw-bold mb-2"><span id="dailyEmployeesWithoutBookingsCount">–</span> active {{ employee_label|lower }}s have no bookings today</div>
+                            <div class="weekly-summary-tags" id="dailyEmployeesWithoutBookingsList"><span class="text-muted small">Loading...</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-12 col-xxl-5">
+                    <div class="main-card weekly-summary-card border-top border-info border-4">
+                        <div class="mb-3">
+                            <h4 class="text-info mb-1">Daily {{ client_label }} Booking Summary</h4>
+                            <div class="small text-muted">Customers, booking type, assigned staff and services for today.</div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-6 col-lg-3 col-xxl-6"><div class="weekly-summary-metric"><div class="metric-value text-dark" id="metricDailyCustomersBooked">–</div><div class="metric-label">{{ client_label }}s Booked</div></div></div>
+                            <div class="col-6 col-lg-3 col-xxl-6"><div class="weekly-summary-metric"><div class="metric-value text-primary" id="metricDailyContractCustomers">–</div><div class="metric-label">Contract {{ client_label }}s</div></div></div>
+                            <div class="col-6 col-lg-3 col-xxl-6"><div class="weekly-summary-metric"><div class="metric-value text-secondary" id="metricDailyAdhocCustomers">–</div><div class="metric-label">Ad hoc {{ client_label }}s</div></div></div>
+                            <div class="col-6 col-lg-3 col-xxl-6"><div class="weekly-summary-metric"><div class="metric-value text-success" id="metricDailyBookings">–</div><div class="metric-label">Total {{ booking_label }}s</div></div></div>
+                        </div>
+
+                        <div class="small text-muted mb-2">Unassigned {{ booking_label|lower }}s: <strong class="text-danger" id="metricDailyUnassignedBookings">–</strong></div>
+                        <div class="table-responsive border rounded">
+                            <table class="table table-hover weekly-summary-table">
+                                <thead><tr><th>{{ client_label }}</th><th>Type</th><th class="text-center">Bookings</th><th>Staff & Services</th></tr></thead>
+                                <tbody id="customerDailySummaryBody"><tr><td colspan="4" class="weekly-summary-empty">Loading daily {{ client_label|lower }} summary...</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -1191,7 +1262,7 @@
                         <div class="col-md-3">
                             <label class="small fw-bold">Plan Route For</label>
                             <select id="routeEmployee" class="form-select">
-                                <option value="">All bookings</option>
+                                <option value="">All company transport bookings</option>
                                 {% for employee in active_booking_employees %}
                                 <option value="{{ employee['name'] }}">{{ employee['name'] }}</option>
                                 {% endfor %}
@@ -1398,6 +1469,28 @@
             }
         }
 
+        function ensureCalendarTransportLegend(calendarEl, todayButton) {
+            if (!calendarEl || !todayButton) return;
+            const toolbarChunk = todayButton.closest('.fc-toolbar-chunk');
+            if (!toolbarChunk) return;
+            toolbarChunk.classList.add('calendar-toolbar-with-legend');
+            let legend = calendarEl.querySelector('.calendar-transport-legend');
+            if (!legend) {
+                legend = document.createElement('div');
+                legend.className = 'calendar-transport-legend';
+                legend.setAttribute('role', 'group');
+                legend.setAttribute('aria-label', 'Booking transport colour legend');
+                legend.innerHTML = `
+                    <span class="calendar-transport-legend-item"><span class="calendar-transport-swatch calendar-transport-swatch-company" aria-hidden="true"></span>Company transport</span>
+                    <span class="calendar-transport-legend-item"><span class="calendar-transport-swatch calendar-transport-swatch-none" aria-hidden="true"></span>No transport required</span>`;
+            }
+            const todayGroup = todayButton.closest('.fc-button-group');
+            const anchor = todayGroup || todayButton;
+            if (legend.parentElement !== toolbarChunk || legend.nextElementSibling !== anchor) {
+                toolbarChunk.insertBefore(legend, anchor);
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', function() {
             var calendarEl = document.getElementById('calendar');
             calendar = new FullCalendar.Calendar(calendarEl, {
@@ -1418,6 +1511,7 @@
                 datesSet: function(info) {
                     const todayButton = calendarEl.querySelector('.fc-todayBookings-button');
                     if (!todayButton) return;
+                    ensureCalendarTransportLegend(calendarEl, todayButton);
                     const now = new Date();
                     const currentStart = info.view.currentStart;
                     const isTodayView = info.view.type === 'timeGridDay'
@@ -1449,8 +1543,12 @@
             return values.map(value => `<span class="badge bg-light text-dark border">${escapeHtml(value)}</span>`).join('');
         }
 
-        function setWeeklyDashboardError(message) {
-            const safeMessage = escapeHtml(message || 'Could not load the weekly booking overview.');
+        function setBookingDashboardError(message) {
+            const safeMessage = escapeHtml(message || 'Could not load the booking overview.');
+            document.getElementById('dailyBookingDate').textContent = 'Daily overview unavailable';
+            document.getElementById('employeeDailySummaryBody').innerHTML = `<tr><td colspan="5" class="weekly-summary-empty text-danger">${safeMessage}</td></tr>`;
+            document.getElementById('customerDailySummaryBody').innerHTML = `<tr><td colspan="4" class="weekly-summary-empty text-danger">${safeMessage}</td></tr>`;
+            document.getElementById('dailyEmployeesWithoutBookingsList').innerHTML = `<span class="text-danger small">${safeMessage}</span>`;
             document.getElementById('weeklyBookingRange').textContent = 'Weekly overview unavailable';
             document.getElementById('employeeWeeklySummaryBody').innerHTML = `<tr><td colspan="6" class="weekly-summary-empty text-danger">${safeMessage}</td></tr>`;
             document.getElementById('customerWeeklySummaryBody').innerHTML = `<tr><td colspan="5" class="weekly-summary-empty text-danger">${safeMessage}</td></tr>`;
@@ -1462,8 +1560,55 @@
                 const referenceDate = localISODate();
                 const response = await fetch(`/api/booking-dashboard-summary?reference_date=${encodeURIComponent(referenceDate)}&_=${Date.now()}`, { cache: 'no-store' });
                 const data = await parseJsonOrError(response);
+                const daily = data.daily || {};
+                const dailyEmployeeMetrics = daily.employee_metrics || {};
+                const dailyCustomerMetrics = daily.customer_metrics || {};
                 const employeeMetrics = data.employee_metrics || {};
                 const customerMetrics = data.customer_metrics || {};
+
+                document.getElementById('dailyBookingDate').textContent = daily.label || 'Today';
+                document.getElementById('metricDailyActiveEmployees').textContent = dailyEmployeeMetrics.active_employees ?? 0;
+                document.getElementById('metricDailyBookedEmployees').textContent = dailyEmployeeMetrics.employees_booked ?? 0;
+                document.getElementById('metricDailyUnbookedEmployees').textContent = dailyEmployeeMetrics.employees_without_bookings ?? 0;
+                document.getElementById('metricDailyEmployeeAssignments').textContent = dailyEmployeeMetrics.total_assignments ?? 0;
+                document.getElementById('dailyEmployeesWithoutBookingsCount').textContent = dailyEmployeeMetrics.employees_without_bookings ?? 0;
+
+                document.getElementById('metricDailyCustomersBooked').textContent = dailyCustomerMetrics.customers_booked ?? 0;
+                document.getElementById('metricDailyContractCustomers').textContent = dailyCustomerMetrics.contract_customers ?? 0;
+                document.getElementById('metricDailyAdhocCustomers').textContent = dailyCustomerMetrics.adhoc_customers ?? 0;
+                document.getElementById('metricDailyBookings').textContent = dailyCustomerMetrics.total_bookings ?? 0;
+                document.getElementById('metricDailyUnassignedBookings').textContent = dailyCustomerMetrics.unassigned_bookings ?? 0;
+
+                const dailyEmployeeRows = Array.isArray(daily.employee_summary) ? daily.employee_summary : [];
+                document.getElementById('employeeDailySummaryBody').innerHTML = dailyEmployeeRows.length ? dailyEmployeeRows.map(row => `
+                    <tr>
+                        <td class="fw-bold">${escapeHtml(row.employee)}</td>
+                        <td class="text-center"><span class="badge bg-primary">${row.contract_bookings || 0}</span></td>
+                        <td class="text-center"><span class="badge bg-secondary">${row.adhoc_bookings || 0}</span></td>
+                        <td class="text-center fw-bold">${row.total_bookings || 0}</td>
+                        <td><div class="weekly-summary-tags">${weeklySummaryTags(row.customers, 'No customer')}</div></td>
+                    </tr>`).join('') : '<tr><td colspan="5" class="weekly-summary-empty">No active employees are booked today.</td></tr>';
+
+                const dailyUnbookedEmployees = Array.isArray(daily.employees_without_bookings) ? daily.employees_without_bookings : [];
+                document.getElementById('dailyEmployeesWithoutBookingsList').innerHTML = dailyUnbookedEmployees.length
+                    ? weeklySummaryTags(dailyUnbookedEmployees, '')
+                    : '<span class="text-success small fw-bold">All active employees have at least one booking today.</span>';
+
+                const dailyCustomerRows = Array.isArray(daily.customer_summary) ? daily.customer_summary : [];
+                document.getElementById('customerDailySummaryBody').innerHTML = dailyCustomerRows.length ? dailyCustomerRows.map(row => {
+                    const staff = weeklySummaryTags(row.employees, 'Unassigned');
+                    const services = weeklySummaryTags(row.services, 'No service selected');
+                    return `
+                    <tr>
+                        <td class="fw-bold">${escapeHtml(row.customer)}</td>
+                        <td>${weeklyBookingTypeBadge(row.booking_category)}</td>
+                        <td class="text-center fw-bold">${row.total_bookings || 0}</td>
+                        <td>
+                            <div class="small text-muted mb-1">Staff</div><div class="weekly-summary-tags mb-2">${staff}</div>
+                            <div class="small text-muted mb-1">Services</div><div class="weekly-summary-tags">${services}</div>
+                        </td>
+                    </tr>`;
+                }).join('') : '<tr><td colspan="4" class="weekly-summary-empty">No customer bookings are scheduled today.</td></tr>';
 
                 document.getElementById('weeklyBookingRange').textContent = data.week?.label || 'Current week';
                 document.getElementById('metricActiveEmployees').textContent = employeeMetrics.active_employees ?? 0;
@@ -1511,7 +1656,7 @@
                     </tr>`;
                 }).join('') : '<tr><td colspan="5" class="weekly-summary-empty">No customer bookings are scheduled this week.</td></tr>';
             } catch (error) {
-                setWeeklyDashboardError(error.message || 'Could not load the weekly booking overview.');
+                setBookingDashboardError(error.message || 'Could not load the booking overview.');
             }
         }
 
@@ -3485,7 +3630,7 @@
             list.innerHTML = '';
 
             if (currentRouteData.length === 0) {
-                list.innerHTML = '<li class="list-group-item text-danger small">No bookings found for this date.</li>';
+                list.innerHTML = '<li class="list-group-item text-danger small">No company-transport bookings found for this date.</li>';
                 return;
             }
 

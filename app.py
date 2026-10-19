@@ -11521,9 +11521,151 @@ def booking_index():
     conn.close()
     return render_template('booking_index.html', clients=clients, employees=employees, bookable_employees=bookable_employees, active_booking_employees=active_booking_employees, services=services, projects=projects, session=session, tenant_labels=tenant_labels, booking_custom_fields=booking_custom_fields)
 
+def _booking_uses_company_transport(value):
+    """Return True for canonical and legacy pickup/drop-off transport values."""
+    normalised = re.sub(r'[^a-z0-9]+', ' ', str(value or '').casefold()).strip()
+    if not normalised or normalised in {'none', 'no transport', 'no transport required'}:
+        return False
+    words = set(normalised.split())
+    has_pickup = 'pickup' in words or {'pick', 'up'}.issubset(words)
+    has_drop_off = 'dropoff' in words or {'drop', 'off'}.issubset(words)
+    return has_pickup or has_drop_off
+
+
+def _build_booking_dashboard_scope(active_employee_rows, booking_rows):
+    """Build employee and client metrics for one supplied booking period."""
+    active_employee_names = {}
+    active_employee_display = []
+    for row in active_employee_rows:
+        name = str(row['name'] or '').strip()
+        key = name.lower()
+        if not name:
+            continue
+        active_employee_names.setdefault(key, name)
+        active_employee_display.append({'id': row['id'], 'name': name, 'key': key})
+
+    employee_groups = {}
+    customer_groups = {}
+    booked_active_keys = set()
+    total_employee_assignments = 0
+    unassigned_bookings = 0
+
+    for row in booking_rows:
+        row_dict = dict(row)
+        booking_date = str(row_dict.get('start') or '')[:10]
+        client_name = _report_client_name_from_fields(row_dict)
+        if not client_name or client_name == 'Unknown Client':
+            client_name = str(row_dict.get('title') or 'Unknown Customer').strip() or 'Unknown Customer'
+
+        client_type_raw = str(row_dict.get('client_type') or '').strip()
+        client_type_lower = client_type_raw.lower()
+        booking_category = 'Contract' if ('contract' in client_type_lower or 'monthly' in client_type_lower) else 'Ad hoc'
+
+        try:
+            client_id = int(row_dict.get('client_id') or 0)
+        except Exception:
+            client_id = 0
+        customer_key = f'id:{client_id}' if client_id else f'name:{client_name.lower()}'
+        customer_group = customer_groups.setdefault(customer_key, {
+            'client_id': client_id or None,
+            'customer': client_name,
+            'booking_category': booking_category,
+            'total_bookings': 0,
+            'dates': set(),
+            'employees': set(),
+            'services': set()
+        })
+        customer_group['total_bookings'] += 1
+        if booking_date:
+            customer_group['dates'].add(booking_date)
+        if booking_category == 'Contract':
+            customer_group['booking_category'] = 'Contract'
+
+        employee_names = _split_booking_employee_names(row_dict.get('employee'))
+        if not employee_names:
+            unassigned_bookings += 1
+        for employee_name in employee_names:
+            customer_group['employees'].add(employee_name)
+            employee_key = employee_name.lower()
+            if employee_key not in active_employee_names:
+                continue
+            booked_active_keys.add(employee_key)
+            total_employee_assignments += 1
+            employee_group = employee_groups.setdefault(employee_key, {
+                'employee': active_employee_names[employee_key],
+                'contract_bookings': 0,
+                'adhoc_bookings': 0,
+                'total_bookings': 0,
+                'dates': set(),
+                'customers': set()
+            })
+            employee_group['total_bookings'] += 1
+            if booking_category == 'Contract':
+                employee_group['contract_bookings'] += 1
+            else:
+                employee_group['adhoc_bookings'] += 1
+            if booking_date:
+                employee_group['dates'].add(booking_date)
+            employee_group['customers'].add(client_name)
+
+        for service_name in _report_split_list(row_dict.get('booking_type')):
+            customer_group['services'].add(service_name)
+
+    employee_summary = []
+    for group in employee_groups.values():
+        employee_summary.append({
+            'employee': group['employee'],
+            'contract_bookings': group['contract_bookings'],
+            'adhoc_bookings': group['adhoc_bookings'],
+            'total_bookings': group['total_bookings'],
+            'days_booked': len(group['dates']),
+            'customers': sorted(group['customers'], key=str.lower)
+        })
+    employee_summary.sort(key=lambda item: item['employee'].lower())
+
+    employees_without_bookings = [
+        employee['name'] for employee in active_employee_display
+        if employee['key'] not in booked_active_keys
+    ]
+
+    customer_summary = []
+    for group in customer_groups.values():
+        customer_summary.append({
+            'client_id': group['client_id'],
+            'customer': group['customer'],
+            'booking_category': group['booking_category'],
+            'total_bookings': group['total_bookings'],
+            'booking_days': len(group['dates']),
+            'employees': sorted(group['employees'], key=str.lower),
+            'services': sorted(group['services'], key=str.lower)
+        })
+    customer_summary.sort(key=lambda item: (-item['total_bookings'], item['customer'].lower()))
+
+    contract_customers = sum(1 for item in customer_summary if item['booking_category'] == 'Contract')
+    adhoc_customers = len(customer_summary) - contract_customers
+    return {
+        'employee_metrics': {
+            'active_employees': len(active_employee_display),
+            'employees_booked': len(booked_active_keys),
+            'employees_without_bookings': len(employees_without_bookings),
+            'total_assignments': total_employee_assignments
+        },
+        'employee_summary': employee_summary,
+        'employees_without_bookings': employees_without_bookings,
+        'customer_metrics': {
+            'customers_booked': len(customer_summary),
+            'contract_customers': contract_customers,
+            'adhoc_customers': adhoc_customers,
+            'total_bookings': len(booking_rows),
+            'unassigned_bookings': unassigned_bookings
+        },
+        'customer_summary': customer_summary
+    }
+
+
 @app.route('/api/booking-dashboard-summary')
 def api_booking_dashboard_summary():
-    """Return the current Monday-to-Sunday employee and customer booking overview."""
+    """Return daily and Monday-to-Sunday employee and client booking overviews."""
     cid = session['company_id']
     reference_date_raw = (request.args.get('reference_date') or '').strip()
     try:
@@ -11555,146 +11697,36 @@ def api_booking_dashboard_summary():
                                        ORDER BY b.start ASC, b.id ASC""",
                                     (cid, week_start.strftime('%Y-%m-%d'), next_week_start.strftime('%Y-%m-%d'))).fetchall()
 
-        active_employee_names = {}
-        active_employee_display = []
-        for row in active_employee_rows:
-            name = str(row['name'] or '').strip()
-            key = name.lower()
-            if not name:
-                continue
-            active_employee_names.setdefault(key, name)
-            active_employee_display.append({'id': row['id'], 'name': name, 'key': key})
-
-        employee_groups = {}
-        customer_groups = {}
-        booked_active_keys = set()
-        total_employee_assignments = 0
-        unassigned_bookings = 0
-
-        for row in booking_rows:
-            row_dict = dict(row)
-            booking_date = str(row_dict.get('start') or '')[:10]
-            client_name = _report_client_name_from_fields(row_dict)
-            if not client_name or client_name == 'Unknown Client':
-                client_name = str(row_dict.get('title') or 'Unknown Customer').strip() or 'Unknown Customer'
-
-            client_type_raw = str(row_dict.get('client_type') or '').strip()
-            client_type_lower = client_type_raw.lower()
-            booking_category = 'Contract' if ('contract' in client_type_lower or 'monthly' in client_type_lower) else 'Ad hoc'
-
-            try:
-                client_id = int(row_dict.get('client_id') or 0)
-            except Exception:
-                client_id = 0
-            customer_key = f'id:{client_id}' if client_id else f'name:{client_name.lower()}'
-            customer_group = customer_groups.setdefault(customer_key, {
-                'client_id': client_id or None,
-                'customer': client_name,
-                'booking_category': booking_category,
-                'total_bookings': 0,
-                'dates': set(),
-                'employees': set(),
-                'services': set()
-            })
-            customer_group['total_bookings'] += 1
-            if booking_date:
-                customer_group['dates'].add(booking_date)
-            if booking_category == 'Contract':
-                customer_group['booking_category'] = 'Contract'
-
-            employee_names = _split_booking_employee_names(row_dict.get('employee'))
-            if not employee_names:
-                unassigned_bookings += 1
-            for employee_name in employee_names:
-                customer_group['employees'].add(employee_name)
-                employee_key = employee_name.lower()
-                if employee_key not in active_employee_names:
-                    continue
-                booked_active_keys.add(employee_key)
-                total_employee_assignments += 1
-                employee_group = employee_groups.setdefault(employee_key, {
-                    'employee': active_employee_names[employee_key],
-                    'contract_bookings': 0,
-                    'adhoc_bookings': 0,
-                    'total_bookings': 0,
-                    'dates': set(),
-                    'customers': set()
-                })
-                employee_group['total_bookings'] += 1
-                if booking_category == 'Contract':
-                    employee_group['contract_bookings'] += 1
-                else:
-                    employee_group['adhoc_bookings'] += 1
-                if booking_date:
-                    employee_group['dates'].add(booking_date)
-                employee_group['customers'].add(client_name)
-
-            for service_name in _report_split_list(row_dict.get('booking_type')):
-                customer_group['services'].add(service_name)
-
-        employee_summary = []
-        for group in employee_groups.values():
-            employee_summary.append({
-                'employee': group['employee'],
-                'contract_bookings': group['contract_bookings'],
-                'adhoc_bookings': group['adhoc_bookings'],
-                'total_bookings': group['total_bookings'],
-                'days_booked': len(group['dates']),
-                'customers': sorted(group['customers'], key=str.lower)
-            })
-        employee_summary.sort(key=lambda item: item['employee'].lower())
-
-        employees_without_bookings = [
-            employee['name'] for employee in active_employee_display
-            if employee['key'] not in booked_active_keys
+        reference_key = reference_date.strftime('%Y-%m-%d')
+        daily_booking_rows = [
+            row for row in booking_rows
+            if str(row['start'] or '')[:10] == reference_key
         ]
-
-        customer_summary = []
-        for group in customer_groups.values():
-            customer_summary.append({
-                'client_id': group['client_id'],
-                'customer': group['customer'],
-                'booking_category': group['booking_category'],
-                'total_bookings': group['total_bookings'],
-                'booking_days': len(group['dates']),
-                'employees': sorted(group['employees'], key=str.lower),
-                'services': sorted(group['services'], key=str.lower)
-            })
-        customer_summary.sort(key=lambda item: (-item['total_bookings'], item['customer'].lower()))
-
-        contract_customers = sum(1 for item in customer_summary if item['booking_category'] == 'Contract')
-        adhoc_customers = len(customer_summary) - contract_customers
+        daily_scope = _build_booking_dashboard_scope(active_employee_rows, daily_booking_rows)
+        weekly_scope = _build_booking_dashboard_scope(active_employee_rows, booking_rows)
 
         start_label = f"{week_start.day} {week_start.strftime('%B')}"
         end_label = f"{week_end.day} {week_end.strftime('%B')} {week_end.year}"
         if week_start.year != week_end.year:
             start_label = f"{week_start.day} {week_start.strftime('%B')} {week_start.year}"
         week_label = f'{start_label} – {end_label}'
+        daily_label = f"{reference_date.strftime('%A')}, {reference_date.day} {reference_date.strftime('%B %Y')}"
 
-        return jsonify({
+        response_payload = {
             'status': 'success',
+            'daily': {
+                'date': reference_key,
+                'label': daily_label,
+                **daily_scope
+            },
             'week': {
                 'start': week_start.strftime('%Y-%m-%d'),
                 'end': week_end.strftime('%Y-%m-%d'),
                 'label': week_label
             },
-            'employee_metrics': {
-                'active_employees': len(active_employee_display),
-                'employees_booked': len(booked_active_keys),
-                'employees_without_bookings': len(employees_without_bookings),
-                'total_assignments': total_employee_assignments
-            },
-            'employee_summary': employee_summary,
-            'employees_without_bookings': employees_without_bookings,
-            'customer_metrics': {
-                'customers_booked': len(customer_summary),
-                'contract_customers': contract_customers,
-                'adhoc_customers': adhoc_customers,
-                'total_bookings': len(booking_rows),
-                'unassigned_bookings': unassigned_bookings
-            },
-            'customer_summary': customer_summary
-        })
+            **weekly_scope
+        }
+        return jsonify(response_payload)
     finally:
         conn.close()
 
@@ -11788,12 +11820,14 @@ def bookings():
         )
         is_invoiced_raw = r_dict.get('is_invoiced')
         is_invoiced = str(is_invoiced_raw).strip().lower() in ('1', 'true', 'yes', 'y')
+        uses_company_transport = _booking_uses_company_transport(r_dict.get('transport'))
         
         events.append({
             "id": r["id"], 
             "title": title, 
             "start": r['start'] or '', 
-            "color": "#0d6efd",
+            "color": "#0d6efd" if uses_company_transport else "#198754",
+            "textColor": "#ffffff",
             "extendedProps": { 
                 "event_type": "booking",
                 "client": client_name, 
@@ -13888,7 +13922,7 @@ def daily_route():
 
     conn = get_db_connection()
     try:
-        rows = conn.execute('''SELECT b.id, b.title, b.start, b.employee, b.booking_type, b.client_id,
+        rows = conn.execute('''SELECT b.id, b.title, b.start, b.employee, b.booking_type, b.transport, b.client_id,
                                       c.name AS client_first_name, c.surname AS client_surname,
                                       c.company_name AS client_company_name, c.address,
                                       c.building_number, c.street_name, c.suburb, c.postal_code
@@ -13908,6 +13942,8 @@ def daily_route():
     assigned_employee_names = set()
     selected_key = _normalise_route_text(employee_filter)
     for row in rows:
+        if not _booking_uses_company_transport(row['transport']):
+            continue
         employee_names = _route_employee_names(row['employee'])
         assigned_employee_names.update(employee_names)
         if selected_key and selected_key not in {_normalise_route_text(name) for name in employee_names}:
@@ -13928,6 +13964,7 @@ def daily_route():
             'employee': ', '.join(employee_names) if employee_names else 'Unassigned',
             'employees': employee_names,
             'booking_type': row['booking_type'] or '',
+            'transport': row['transport'] or '',
             'conflict': False,
         })
 
@@ -13935,10 +13972,11 @@ def daily_route():
     warnings = _daily_route_conflicts(route)
     optimisation = {
         'requested': optimise_requested,
-        'status': 'area_order',
-        'message': 'Bookings are ordered by appointment time and grouped by area.',
+        'status': 'area_order' if route else 'not_needed',
+        'message': ('Bookings are ordered by appointment time and grouped by area.'
+                    if route else 'No company-transport bookings were found for this date.'),
     }
-    if optimise_requested:
+    if optimise_requested and route:
         routes_api_key = (os.environ.get('GOOGLE_ROUTES_API_KEY') or os.environ.get('GOOGLE_MAPS_API_KEY') or '').strip()
         if not start_point:
             optimisation.update(status='fallback', message='Enter a starting point and load again to use travel-route optimisation. Area ordering was used.')
