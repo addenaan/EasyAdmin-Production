@@ -290,8 +290,10 @@
                         </div>
 
                         <div class="form-check mb-3 p-3 bg-white border rounded shadow-sm border-success">
-                            <input class="form-check-input ms-1 border-success" type="checkbox" id="wizardHalfDay" onchange="document.querySelectorAll('.wizard-emp-row').forEach(row => { if(row.querySelector('.wizard-emp-cb').checked) refreshWizardEmployeeHours(row); })">
+                            <input class="form-check-input ms-1 border-success" type="checkbox" id="wizardHalfDay" onchange="toggleBookingRateOption('wizard', 'half')">
                             <label class="form-check-label ms-2 fw-bold text-success fs-6" for="wizardHalfDay">Half Day Booking</label>
+                            <input class="form-check-input ms-4 border-success" type="checkbox" id="wizardSpecialRate" onchange="toggleBookingRateOption('wizard', 'special')">
+                            <label class="form-check-label ms-2 fw-bold text-success fs-6" for="wizardSpecialRate">Special Rate</label>
                             <div class="small text-muted ms-2 mt-1">Contract employees are paid their profile Half Day Rate. Full-time monthly salary is not reduced.</div>
                         </div>
 
@@ -326,7 +328,7 @@
                         <input type="text" id="wizardEmpSearch" class="form-control border-primary mb-3" placeholder="Search {{ employee_label|lower }}s..." onkeyup="filterWizardEmps()">
                         <div class="list-group shadow-sm border" id="wizardEmpList" style="max-height: 300px; overflow-y: auto;">
                             {% for e in bookable_employees %}
-                            <div class="list-group-item wizard-emp-row py-3" data-contract-type="{{ e.emp_type or '' }}" data-half-day-rate="{{ e.half_day_rate or '' }}">
+                            <div class="list-group-item wizard-emp-row py-3" data-contract-type="{{ e.emp_type or '' }}" data-half-day-rate="{{ e.half_day_rate or '' }}" data-special-daily-rate="{{ e.special_daily_rate or '' }}">
                                 <div class="form-check fw-bold text-dark fs-5 mb-0">
                                     <input class="form-check-input wizard-emp-cb border-dark" type="checkbox" value="{{ e.name }}" id="empCb_{{ loop.index }}" onchange="toggleEmpLogistics('{{ loop.index }}'); refreshWizardEmployeeHours(this.closest('.wizard-emp-row'));">
                                     <label class="form-check-label" style="cursor:pointer;" for="empCb_{{ loop.index }}">{{ e.name }}</label>
@@ -478,8 +480,10 @@
                         </div>
 
                         <div class="form-check mb-3 p-3 bg-white border rounded shadow-sm border-success">
-                            <input class="form-check-input ms-1 border-success" type="checkbox" id="bulkHalfDay">
+                            <input class="form-check-input ms-1 border-success" type="checkbox" id="bulkHalfDay" onchange="toggleBookingRateOption('bulk', 'half')">
                             <label class="form-check-label ms-2 fw-bold text-success fs-6" for="bulkHalfDay">Half Day Booking</label>
+                            <input class="form-check-input ms-4 border-success" type="checkbox" id="bulkSpecialRate" onchange="toggleBookingRateOption('bulk', 'special')">
+                            <label class="form-check-label ms-2 fw-bold text-success fs-6" for="bulkSpecialRate">Special Rate</label>
                             <div class="small text-muted ms-2 mt-1">Every generated booking will use the contract employee's Half Day Rate.</div>
                         </div>
 
@@ -505,7 +509,7 @@
                         <input type="text" id="bulkEmpSearch" class="form-control border-info mb-3" placeholder="Search {{ employee_label|lower }}s..." onkeyup="filterBulkEmps()">
                         <div class="list-group shadow-sm border" id="bulkEmpList" style="max-height: 300px; overflow-y: auto;">
                             {% for e in bookable_employees %}
-                            <div class="list-group-item bulk-emp-row py-3" data-contract-type="{{ e.emp_type or '' }}" data-half-day-rate="{{ e.half_day_rate or '' }}">
+                            <div class="list-group-item bulk-emp-row py-3" data-contract-type="{{ e.emp_type or '' }}" data-half-day-rate="{{ e.half_day_rate or '' }}" data-special-daily-rate="{{ e.special_daily_rate or '' }}">
                                 <div class="form-check fw-bold text-dark fs-5 mb-0">
                                     <input class="form-check-input bulk-emp-cb border-dark" type="checkbox" value="{{ e.name }}" id="bulkEmpCb_{{ loop.index }}" onchange="toggleBulkEmpLogistics('{{ loop.index }}')">
                                     <label class="form-check-label" style="cursor:pointer;" for="bulkEmpCb_{{ loop.index }}">{{ e.name }}</label>
@@ -1864,6 +1868,7 @@
             
             document.getElementById('wizardSplit').checked = true;
             document.getElementById('wizardHalfDay').checked = false;
+            document.getElementById('wizardSpecialRate').checked = false;
             const hideBookedEl = document.getElementById('wizardHideBookedEmployees');
             if (hideBookedEl) hideBookedEl.checked = false;
             document.getElementById('globalTransport').value = '';
@@ -1919,6 +1924,7 @@
                 const selectedEmps = document.querySelectorAll('.wizard-emp-cb:checked');
                 if (selectedEmps.length === 0) return alert("Please select at least one employee.");
                 if (!validateHalfDayRateSelection('.wizard-emp-row', '.wizard-emp-cb', 'wizardHalfDay')) return;
+                if (!validateSpecialRateSelection('.wizard-emp-row', '.wizard-emp-cb', 'wizardSpecialRate')) return;
                 currentWizStep++;
                 updateWizUI();
             }
@@ -1940,6 +1946,36 @@
                 return false;
             }
             return true;
+        }
+
+        function validateSpecialRateSelection(rowSelector, checkboxSelector, specialCheckboxId) {
+            if (!document.getElementById(specialCheckboxId)?.checked) return true;
+            const missing = [];
+            document.querySelectorAll(rowSelector).forEach(row => {
+                const employeeCheckbox = row.querySelector(checkboxSelector);
+                const contractType = String(row.dataset.contractType || '').trim();
+                const rate = Number(row.dataset.specialDailyRate || 0);
+                if (employeeCheckbox?.checked && (contractType === 'Contract >25 Hrs' || contractType === 'Contract <25 Hrs') && !(rate > 0)) {
+                    missing.push(employeeCheckbox.value);
+                }
+            });
+            if (missing.length) {
+                alert(`Set a positive Special Daily Rate on the employee profile before booking: ${missing.join(', ')}`);
+                return false;
+            }
+            return true;
+        }
+
+        function toggleBookingRateOption(prefix, selected) {
+            const half = document.getElementById(prefix + 'HalfDay');
+            const special = document.getElementById(prefix + 'SpecialRate');
+            if (selected === 'half' && half.checked) special.checked = false;
+            if (selected === 'special' && special.checked) half.checked = false;
+            if (prefix === 'wizard') {
+                document.querySelectorAll('.wizard-emp-row').forEach(row => {
+                    if (row.querySelector('.wizard-emp-cb').checked) refreshWizardEmployeeHours(row);
+                });
+            }
         }
 
         function wizBack() {
@@ -2026,10 +2062,12 @@
             if (customFields === null) return;
             const isSplit = document.getElementById('wizardSplit').checked;
             const isHalfDay = document.getElementById('wizardHalfDay').checked;
+            const isSpecialRate = document.getElementById('wizardSpecialRate').checked;
             
             if (!bTypes) return alert("Please select at least one {{ service_label }}.");
             if (!date || !time) return alert("Date and Time are required.");
             if (!validateHalfDayRateSelection('.wizard-emp-row', '.wizard-emp-cb', 'wizardHalfDay')) return;
+            if (!validateSpecialRateSelection('.wizard-emp-row', '.wizard-emp-cb', 'wizardSpecialRate')) return;
             
             const assignments = [];
             
@@ -2089,6 +2127,7 @@
                     transport: [...new Set(transports)].join(', '),
                     overtime_hours: maxOvertime,
                     is_half_day: isHalfDay,
+                    is_special_rate: isSpecialRate,
                     custom_fields: customFields,
                     project_id: document.getElementById('wizardProject') ? document.getElementById('wizardProject').value : ''
                 };
@@ -2119,6 +2158,7 @@
                 booking_notes: notes,
                 assignments: assignments,
                 is_half_day: isHalfDay,
+                is_special_rate: isSpecialRate,
                 custom_fields: customFields,
                 project_id: document.getElementById('wizardProject') ? document.getElementById('wizardProject').value : ''
             };
@@ -2258,6 +2298,7 @@
             
             document.getElementById('bulkSplit').checked = true;
             document.getElementById('bulkHalfDay').checked = false;
+            document.getElementById('bulkSpecialRate').checked = false;
             document.getElementById('bulkGlobalTransport').value = '';
             document.getElementById('bulkGlobalOvertime').value = '0';
             toggleBulkMode();
@@ -2465,6 +2506,7 @@
             if(!startDate || !endDate) return alert("Start and End dates are required.");
             if(startDate > endDate) return alert("End Date must be after Start Date.");
             if (!validateHalfDayRateSelection('.bulk-emp-row', '.bulk-emp-cb', 'bulkHalfDay')) return;
+            if (!validateSpecialRateSelection('.bulk-emp-row', '.bulk-emp-cb', 'bulkSpecialRate')) return;
 
             const customFields = collectBulkCustomFields();
             if (customFields === null) return;
@@ -2519,6 +2561,7 @@
                 booking_notes: notes,
                 assignments: assignments,
                 is_half_day: document.getElementById('bulkHalfDay').checked,
+                is_special_rate: document.getElementById('bulkSpecialRate').checked,
                 custom_fields: customFields,
                 project_id: document.getElementById('bulkProject') ? document.getElementById('bulkProject').value : ''
             };
@@ -2993,6 +3036,7 @@
                         ${detailRow('Service', service)}
                         ${detailRow('Assigned Staff', props.employee)}
                         ${detailRow('Booking Duration', props.is_half_day ? 'Half Day' : 'Full Day')}
+                        ${detailRow('Payroll Rate', props.is_special_rate ? 'Special Daily Rate' : (props.is_half_day ? 'Half Day Rate' : 'Standard Daily Rate'))}
                         ${detailRow('Project', project)}
                         ${detailRow('Transport', props.transport)}
                         ${detailRow('Overtime Hours', props.overtime_hours)}
@@ -3064,6 +3108,7 @@
 
             document.getElementById('wizardSplit').checked = empArr.length <= 1;
             document.getElementById('wizardHalfDay').checked = !!props.is_half_day;
+            document.getElementById('wizardSpecialRate').checked = !!props.is_special_rate;
             document.getElementById('globalTransport').value = transportArr[0] || '';
             document.getElementById('globalOvertime').value = props.overtime_hours || 0;
             toggleWizMode();

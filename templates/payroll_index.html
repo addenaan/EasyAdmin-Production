@@ -216,7 +216,7 @@
                     <tbody>
                         {% for emp in employees %}
                         <tr class="payroll-row {% if emp.status == 'Resigned' %}table-warning{% elif emp.status == 'Terminated' %}table-danger{% elif emp.status == 'On Leave' %}table-info{% endif %}" data-employee-id="{{ emp.id }}">
-                            <td><input class="form-check-input border-secondary emp-cb" type="checkbox" value="{{ emp.id }}" data-name="{{ emp.name }}" data-status="{{ emp.status or 'Active' }}" title="{{ emp.status or 'Active' }}" onchange="updateSelectionCount()"></td>
+                            <td><input class="form-check-input border-secondary emp-cb" type="checkbox" value="{{ emp.id }}" data-name="{{ emp.name }}" data-status="{{ emp.status or 'Active' }}" data-emp-type="{{ emp.emp_type or '' }}" title="{{ emp.status or 'Active' }}" onchange="updateSelectionCount()"></td>
                             <td><span class="emp-link" onclick="openProfileModal({{ emp | tojson | safe }})">{{ emp.name }}</span></td>
                             <td>
                                 {% if emp.status == 'Active' %}<span class="badge bg-success">Active</span>
@@ -250,7 +250,7 @@
                                 <div class="dropdown">
                                     <button class="btn btn-sm btn-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">Actions</button>
                                     <ul class="dropdown-menu">
-                                        <li><a class="dropdown-item" href="#" onclick='openPayslipModal({{ emp.id }}, {{ emp.name | tojson }}, {{ (emp.status or "Active") | tojson }})'>📄 Process Payslip</a></li>
+                                        <li><a class="dropdown-item" href="#" onclick='openPayslipModal({{ emp.id }}, {{ emp.name | tojson }}, {{ (emp.status or "Active") | tojson }}, {{ (emp.emp_type or "Full-time (5 Days)") | tojson }})'>📄 Process Payslip</a></li>
                                         <li><a class="dropdown-item" href="#" onclick='openLeaveModal({{ emp.id }}, {{ emp.name | tojson }}, {{ (emp.status or "Active") | tojson }})'>🏖️ Log Leave</a></li>
                                         <li><hr class="dropdown-divider"></li>
                                         <li><a class="dropdown-item text-primary" href="#" onclick="openReportModal({{ emp.id }}, '{{ emp.name }}')">📊 Run Activity Report</a></li>
@@ -357,6 +357,7 @@
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="branch_code"> <label class="form-check-label small">Branch Code</label></div>
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="gross_salary"> <label class="form-check-label small">Base Salary / Full Day Rate (R)</label></div>
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="half_day_rate"> <label class="form-check-label small">Half Day Rate (R)</label></div>
+                            <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="special_daily_rate"> <label class="form-check-label small">Special Daily Rate (R)</label></div>
                             <div class="form-check mb-2"><input class="form-check-input export-cb border-secondary" type="checkbox" value="workday_hours"> <label class="form-check-label small">Working Hours per Day</label></div>
                         </div>
                     </div>
@@ -378,8 +379,13 @@
                     <p class="small text-muted mb-3">This will calculate and save payslips to the Ledger for all selected employees. It does not email payslips or generate PDFs.</p>
                     <div class="mb-3">
                         <label class="small fw-bold">Target Payroll Date (YYYY-MM-DD)</label>
-                        <input type="date" class="form-control border-primary" id="bulkFinalizeDate">
+                        <input type="date" class="form-control border-primary" id="bulkFinalizeDate" onchange="defaultBulkContractPeriod('bulkFinalize')">
                         <div class="small text-muted mt-1">The selected date determines the payroll month and SARS tax year.</div>
+                    </div>
+                    <div class="row g-2 mb-3" id="bulkFinalizePeriodGroup">
+                        <div class="col-6"><label class="small fw-bold">Contract Payroll Start Date</label><input type="date" class="form-control border-primary" id="bulkFinalizeStartDate"></div>
+                        <div class="col-6"><label class="small fw-bold">Contract Payroll End Date</label><input type="date" class="form-control border-primary" id="bulkFinalizeEndDate"></div>
+                        <div class="col-12 small text-muted">Applied only to selected Contract &gt;25 Hrs and Contract &lt;25 Hrs employees. Full-time and Shift Worker payroll remains unchanged.</div>
                     </div>
                     <div id="bulkFinalizeStatus" class="small bg-white border rounded p-3 shadow-sm" style="min-height: 80px; white-space: pre-line;">Ready to finalize selected employees.</div>
                 </div>
@@ -403,7 +409,12 @@
                     <p class="small text-muted">This will generate and optionally email payslips for all selected employees. Finalised ledger payslips are used where available. If no ledger payslip exists, a Draft Payslip is generated and clearly marked. This does not save anything to the ledger.</p>
                     <div class="mb-3">
                         <label class="small fw-bold">Target Payroll Date (YYYY-MM-DD)</label>
-                        <input type="date" class="form-control border-info" id="bulkPsDate">
+                        <input type="date" class="form-control border-info" id="bulkPsDate" onchange="defaultBulkContractPeriod('bulkPs')">
+                    </div>
+                    <div class="row g-2 mb-3" id="bulkPsPeriodGroup">
+                        <div class="col-6"><label class="small fw-bold">Contract Payroll Start Date</label><input type="date" class="form-control border-info" id="bulkPsStartDate"></div>
+                        <div class="col-6"><label class="small fw-bold">Contract Payroll End Date</label><input type="date" class="form-control border-info" id="bulkPsEndDate"></div>
+                        <div class="col-12 small text-muted">Applied only to contract employees. Full-time and Shift Worker payroll remains unchanged.</div>
                     </div>
                     <div class="form-check mb-4 bg-white p-3 border rounded shadow-sm">
                         <input class="form-check-input border-info ms-1" type="checkbox" id="bulkPsEmail" checked>
@@ -499,6 +510,7 @@
                             <div class="col-md-3 mb-3"><label class="small fw-bold">ID / Passport Number</label><input type="text" class="form-control" id="empIdPassport" name="id_passport" required></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold text-success" id="empGrossLabel">Monthly Base Salary (R)</label><input type="number" class="form-control border-success" id="empGross" name="gross_salary" step="0.01" min="0" required></div>
                             <div class="col-md-3 mb-3" id="empHalfDayRateGroup" style="display:none;"><label class="small fw-bold text-success">Half Day Rate (R)</label><input type="number" class="form-control border-success" id="empHalfDayRate" name="half_day_rate" step="0.01" min="0.01"><div class="form-text small">Required for contract employees and used when Half Day Booking is selected.</div></div>
+                            <div class="col-md-3 mb-3" id="empSpecialDailyRateGroup" style="display:none;"><label class="small fw-bold text-success">Special Daily Rate (R)</label><input type="number" class="form-control border-success" id="empSpecialDailyRate" name="special_daily_rate" step="0.01" min="0.01"><div class="form-text small">Optional. Required before this employee can be assigned to a Special Rate booking.</div></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold text-success">Working Hours per Day</label><input type="number" class="form-control border-success" id="empWorkdayHours" name="workday_hours" step="0.25" min="0.25" value="7" required><div class="form-text small">Excludes statutory breaks.</div></div>
                             <div class="col-md-3 mb-3"><label class="small fw-bold">Phone Number</label><input type="text" class="form-control" id="empPhone" name="phone" required></div>
                             
@@ -663,6 +675,18 @@
                             <button class="btn btn-success fw-bold w-100" id="btnRunEngine" onclick="runPayslipEngine()">Calculate</button>
                         </div>
                     </div>
+                    <div class="row align-items-end mb-3" id="psContractPeriodGroup" style="display:none;">
+                        <div class="col-md-4 offset-md-2">
+                            <label class="small fw-bold text-success">Payroll Start Date</label>
+                            <input type="date" class="form-control border-success" id="psPayrollStartDate" onchange="if(document.getElementById('psDate').value) runPayslipEngine()">
+                            <small class="text-muted">First booking date included in contract payroll.</small>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="small fw-bold text-success">Payroll End Date</label>
+                            <input type="date" class="form-control border-success" id="psPayrollEndDate" onchange="if(document.getElementById('psDate').value) runPayslipEngine()">
+                            <small class="text-muted">Last booking date included. Periods cannot overlap.</small>
+                        </div>
+                    </div>
                     <div class="row align-items-end mb-3">
                         <div class="col-md-6">
                             <label class="small fw-bold text-muted">Reimbursable Expenses (Non-taxable)</label>
@@ -729,6 +753,7 @@
                                 <div class="col-5 text-end">
                                     <h3 id="bpDocTitle" class="text-danger fw-bold">DRAFT PAYSLIP</h3>
                                     <br><strong>Date:</strong> <span id="bpDate"></span>
+                                    <br><span id="bpBookingPeriodRow" style="display:none;"><strong>Payroll Period:</strong> <span id="bpBookingPeriod"></span></span>
                                     <br><strong>Employee:</strong> <span id="bpName"></span> (<span id="bpEmpNum"></span>)
                                     <br><strong>ID:</strong> <span id="bpIdNum"></span>
                                 </div>
@@ -1210,6 +1235,29 @@
             return ids;
         }
 
+        function selectedPayrollIncludesContract() {
+            return Array.from(document.querySelectorAll('.emp-cb:checked')).some(cb => isContractBookingEmployeeType(cb.dataset.empType || ''));
+        }
+
+        function defaultBulkContractPeriod(prefix) {
+            const target = document.getElementById(prefix + 'Date').value;
+            if (!target) return;
+            const start = document.getElementById(prefix + 'StartDate');
+            const end = document.getElementById(prefix + 'EndDate');
+            if (!start.value) start.value = target.slice(0, 7) + '-01';
+            if (!end.value) end.value = target;
+        }
+
+        function validateBulkContractPeriod(prefix) {
+            if (!selectedPayrollIncludesContract()) return true;
+            defaultBulkContractPeriod(prefix);
+            const start = document.getElementById(prefix + 'StartDate').value;
+            const end = document.getElementById(prefix + 'EndDate').value;
+            if (!start || !end) { alert('Contract Payroll Start Date and End Date are required.'); return false; }
+            if (start > end) { alert('Contract Payroll Start Date cannot be after the End Date.'); return false; }
+            return true;
+        }
+
 
         // --- PAYROLL BANK EXPORT LOGIC ---
         function openBankExportModal() {
@@ -1261,6 +1309,7 @@
             if(ids.length === 0) return alert("Please select at least one employee from the list.");
             const dateInput = document.getElementById('bulkFinalizeDate');
             if(!dateInput.value) dateInput.value = getLocalDateString(new Date());
+            defaultBulkContractPeriod('bulkFinalize');
             document.getElementById('bulkFinalizeStatus').innerText = `Ready to finalize ${ids.length} selected employee(s).`;
             document.getElementById('btnRunBulkFinalize').disabled = false;
             document.getElementById('btnRunBulkFinalize').innerText = 'Finalize Selected Payroll';
@@ -1275,6 +1324,9 @@
 
             if(ids.length === 0) return alert("Please select at least one employee from the list.");
             if(!date) return alert("Select a target payroll date.");
+            if(!validateBulkContractPeriod('bulkFinalize')) return;
+            const payrollStartDate = document.getElementById('bulkFinalizeStartDate').value;
+            const payrollEndDate = document.getElementById('bulkFinalizeEndDate').value;
 
             btn.disabled = true;
             const successes = [];
@@ -1288,7 +1340,7 @@
                     const res = await fetch('/generate_payslip', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({employee_id: id, date: date, bonus: 0, reimbursable_expenses: 0, loan_repayment: 0})
+                        body: JSON.stringify({employee_id: id, date: date, payroll_start_date: payrollStartDate, payroll_end_date: payrollEndDate, bonus: 0, reimbursable_expenses: 0, loan_repayment: 0})
                     });
                     const data = await res.json();
                     if(!res.ok || data.message) {
@@ -1338,6 +1390,7 @@
             document.getElementById('bulkPsStatus').innerText = '';
             document.getElementById('btnRunBulkPs').disabled = false;
             document.getElementById('btnRunBulkPs').innerText = 'Generate Bulk Payslips';
+            defaultBulkContractPeriod('bulkPs');
             bulkPayslipModal.show();
         }
 
@@ -1349,6 +1402,9 @@
             const status = document.getElementById('bulkPsStatus');
 
             if(!date) return alert("Select a target date.");
+            if(!validateBulkContractPeriod('bulkPs')) return;
+            const payrollStartDate = document.getElementById('bulkPsStartDate').value;
+            const payrollEndDate = document.getElementById('bulkPsEndDate').value;
 
             btn.disabled = true;
             const preparedPayslips = [];
@@ -1362,7 +1418,7 @@
                 const ledgerRes = await fetch('/api/payslip_for_distribution', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({employee_id: id, date: date})
+                    body: JSON.stringify({employee_id: id, date: date, payroll_start_date: payrollStartDate, payroll_end_date: payrollEndDate})
                 });
                 const ledgerData = await ledgerRes.json();
 
@@ -1375,7 +1431,7 @@
                 const res = await fetch('/generate_payslip', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({employee_id: id, date: date})
+                    body: JSON.stringify({employee_id: id, date: date, payroll_start_date: payrollStartDate, payroll_end_date: payrollEndDate})
                 });
                 const data = await res.json();
                 if(!res.ok || data.message) {
@@ -1429,6 +1485,7 @@
                 }
 
                 document.getElementById('bpDate').innerText = p.date;
+                setPayslipPeriodDisplay(p);
                 document.getElementById('bpName').innerText = p.name;
                 document.getElementById('bpEmpNum').innerText = p.emp_num;
                 document.getElementById('bpIdNum').innerText = p.id_num;
@@ -1562,6 +1619,7 @@
             document.getElementById('empIdPassport').value = emp ? emp.id_passport : '';
             document.getElementById('empGross').value = emp ? emp.gross_salary : '';
             document.getElementById('empHalfDayRate').value = emp ? (emp.half_day_rate || '') : '';
+            document.getElementById('empSpecialDailyRate').value = emp ? (emp.special_daily_rate || '') : '';
             document.getElementById('empWorkdayHours').value = emp ? (emp.workday_hours || 7) : 7;
             document.getElementById('empPhone').value = emp ? emp.phone : '';
             document.getElementById('empEmail').value = emp ? emp.email : '';
@@ -1596,9 +1654,11 @@
             const type = document.getElementById('empType').value;
             const isContract = type === 'Contract >25 Hrs' || type === 'Contract <25 Hrs';
             const group = document.getElementById('empHalfDayRateGroup');
+            const specialGroup = document.getElementById('empSpecialDailyRateGroup');
             const halfDayInput = document.getElementById('empHalfDayRate');
             document.getElementById('empGrossLabel').innerText = isContract ? 'Full Day Booking Rate (R)' : 'Monthly Base Salary (R)';
             group.style.display = isContract ? '' : 'none';
+            specialGroup.style.display = isContract ? '' : 'none';
             halfDayInput.required = isContract;
         }
 
@@ -1778,10 +1838,46 @@
         }
 
         // --- INDIVIDUAL PAYSLIP LOGIC ---
-        function openPayslipModal(id, name, status='Active') {
+        let currentPayslipEmployeeType = '';
+
+        function isContractBookingEmployeeType(value) {
+            return value === 'Contract >25 Hrs' || value === 'Contract <25 Hrs';
+        }
+
+        function setContractPayrollPeriodVisibility() {
+            const isContract = isContractBookingEmployeeType(currentPayslipEmployeeType);
+            const group = document.getElementById('psContractPeriodGroup');
+            const startInput = document.getElementById('psPayrollStartDate');
+            const endInput = document.getElementById('psPayrollEndDate');
+            group.style.display = isContract ? '' : 'none';
+            startInput.required = isContract;
+            endInput.required = isContract;
+            if (!isContract) {
+                startInput.value = '';
+                endInput.value = '';
+            }
+        }
+
+        function defaultContractPayrollPeriod() {
+            if (!isContractBookingEmployeeType(currentPayslipEmployeeType)) return;
+            const target = document.getElementById('psDate').value;
+            if (!target) return;
+            const startInput = document.getElementById('psPayrollStartDate');
+            const endInput = document.getElementById('psPayrollEndDate');
+            if (!startInput.value) startInput.value = target.slice(0, 7) + '-01';
+            if (!endInput.value) endInput.value = target;
+        }
+
+        function openPayslipModal(id, name, status='Active', employeeType='Full-time (5 Days)') {
             document.getElementById('psEmpId').value = id;
             document.getElementById('psEmpName').value = name;
             document.getElementById('psEmpStatusBadge').innerHTML = employeeStatusBadgeHtml(status);
+            currentPayslipEmployeeType = employeeType || '';
+            document.getElementById('psPayrollStartDate').value = '';
+            document.getElementById('psPayrollEndDate').value = '';
+            document.getElementById('psPayrollStartDate').disabled = false;
+            document.getElementById('psPayrollEndDate').disabled = false;
+            setContractPayrollPeriodVisibility();
             
             document.getElementById('payslipPreviewArea').style.display = 'none';
             const uifAuditBox = document.getElementById('bpUifEligibilityAudit');
@@ -1833,6 +1929,16 @@
             document.getElementById('adjNet').value = 'R ' + net.toFixed(2);
         }
 
+        function setPayslipPeriodDisplay(p) {
+            const row = document.getElementById('bpBookingPeriodRow');
+            const value = document.getElementById('bpBookingPeriod');
+            const isContract = isContractBookingEmployeeType((p && p.contract_type) || currentPayslipEmployeeType);
+            const start = p && p.booking_period_start;
+            const end = p && p.booking_period_end;
+            row.style.display = isContract && start && end ? '' : 'none';
+            value.innerText = start && end ? `${start} to ${end}` : '';
+        }
+
         function applyPayslipPreviewPayload(res) {
             if(!res || !res.payslip) return false;
             currentPayslipData = res;
@@ -1866,6 +1972,7 @@
             }
 
             setText('bpDate', p.date);
+            setPayslipPeriodDisplay(p);
             setText('bpName', p.name);
             setText('bpEmpNum', p.emp_num);
             setText('bpIdNum', p.id_num);
@@ -1986,7 +2093,18 @@
             const sequence = ++payslipCalculationSequence;
             currentPayslipData = null;
             document.getElementById('payslipPreviewArea').style.display = 'none';
-            const context = document.getElementById('psEmpId').value + ':' + document.getElementById('psDate').value.slice(0, 7);
+            defaultContractPayrollPeriod();
+            const payrollStartDate = document.getElementById('psPayrollStartDate').value;
+            const payrollEndDate = document.getElementById('psPayrollEndDate').value;
+            if (isContractBookingEmployeeType(currentPayslipEmployeeType) && (!payrollStartDate || !payrollEndDate)) {
+                alert('Payroll Start Date and Payroll End Date are required for contract employees.');
+                return;
+            }
+            if (payrollStartDate && payrollEndDate && payrollStartDate > payrollEndDate) {
+                alert('Payroll Start Date cannot be after Payroll End Date.');
+                return;
+            }
+            const context = document.getElementById('psEmpId').value + ':' + document.getElementById('psDate').value.slice(0, 7) + ':' + payrollStartDate + ':' + payrollEndDate;
             if (context !== payslipRateContext) {
                 document.getElementById('psLeavePayoutRate').value = '';
                 document.getElementById('psLeavePayoutReview').style.display = 'none';
@@ -1997,6 +2115,8 @@
             const data = {
                 employee_id: document.getElementById('psEmpId').value,
                 date: document.getElementById('psDate').value,
+                payroll_start_date: payrollStartDate || null,
+                payroll_end_date: payrollEndDate || null,
                 reimbursable_expenses: parseFloat(document.getElementById('psReimbursableExpenses').value || 0),
                 bonus: parseFloat(document.getElementById('psBonus').value || 0),
                 bonus_tax_treatment: document.getElementById('psBonusTaxTreatment').value || 'current_period',
@@ -2035,6 +2155,7 @@
                 document.getElementById('bpDocTitle').className = isFinalized ? 'text-success fw-bold' : 'text-danger fw-bold';
                 
                 document.getElementById('bpDate').innerText = p.date;
+                setPayslipPeriodDisplay(p);
                 document.getElementById('bpName').innerText = p.name;
                 document.getElementById('bpEmpNum').innerText = p.emp_num;
                 document.getElementById('bpIdNum').innerText = p.id_num;
@@ -2069,6 +2190,12 @@
                     const el = document.getElementById(id);
                     if(el) el.disabled = !!p.is_finalized;
                 });
+                if (p.is_finalized && isContractBookingEmployeeType(currentPayslipEmployeeType)) {
+                    document.getElementById('psPayrollStartDate').value = p.booking_period_start || '';
+                    document.getElementById('psPayrollEndDate').value = p.booking_period_end || '';
+                }
+                document.getElementById('psPayrollStartDate').disabled = !!p.is_finalized;
+                document.getElementById('psPayrollEndDate').disabled = !!p.is_finalized;
                 if(p.is_finalized) {
                     document.getElementById('btnSaveLedger').style.display = 'none';
                     document.getElementById('btnAdjustmentPayslip').style.display = 'inline-block';
