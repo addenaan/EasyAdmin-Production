@@ -972,15 +972,15 @@
                     </div>
                     <table class="table table-hover bg-white border" id="dirTable">
                         <thead class="table-light">
-                            <tr><th>Name</th><th>Type</th><th>Phone</th><th>Address</th><th>Actions</th></tr>
+                            <tr><th>Name</th><th>Type</th><th>Phone</th><th>Service Address</th><th>Actions</th></tr>
                         </thead>
                         <tbody>
                             {% for client in clients %}
                             <tr>
-                                <td><strong>{{ client.name }} {{ client.surname or '' }}</strong></td>
+                                <td><strong>{{ client.display_name }}</strong></td>
                                 <td><span class="badge {{ 'badge-monthly' if client.client_type == 'Monthly Contract' else 'badge-adhoc' }}">{{ client.client_type or 'Ad hoc' }}</span></td>
                                 <td>{{ client.phone or 'N/A' }}</td>
-                                <td>{{ client.address or 'N/A' }}</td>
+                                <td>{{ client.service_address or 'N/A' }}</td>
                                 <td>
                                     <button class="btn btn-sm btn-outline-secondary" onclick='openClientProfile({{ client | tojson | safe }})'>👤 Edit</button> 
                                 </td>
@@ -993,7 +993,7 @@
         </div>
     </div>
     
-    <div class="modal fade" id="clientProfileModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header bg-primary text-white"><h5 class="modal-title" id="clientProfileTitle">Client Profile</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><input type="hidden" id="cId"><div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">First Name</label><input type="text" id="cName" class="form-control" required></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Surname</label><input type="text" id="cSurname" class="form-control"></div></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Client Type</label><select id="cType" class="form-select border-primary"><option value="Ad hoc">Ad hoc (Once-off)</option><option value="Monthly Contract">Monthly Contract</option></select></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Discount Percent</label><div class="input-group"><input type="number" id="cDiscountPercent" class="form-control" min="0" max="100" step="0.01" placeholder="0"><span class="input-group-text">%</span></div><div class="form-text small">Applied automatically when creating invoices for this client.</div></div><div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Telephone Number</label><input type="text" id="cPhone" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Email Address</label><input type="text" inputmode="email" autocomplete="email" id="cEmail" class="form-control" placeholder="client@example.com; accounts@example.com"><div class="form-text small">To add multiple email addresses, separate each email address with a semicolon (;).</div></div></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Physical Address</label><div class="row"><div class="col-4 mb-2"><label class="form-label small fw-bold text-muted">Building Number</label><input type="text" id="cBuildingNumber" class="form-control"></div><div class="col-8 mb-2"><label class="form-label small fw-bold text-muted">Street Name</label><input type="text" id="cStreetName" class="form-control"></div></div><div class="row"><div class="col-7 mb-2"><label class="form-label small fw-bold text-muted">Suburb</label><input type="text" id="cSuburb" class="form-control"></div><div class="col-5 mb-2"><label class="form-label small fw-bold text-muted">Postal Code</label><input type="text" id="cPostalCode" class="form-control"></div></div><textarea id="cAddress" class="form-control d-none" rows="2"></textarea></div><div class="mb-3"><label class="form-label small fw-bold">Company Name</label><input type="text" id="cCompany" class="form-control" placeholder="For Tax Invoices"></div><div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Company Reg No.</label><input type="text" id="cRegNo" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Vat No.</label><input type="text" id="cVatNo" class="form-control"></div></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Client Notes</label><textarea id="cNotes" class="form-control" rows="4" placeholder="Add internal client notes, service instructions, billing preferences or other information..."></textarea><div class="form-text small">Internal notes only. These notes are not added to invoices, quotes, statements or client emails.</div></div><div class="mb-3"><div class="bg-white border rounded p-3 shadow-sm"><h6 class="fw-bold text-secondary border-bottom pb-2 mb-3">Client Documents</h6><div id="clientAttachmentList" class="small mb-2 text-muted">No documents uploaded yet.</div><input type="file" id="clientAttachmentFiles" class="form-control form-control-sm" multiple><div class="form-text small">Upload contracts, signed agreements, instructions, client documents or other supporting files. Files are uploaded after the client is saved.</div></div></div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveClient()">Save Client</button></div></div></div></div>
+    <div class="modal fade" id="clientProfileModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header bg-primary text-white"><h5 class="modal-title" id="clientProfileTitle">Client Profile</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body"><input type="hidden" id="cId"><div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">First Name</label><input type="text" id="cName" class="form-control"><div class="form-text small">Either First Name or Company Name is required.</div></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Surname</label><input type="text" id="cSurname" class="form-control"></div></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Client Type</label><select id="cType" class="form-select border-primary"><option value="Ad hoc">Ad hoc (Once-off)</option><option value="Monthly Contract">Monthly Contract</option></select></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Discount Percent</label><div class="input-group"><input type="number" id="cDiscountPercent" class="form-control" min="0" max="100" step="0.01" placeholder="0"><span class="input-group-text">%</span></div><div class="form-text small">Applied automatically when creating invoices for this client.</div></div><div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Telephone Number</label><input type="text" id="cPhone" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Email Address</label><input type="text" inputmode="email" autocomplete="email" id="cEmail" class="form-control" placeholder="client@example.com; accounts@example.com"><div class="form-text small">To add multiple email addresses, separate each email address with a semicolon (;).</div></div></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Service Address</label><textarea id="cAddress" class="form-control" rows="2" placeholder="Address where the service or booking takes place"></textarea><div class="form-text small">Used for bookings and the Daily Route Planner.</div></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Billing Address</label><textarea id="cBillingAddress" class="form-control" rows="2" placeholder="Address for invoices, quotes and statements"></textarea><div class="form-text small">If blank, the Service Address is used on financial documents.</div></div><div class="mb-3"><label class="form-label small fw-bold">Company Name</label><input type="text" id="cCompany" class="form-control" placeholder="For Tax Invoices"></div><div class="row"><div class="col-6 mb-3"><label class="form-label small fw-bold">Company Reg No.</label><input type="text" id="cRegNo" class="form-control"></div><div class="col-6 mb-3"><label class="form-label small fw-bold">Vat No.</label><input type="text" id="cVatNo" class="form-control"></div></div><div class="mb-3"><label class="form-label small fw-bold text-primary">Client Notes</label><textarea id="cNotes" class="form-control" rows="4" placeholder="Add internal client notes, service instructions, billing preferences or other information..."></textarea><div class="form-text small">Internal notes only. These notes are not added to invoices, quotes, statements or client emails.</div></div><div class="mb-3"><div class="bg-white border rounded p-3 shadow-sm"><h6 class="fw-bold text-secondary border-bottom pb-2 mb-3">Client Documents</h6><div id="clientAttachmentList" class="small mb-2 text-muted">No documents uploaded yet.</div><input type="file" id="clientAttachmentFiles" class="form-control form-control-sm" multiple><div class="form-text small">Upload contracts, signed agreements, instructions, client documents or other supporting files. Files are uploaded after the client is saved.</div></div></div></div><div class="modal-footer d-flex justify-content-between"><button class="btn btn-danger" id="btnDeleteClient" style="display:none;" onclick="deleteClient()">Delete Client</button><div class="ms-auto"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary ms-2" onclick="saveClient()">Save Client</button></div></div></div></div></div>
     
     <div class="modal fade" id="clientReportModal" tabindex="-1">
         <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -1180,7 +1180,7 @@
                             <select id="projectClientId" class="form-select border-primary">
                                 <option value="">Select {{ client_label|lower }}...</option>
                                 {% for c in clients %}
-                                <option value="{{ c.id }}">{{ c.name }} {{ c.surname or '' }}{% if c.company_name %} - {{ c.company_name }}{% endif %}</option>
+                                <option value="{{ c.id }}">{{ c.option_label or c.display_name }}</option>
                                 {% endfor %}
                             </select>
                         </div>
@@ -3044,7 +3044,7 @@
                         ${detailRow('Uploaded Files', `${attachmentCount} file${attachmentCount === 1 ? '' : 's'}`)}
                         ${detailRow('Client Phone', props.client_phone)}
                         ${detailRow('Client Email', props.client_email)}
-                        ${detailFullRow('Client Address', props.client_address)}
+                        ${detailFullRow('Service Address', props.client_address)}
                         ${detailFullRow('Booking Notes', props.booking_notes)}
                     </div>
                 </div>
@@ -3362,35 +3362,27 @@
             clientDirModal.hide(); 
             document.getElementById('clientProfileTitle').innerText = client ? 'Edit Client Profile' : 'Add New Client'; 
             document.getElementById('cId').value = client ? client.id : ''; 
-            document.getElementById('cName').value = client ? client.name : ''; 
+            document.getElementById('cName').value = client ? (client.name || '') : ''; 
             document.getElementById('cSurname').value = client ? (client.surname || '') : ''; 
             document.getElementById('cType').value = client ? (client.client_type || 'Ad hoc') : 'Ad hoc'; 
             document.getElementById('cDiscountPercent').value = client ? (client.discount_percent || '') : ''; 
             document.getElementById('cPhone').value = client ? (client.phone || '') : ''; 
             document.getElementById('cEmail').value = client ? (client.email || '') : ''; 
-            document.getElementById('cBuildingNumber').value = client ? (client.building_number || '') : '';
-            document.getElementById('cStreetName').value = client ? (client.street_name || '') : '';
-            document.getElementById('cSuburb').value = client ? (client.suburb || '') : '';
-            document.getElementById('cPostalCode').value = client ? (client.postal_code || '') : '';
-            document.getElementById('cAddress').value = client ? (client.address || '') : ''; 
+            document.getElementById('cAddress').value = client ? (client.service_address || client.address || '') : '';
+            document.getElementById('cBillingAddress').value = client ? (client.billing_address || '') : '';
             document.getElementById('cCompany').value = client ? (client.company_name || '') : ''; 
             document.getElementById('cRegNo').value = client ? (client.registration_number || '') : ''; 
             document.getElementById('cVatNo').value = client ? (client.vat_number || '') : ''; 
             document.getElementById('cNotes').value = client ? (client.notes || '') : '';
+            document.getElementById('btnDeleteClient').style.display = client ? '' : 'none';
             clearAttachmentInput('clientAttachmentFiles');
             loadAttachments('client', client ? client.id : '', 'clientAttachmentList');
             clientProfileModal.show(); 
         }
         
         async function saveClient() { 
-            const addressParts = [
-                [document.getElementById('cBuildingNumber').value, document.getElementById('cStreetName').value].filter(Boolean).join(' ').trim(),
-                document.getElementById('cSuburb').value,
-                document.getElementById('cPostalCode').value
-            ].filter(Boolean).join(', ');
-            document.getElementById('cAddress').value = addressParts;
-            const data = { id: document.getElementById('cId').value, name: document.getElementById('cName').value, surname: document.getElementById('cSurname').value, client_type: document.getElementById('cType').value, discount_percent: document.getElementById('cDiscountPercent').value, phone: document.getElementById('cPhone').value, email: document.getElementById('cEmail').value, address: addressParts, building_number: document.getElementById('cBuildingNumber').value, street_name: document.getElementById('cStreetName').value, suburb: document.getElementById('cSuburb').value, postal_code: document.getElementById('cPostalCode').value, company_name: document.getElementById('cCompany').value, registration_number: document.getElementById('cRegNo').value, vat_number: document.getElementById('cVatNo').value, notes: document.getElementById('cNotes').value }; 
-            if(!data.name) return alert("First Name is required."); 
+            const data = { id: document.getElementById('cId').value, name: document.getElementById('cName').value.trim(), surname: document.getElementById('cSurname').value.trim(), client_type: document.getElementById('cType').value, discount_percent: document.getElementById('cDiscountPercent').value, phone: document.getElementById('cPhone').value, email: document.getElementById('cEmail').value, service_address: document.getElementById('cAddress').value.trim(), billing_address: document.getElementById('cBillingAddress').value.trim(), company_name: document.getElementById('cCompany').value.trim(), registration_number: document.getElementById('cRegNo').value, vat_number: document.getElementById('cVatNo').value, notes: document.getElementById('cNotes').value }; 
+            if(!data.name && !data.company_name) return alert("Enter either a First Name or a Company Name."); 
             try {
                 const res = await fetch('/update_client', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
                 const result = await parseJsonOrError(res);
@@ -3399,6 +3391,26 @@
                 location.reload();
             } catch (err) {
                 alert(err.message || 'Could not save client.');
+            }
+        }
+
+        async function deleteClient() {
+            const clientId = document.getElementById('cId').value;
+            const clientName = document.getElementById('cName').value.trim();
+            const companyName = document.getElementById('cCompany').value.trim();
+            if(!clientId) return;
+            if(!confirm(`Delete ${clientName || companyName || 'this client'}? This cannot be undone.`)) return;
+            try {
+                const res = await fetch('/delete_client', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({id: clientId})
+                });
+                const result = await parseJsonOrError(res);
+                if(result.status !== 'success') throw new Error(result.message || 'Could not delete client.');
+                location.reload();
+            } catch(err) {
+                alert(err.message || 'Could not delete client.');
             }
         }
 

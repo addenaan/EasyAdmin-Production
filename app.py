@@ -623,7 +623,7 @@ def safe_table_name(name):
 
 
 COMPANY_IMPORT_TABLES = {
-    'clients': ['name', 'surname', 'company_name', 'registration_number', 'vat_number', 'building_number', 'street_name', 'suburb', 'postal_code', 'address', 'phone', 'email', 'client_type', 'discount_percent', 'notes'],
+    'clients': ['name', 'surname', 'company_name', 'registration_number', 'vat_number', 'building_number', 'street_name', 'suburb', 'postal_code', 'address', 'billing_address', 'phone', 'email', 'client_type', 'discount_percent', 'notes'],
     'employees': ['name', 'emp_number', 'id_passport', 'date_of_birth', 'job_title', 'status', 'emp_type', 'gross_salary', 'half_day_rate', 'special_daily_rate', 'start_date', 'inactive_date', 'phone', 'email', 'address', 'emergency_contact', 'tax_number', 'paye_ref', 'bank_name', 'account_holder', 'account_number', 'branch_code', 'account_type', 'payment_reference', 'workday_hours', 'overtime_pay_treatment', 'notes'],
     'services': ['name', 'client_price', 'company_cost'],
     'bookings': ['title', 'start', 'employee', 'booking_type', 'transport', 'booking_notes', 'overtime_hours', 'is_half_day', 'is_special_rate', 'is_invoiced'],
@@ -646,7 +646,8 @@ def normalise_import_header(value):
 
 
 IMPORT_REQUIRED_FIELDS = {
-    'clients': {'name'},
+    # Client rows use a conditional requirement: either name or company_name.
+    'clients': set(),
     'employees': {'name', 'start_date'},
     'services': {'name'},
     'bookings': {'title', 'start'},
@@ -1076,6 +1077,17 @@ def validate_import_row(import_type, row, line_no, conn, company_id, seen_values
             errors.append(f"Line {line_no}, field '{email_field}': '{cleaned[email_field]}' is not a valid email address.")
 
     if import_type == 'clients':
+        if not cleaned.get('name') and not cleaned.get('company_name'):
+            errors.append(f"Line {line_no}: either 'name' or 'company_name' is required.")
+        if not cleaned.get('address'):
+            street_line = ' '.join([
+                cleaned.get('building_number', '').strip(),
+                cleaned.get('street_name', '').strip(),
+            ]).strip()
+            cleaned['address'] = ', '.join([
+                value for value in (street_line, cleaned.get('suburb', ''), cleaned.get('postal_code', ''))
+                if value
+            ])
         discount = cleaned.get('discount_percent')
         if isinstance(discount, (int, float)) and not (0 <= float(discount) <= 100):
             errors.append(f"Line {line_no}, field 'discount_percent': value must be between 0 and 100.")
@@ -2649,7 +2661,7 @@ def init_db():
 
     loose_cols = {
         'bookings': [('client_id', 'INTEGER'), ('google_event_id', 'TEXT'), ('booking_type', 'TEXT DEFAULT "Standard Home Clean"'), ('transport', 'TEXT DEFAULT ""'), ('booking_notes', 'TEXT DEFAULT ""'), ('overtime_hours', 'REAL DEFAULT 0'), ('is_half_day', 'INTEGER DEFAULT 0'), ('is_special_rate', 'INTEGER DEFAULT 0'), ('is_invoiced', 'INTEGER DEFAULT 0'), ('project_id', 'INTEGER')],
-        'clients': [('surname', 'TEXT'), ('address', 'TEXT'), ('building_number', 'TEXT'), ('street_name', 'TEXT'), ('suburb', 'TEXT'), ('postal_code', 'TEXT'), ('phone', 'TEXT'), ('email', 'TEXT'), ('client_type', 'TEXT DEFAULT "Ad hoc"'), ('discount_percent', 'REAL DEFAULT 0'), ('company_name', 'TEXT'), ('registration_number', 'TEXT'), ('vat_number', 'TEXT'), ('notes', 'TEXT')],
+        'clients': [('surname', 'TEXT'), ('address', 'TEXT'), ('billing_address', 'TEXT'), ('building_number', 'TEXT'), ('street_name', 'TEXT'), ('suburb', 'TEXT'), ('postal_code', 'TEXT'), ('phone', 'TEXT'), ('email', 'TEXT'), ('client_type', 'TEXT DEFAULT "Ad hoc"'), ('discount_percent', 'REAL DEFAULT 0'), ('company_name', 'TEXT'), ('registration_number', 'TEXT'), ('vat_number', 'TEXT'), ('notes', 'TEXT')],
         'invoices': [('client_id', 'INTEGER')],
         'quotes': [('client_id', 'INTEGER')],
         'employees': [('start_date', 'TEXT'), ('inactive_date', 'TEXT'), ('gross_salary', 'REAL DEFAULT 0'), ('half_day_rate', 'REAL'), ('special_daily_rate', 'REAL'), ('emp_number', 'TEXT'), ('id_passport', 'TEXT'), ('job_title', 'TEXT'), ('status', 'TEXT DEFAULT "Active"'), ('phone', 'TEXT'), ('email', 'TEXT'), ('address', 'TEXT'), ('emergency_contact', 'TEXT'), ('tax_number', 'TEXT'), ('paye_ref', 'TEXT'), ('bank_details', 'TEXT'), ('bank_name', 'TEXT'), ('account_holder', 'TEXT'), ('account_number', 'TEXT'), ('branch_code', 'TEXT'), ('account_type', 'TEXT'), ('payment_reference', 'TEXT'), ('google_event_id', 'TEXT'), ('emp_type', 'TEXT DEFAULT "Full-time (5 Days)"'), ('cv_file', 'TEXT'), ('id_file', 'TEXT'), ('contract_file', 'TEXT'), ('additional_leave', 'REAL DEFAULT 0'), ('notes', 'TEXT'), ('workday_hours', 'REAL DEFAULT 7'), ('overtime_pay_treatment', 'TEXT DEFAULT "regular"'), ('uif_contributor', 'TEXT DEFAULT "Yes"'), ('uif_non_contributor_reason', 'TEXT'), ('uif_termination_code', 'TEXT')],
@@ -2668,6 +2680,30 @@ def init_db():
         for c_name, c_type in cols:
             try: conn.execute(f'ALTER TABLE {t_name} ADD COLUMN {c_name} {c_type}')
             except: pass
+
+    # Preserve every historical client address while making the existing
+    # combined address column the canonical Service Address. Legacy component
+    # columns remain in place for backwards compatibility and recovery.
+    try:
+        legacy_clients = conn.execute('''SELECT id, address, building_number, street_name, suburb, postal_code
+                                         FROM clients
+                                         WHERE address IS NULL OR TRIM(address)='' ''').fetchall()
+        for client_row in legacy_clients:
+            street_line = ' '.join([
+                str(client_row['building_number'] or '').strip(),
+                str(client_row['street_name'] or '').strip(),
+            ]).strip()
+            service_address = ', '.join([
+                value for value in (
+                    street_line,
+                    str(client_row['suburb'] or '').strip(),
+                    str(client_row['postal_code'] or '').strip(),
+                ) if value
+            ])
+            if service_address:
+                conn.execute('UPDATE clients SET address=? WHERE id=?', (service_address, client_row['id']))
+    except Exception:
+        pass
 
     # Overtime is always period remuneration for PAYE. Retain the legacy field only
     # for backwards-compatible imports/database shape, but normalize its stored value.
@@ -3284,6 +3320,12 @@ def safe_adjustment_money(value):
         return 0.0
 
 def compose_client_address(building_number=None, street_name=None, suburb=None, postal_code=None, fallback_address=None):
+    # The combined address is now the canonical Service Address. Prefer it so
+    # edits made in the single-field client form cannot be overridden by legacy
+    # component columns that are deliberately retained for data preservation.
+    canonical_address = str(fallback_address or '').strip()
+    if canonical_address:
+        return canonical_address
     parts = []
     street_line = ' '.join([str(building_number or '').strip(), str(street_name or '').strip()]).strip()
     if street_line:
@@ -3292,8 +3334,35 @@ def compose_client_address(building_number=None, street_name=None, suburb=None, 
         parts.append(str(suburb).strip())
     if postal_code:
         parts.append(str(postal_code).strip())
-    composed = ', '.join([p for p in parts if p])
-    return composed if composed else (fallback_address or '')
+    return ', '.join([p for p in parts if p])
+
+
+def client_service_address(client_row):
+    if not client_row:
+        return ''
+    client = dict(client_row)
+    return compose_client_address(
+        client.get('building_number'), client.get('street_name'), client.get('suburb'),
+        client.get('postal_code'), client.get('address')
+    )
+
+
+def client_billing_address(client_row):
+    if not client_row:
+        return ''
+    client = dict(client_row)
+    return str(client.get('billing_address') or '').strip() or client_service_address(client)
+
+
+def client_company_detail(client_row):
+    """Return a separate company line only when it differs from the display name."""
+    if not client_row:
+        return ''
+    client = dict(client_row)
+    company_name = str(client.get('company_name') or '').strip()
+    if company_name and company_name.casefold() != client_display_name(client).casefold():
+        return company_name
+    return ''
 
 
 def client_display_name(client_row):
@@ -3312,7 +3381,7 @@ def client_option_label(client_row):
     extra = []
     if c.get('company_name') and c.get('company_name') not in label:
         extra.append(str(c.get('company_name')).strip())
-    address = compose_client_address(c.get('building_number'), c.get('street_name'), c.get('suburb'), c.get('postal_code'), c.get('address'))
+    address = client_service_address(c)
     if address:
         extra.append(address)
     if c.get('phone'):
@@ -3325,6 +3394,8 @@ def prepare_client_options(clients):
     for client in clients or []:
         d = dict(client)
         d['display_name'] = client_display_name(d)
+        d['service_address'] = client_service_address(d)
+        d['billing_address_effective'] = client_billing_address(d)
         d['option_label'] = client_option_label(d)
         prepared.append(d)
     return prepared
@@ -5524,9 +5595,9 @@ def restrict_access():
         return
 
     # Client/profile changes are write actions. Read-only Booking or Invoicing users may view client data through app/report screens only.
-    if path == '/update_client':
+    if path in ('/update_client', '/delete_client'):
         if not (_session_has_app_full('booking') or _session_has_app_full('invoicing')):
-            return _access_denied("Access Denied: Full Booking or Invoicing access is required to update clients.")
+            return _access_denied("Access Denied: Full Booking or Invoicing access is required to manage clients.")
 
     booking_read_paths = ['/booking', '/bookings', '/client_report', '/daily_route', '/export', '/booking_staff_hours', '/export_bookings_range', '/api/booking_ops_report', '/export_booking_ops_report', '/api/bulk_bookings/search', '/api/booking-dashboard-summary']
     booking_write_paths = ['/add', '/edit_booking', '/delete_booking', '/generate_recurring', '/api/bulk_bookings/update', '/api/bulk_bookings/delete', '/api/attachments/upload', '/api/attachments/delete', '/api/projects/save', '/api/projects/delete']
@@ -6426,7 +6497,7 @@ def _build_reports_payload(report_type, filters):
                   AND (?=0 OR c.id=?)
                 ORDER BY COALESCE(c.company_name, ''), c.name, c.surname
             """, (filters['start_date'], filters['end_date'], session['company_id'], filters.get('client_id') or 0, filters.get('client_id') or 0)).fetchall()
-            columns = ['Client', 'Type', 'Phone', 'Email', 'Address', 'Bookings in Period', 'Last Booking', 'Documents', 'Invoice Total in Period', 'Outstanding Balance']
+            columns = ['Client', 'Type', 'Phone', 'Email', 'Service Address', 'Bookings in Period', 'Last Booking', 'Documents', 'Invoice Total in Period', 'Outstanding Balance']
             for c in client_rows:
                 d = dict(c)
                 key = str(d.get('id'))
@@ -13519,8 +13590,9 @@ def update_client():
         source_app = 'Booking & Ops'
 
     client_name = str(data.get('name') or '').strip()
-    if not client_name:
-        return jsonify({"status": "error", "message": "First Name is required."}), 400
+    company_name = str(data.get('company_name') or '').strip()
+    if not client_name and not company_name:
+        return jsonify({"status": "error", "message": "Enter either a First Name or a Company Name."}), 400
     try:
         client_email = normalise_client_email_field(data.get('email'))
     except ValueError as exc:
@@ -13532,8 +13604,10 @@ def update_client():
         data.get('street_name'),
         data.get('suburb'),
         data.get('postal_code'),
-        data.get('address')
+        data.get('service_address') if 'service_address' in data else data.get('address')
     )
+    billing_address = str(data.get('billing_address') or '').strip()
+    display_name = ' '.join([client_name, str(data.get('surname') or '').strip()]).strip() or company_name
     conn = get_db_connection()
     action_msg = None
     try:
@@ -13543,29 +13617,35 @@ def update_client():
                 client_id = int(data.get('id') or 0)
             except Exception:
                 return jsonify({"status": "error", "message": "Invalid client ID."}), 400
-            existing = conn.execute('SELECT id FROM clients WHERE id=? AND company_id=?', (client_id, session['company_id'])).fetchone()
+            existing = conn.execute('SELECT * FROM clients WHERE id=? AND company_id=?', (client_id, session['company_id'])).fetchone()
             if not existing:
                 return jsonify({"status": "error", "message": "Client not found for this company."}), 404
+            existing_client = dict(existing)
+            legacy_address_values = {
+                field: data.get(field) if field in data else existing_client.get(field)
+                for field in ('building_number', 'street_name', 'suburb', 'postal_code')
+            }
+            billing_address_value = billing_address if 'billing_address' in data else existing_client.get('billing_address')
             conn.execute('''UPDATE clients
                             SET name=?, surname=?, client_type=?, phone=?, email=?, address=?,
                                 building_number=?, street_name=?, suburb=?, postal_code=?, discount_percent=?,
-                                company_name=?, registration_number=?, vat_number=?, notes=?
+                                company_name=?, registration_number=?, vat_number=?, notes=?, billing_address=?
                             WHERE id=? AND company_id=?''',
                          (client_name, data.get('surname'), data.get('client_type'), data.get('phone'), client_email, address,
-                          data.get('building_number'), data.get('street_name'), data.get('suburb'), data.get('postal_code'), sanitize_percent(data.get('discount_percent')),
-                          data.get('company_name'), data.get('registration_number'), data.get('vat_number'), client_notes, client_id, session['company_id']))
-            action_msg = (source_app, 'Updated Client', f"Updated client profile: {client_name}")
+                          legacy_address_values['building_number'], legacy_address_values['street_name'], legacy_address_values['suburb'], legacy_address_values['postal_code'], sanitize_percent(data.get('discount_percent')),
+                          company_name, data.get('registration_number'), data.get('vat_number'), client_notes, billing_address_value, client_id, session['company_id']))
+            action_msg = (source_app, 'Updated Client', f"Updated client profile: {display_name}")
         else:
             cur = conn.execute('''INSERT INTO clients
                             (company_id, name, surname, client_type, phone, email, address,
                              building_number, street_name, suburb, postal_code, discount_percent,
-                             company_name, registration_number, vat_number, notes)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                             company_name, registration_number, vat_number, notes, billing_address)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                          (session['company_id'], client_name, data.get('surname'), data.get('client_type'), data.get('phone'), client_email, address,
                           data.get('building_number'), data.get('street_name'), data.get('suburb'), data.get('postal_code'), sanitize_percent(data.get('discount_percent')),
-                          data.get('company_name'), data.get('registration_number'), data.get('vat_number'), client_notes))
+                          company_name, data.get('registration_number'), data.get('vat_number'), client_notes, billing_address))
             client_id = cur.lastrowid
-            action_msg = (source_app, 'Created Client', f"Added new client: {client_name}")
+            action_msg = (source_app, 'Created Client', f"Added new client: {display_name}")
         conn.commit()
     finally:
         conn.close()
@@ -13573,6 +13653,91 @@ def update_client():
     if action_msg:
         log_action(action_msg[0], action_msg[1], action_msg[2])
     return jsonify({"status": "success", "client_id": client_id, "email": client_email})
+
+
+@app.route('/delete_client', methods=['POST'])
+def delete_client():
+    data = request.get_json(silent=True) or {}
+    try:
+        client_id = int(data.get('id') or 0)
+    except (TypeError, ValueError):
+        client_id = 0
+    if not client_id:
+        return jsonify({'status': 'error', 'message': 'Invalid client ID.'}), 400
+
+    cid = session['company_id']
+    conn = get_db_connection()
+    attachment_rows = []
+    try:
+        _begin_atomic_write(conn)
+        client = conn.execute('SELECT * FROM clients WHERE id=? AND company_id=?', (client_id, cid)).fetchone()
+        if not client:
+            _rollback_atomic_write(conn)
+            return jsonify({'status': 'error', 'message': 'Client not found for this company.'}), 404
+
+        client_name = client_display_name(client)
+        legacy_names = {
+            value for value in (
+                client_name,
+                str(client['name'] or '').strip(),
+                str(client['company_name'] or '').strip(),
+            ) if value
+        }
+        booking_count = int(conn.execute(
+            'SELECT COUNT(*) AS total FROM bookings WHERE company_id=? AND client_id=?',
+            (cid, client_id),
+        ).fetchone()['total'] or 0)
+        if legacy_names:
+            placeholders = ','.join(['?'] * len(legacy_names))
+            legacy_booking_count = int(conn.execute(
+                f'''SELECT COUNT(*) AS total FROM bookings
+                    WHERE company_id=? AND (client_id IS NULL OR client_id=0)
+                      AND title IN ({placeholders})''',
+                [cid] + sorted(legacy_names),
+            ).fetchone()['total'] or 0)
+            booking_count += legacy_booking_count
+
+        linked_counts = {'bookings': booking_count}
+        for table, label in (('invoices', 'invoices'), ('quotes', 'quotes'), ('projects', 'projects')):
+            linked_counts[label] = int(conn.execute(
+                f'SELECT COUNT(*) AS total FROM {table} WHERE company_id=? AND client_id=?',
+                (cid, client_id),
+            ).fetchone()['total'] or 0)
+        blockers = [f"{count} {label}" for label, count in linked_counts.items() if count]
+        if blockers:
+            _rollback_atomic_write(conn)
+            return jsonify({
+                'status': 'error',
+                'message': 'This client cannot be deleted because it has linked ' + ', '.join(blockers) + '.',
+                'linked_records': linked_counts,
+            }), 409
+
+        attachment_rows = conn.execute(
+            "SELECT file_path FROM attachments WHERE company_id=? AND linked_type='client' AND linked_id=?",
+            (cid, client_id),
+        ).fetchall()
+        conn.execute(
+            "DELETE FROM attachments WHERE company_id=? AND linked_type='client' AND linked_id=?",
+            (cid, client_id),
+        )
+        conn.execute('DELETE FROM clients WHERE id=? AND company_id=?', (client_id, cid))
+        _commit_atomic_write(conn)
+    except Exception:
+        _rollback_atomic_write(conn)
+        raise
+    finally:
+        conn.close()
+
+    uploads_root = os.path.abspath(app.config['UPLOAD_FOLDER'])
+    for attachment in attachment_rows:
+        abs_path = os.path.abspath(os.path.join(uploads_root, attachment['file_path']))
+        if abs_path.startswith(uploads_root + os.sep) and os.path.exists(abs_path):
+            try:
+                os.remove(abs_path)
+            except Exception as exc:
+                print(f'Client attachment file delete warning: {exc}')
+    log_action('Client Management', 'Deleted Client', f'Deleted client profile: {client_name}')
+    return jsonify({'status': 'success', 'message': f'{client_name} was deleted.'})
 
 @app.route('/client_report', methods=['POST'])
 def client_report():
@@ -13962,6 +14127,22 @@ def _fallback_daily_route_order(route, start_point=''):
     return ordered
 
 
+def _route_area_from_service_address(service_address, legacy_suburb='', legacy_postal_code=''):
+    """Keep area grouping useful after the client form moves to one address field."""
+    legacy_area = str(legacy_suburb or legacy_postal_code or '').strip()
+    if legacy_area:
+        return legacy_area
+    parts = [part.strip() for part in re.split(r'[,\n]+', str(service_address or '')) if part.strip()]
+    if not parts:
+        return ''
+    if len(parts) == 1:
+        return parts[0]
+    # Ignore a trailing postal-code-only segment and use the preceding locality.
+    if re.fullmatch(r'[A-Za-z\s-]*\d[A-Za-z0-9\s-]*', parts[-1]) and len(parts) >= 2:
+        return parts[-2]
+    return parts[-1]
+
+
 def _daily_route_conflicts(route):
     assignments = {}
     by_id = {stop.get('id'): stop for stop in route}
@@ -14099,7 +14280,7 @@ def daily_route():
         )
         client_name = (' '.join([str(value).strip() for value in [row['client_first_name'], row['client_surname']] if value]).strip()
                        or row['client_company_name'] or row['title'] or 'Booking')
-        area = str(row['suburb'] or row['postal_code'] or '').strip()
+        area = _route_area_from_service_address(address, row['suburb'], row['postal_code'])
         route.append({
             'id': row['id'],
             'time': _route_time_label(row['start']),
@@ -18061,8 +18242,7 @@ def get_invoice(inv_id):
     client_email = ''
     if client:
         client_dict = dict(client)
-        if 'surname' in client_dict and client_dict['surname']:
-            client_full = f"{client_dict['name']} {client_dict['surname']}"
+        client_full = client_display_name(client_dict) or client_full
         if 'email' in client_dict and client_dict['email']:
             client_email = client_dict['email']
 
@@ -18088,8 +18268,8 @@ def get_invoice(inv_id):
         "items": [dict(i) for i in items],
         "client_full_name": client_full,
         "client_email": client_email,
-        "client_address": client['address'] if client and 'address' in dict(client) and client['address'] else '',
-        "client_company": client['company_name'] if client and 'company_name' in dict(client) and client['company_name'] else '',
+        "client_address": client_billing_address(client),
+        "client_company": client_company_detail(client),
         "client_reg": client['registration_number'] if client and 'registration_number' in dict(client) and client['registration_number'] else '',
         "client_vat": client['vat_number'] if client and 'vat_number' in dict(client) and client['vat_number'] else '',
         "payments": payments,
@@ -18163,8 +18343,7 @@ def get_receipt(payment_id):
     client_email = ''
     if client:
         cdict = dict(client)
-        if cdict.get('surname'):
-            client_full = f"{cdict.get('name', '')} {cdict.get('surname', '')}".strip()
+        client_full = client_display_name(cdict) or client_full
         client_email = cdict.get('email') or ''
 
     receipt_no = f"RCP-{payment_id:04d}"
@@ -18179,8 +18358,8 @@ def get_receipt(payment_id):
         'outstanding_balance': totals['outstanding'],
         'client_full_name': client_full,
         'client_email': client_email,
-        'client_address': client['address'] if client and 'address' in dict(client) and client['address'] else '',
-        'client_company': client['company_name'] if client and 'company_name' in dict(client) and client['company_name'] else '',
+        'client_address': client_billing_address(client),
+        'client_company': client_company_detail(client),
         'client_reg': client['registration_number'] if client and 'registration_number' in dict(client) and client['registration_number'] else '',
         'client_vat': client['vat_number'] if client and 'vat_number' in dict(client) and client['vat_number'] else ''
     })
@@ -18378,8 +18557,7 @@ def get_credit_note(credit_id):
     client_email = ''
     if client:
         cdict = dict(client)
-        if cdict.get('surname'):
-            client_full = f"{cdict.get('name', '')} {cdict.get('surname', '')}".strip()
+        client_full = client_display_name(cdict) or client_full
         client_email = cdict.get('email') or ''
 
     totals = get_invoice_financial_totals(conn, cid, inv['id'])
@@ -18393,8 +18571,8 @@ def get_credit_note(credit_id):
         'outstanding_balance': totals['outstanding'],
         'client_full_name': client_full,
         'client_email': client_email,
-        'client_address': client['address'] if client and 'address' in dict(client) and client['address'] else '',
-        'client_company': client['company_name'] if client and 'company_name' in dict(client) and client['company_name'] else '',
+        'client_address': client_billing_address(client),
+        'client_company': client_company_detail(client),
         'client_reg': client['registration_number'] if client and 'registration_number' in dict(client) and client['registration_number'] else '',
         'client_vat': client['vat_number'] if client and 'vat_number' in dict(client) and client['vat_number'] else ''
     })
@@ -18588,8 +18766,7 @@ def get_quote(q_id):
     client_email = ''
     if client:
         client_dict = dict(client)
-        if 'surname' in client_dict and client_dict['surname']:
-            client_full = f"{client_dict['name']} {client_dict['surname']}"
+        client_full = client_display_name(client_dict) or client_full
         if 'email' in client_dict and client_dict['email']:
             client_email = client_dict['email']
 
@@ -18600,8 +18777,8 @@ def get_quote(q_id):
         "items": [dict(i) for i in items],
         "client_full_name": client_full,
         "client_email": client_email,
-        "client_address": client['address'] if client and 'address' in dict(client) and client['address'] else '',
-        "client_company": client['company_name'] if client and 'company_name' in dict(client) and client['company_name'] else '',
+        "client_address": client_billing_address(client),
+        "client_company": client_company_detail(client),
         "client_reg": client['registration_number'] if client and 'registration_number' in dict(client) and client['registration_number'] else '',
         "client_vat": client['vat_number'] if client and 'vat_number' in dict(client) and client['vat_number'] else ''
     })
@@ -19147,16 +19324,18 @@ def _build_billing_pdf_payload(kind, doc_id):
     client_lines = []
     if client:
         cdict = dict(client)
-        client_full = f"{cdict.get('name', '')} {cdict.get('surname', '')}".strip() if cdict.get('surname') else cdict.get('name', doc['client_name'])
+        client_full = client_display_name(cdict) or doc['client_name']
         client_email = cdict.get('email') or ''
-        if cdict.get('company_name'):
-            client_lines.append(cdict.get('company_name'))
+        company_detail = client_company_detail(cdict)
+        if company_detail:
+            client_lines.append(company_detail)
         if cdict.get('registration_number'):
             client_lines.append(f"Reg No: {cdict.get('registration_number')}")
         if cdict.get('vat_number'):
             client_lines.append(f"VAT No: {cdict.get('vat_number')}")
-        if cdict.get('address'):
-            client_lines.extend([line for line in str(cdict.get('address')).splitlines() if line.strip()])
+        billing_address = client_billing_address(cdict)
+        if billing_address:
+            client_lines.extend([line for line in billing_address.splitlines() if line.strip()])
     additional_info = s_dict.get('invoice_additional_info', '') or ''
     if project_note:
         additional_info = project_note + ('\n\n' + additional_info if additional_info.strip() else '')
@@ -19211,16 +19390,18 @@ def _build_receipt_pdf_payload(payment_id):
         client_lines = []
         if client:
             cdict = dict(client)
-            client_full = f"{cdict.get('name', '')} {cdict.get('surname', '')}".strip() if cdict.get('surname') else cdict.get('name', invoice['client_name'])
+            client_full = client_display_name(cdict) or invoice['client_name']
             client_email = cdict.get('email') or ''
-            if cdict.get('company_name'):
-                client_lines.append(cdict.get('company_name'))
+            company_detail = client_company_detail(cdict)
+            if company_detail:
+                client_lines.append(company_detail)
             if cdict.get('registration_number'):
                 client_lines.append(f"Reg No: {cdict.get('registration_number')}")
             if cdict.get('vat_number'):
                 client_lines.append(f"VAT No: {cdict.get('vat_number')}")
-            if cdict.get('address'):
-                client_lines.extend([line for line in str(cdict.get('address')).splitlines() if line.strip()])
+            billing_address = client_billing_address(cdict)
+            if billing_address:
+                client_lines.extend([line for line in billing_address.splitlines() if line.strip()])
 
         description = f"Payment received for Invoice {invoice_number}"
         if payment['reference']:
@@ -19795,7 +19976,7 @@ def _build_client_statement_data(data):
         items.sort(key=lambda item: (str(item.get('date') or ''), 0 if item.get('type')=='invoice' else 1 if item.get('type')=='credit_note' else 2, int(item.get('sort_id') or 0)))
         return {
             'client_id': client_id, 'client_full_name': client_full, 'client_email': client_email,
-            'client_address': client_dict.get('address') or '', 'client_company': client_dict.get('company_name') or '',
+            'client_address': client_billing_address(client_dict), 'client_company': client_company_detail(client_dict),
             'client_reg': client_dict.get('registration_number') or '', 'client_vat': client_dict.get('vat_number') or '',
             'items': items, 'total_invoiced': round(total_invoiced,2), 'total_credited': round(total_credited,2),
             'total_paid': round(total_paid,2), 'total_due': round(total_invoiced-total_credited-total_paid,2),
@@ -19887,10 +20068,12 @@ def _build_credit_note_pdf_payload(credit_id):
         cdict = dict(client) if client else {}
         client_name = client_display_name(client) if client else invoice['client_name']
         client_lines = []
-        if cdict.get('company_name'): client_lines.append(cdict.get('company_name'))
+        company_detail = client_company_detail(cdict)
+        if company_detail: client_lines.append(company_detail)
         if cdict.get('registration_number'): client_lines.append('Reg No: ' + str(cdict.get('registration_number')))
         if cdict.get('vat_number'): client_lines.append('VAT No: ' + str(cdict.get('vat_number')))
-        if cdict.get('address'): client_lines.extend([x for x in str(cdict.get('address')).splitlines() if x.strip()])
+        billing_address = client_billing_address(cdict)
+        if billing_address: client_lines.extend([x for x in billing_address.splitlines() if x.strip()])
         amount = abs(float(credit['amount'] or 0))
         invoice_no = _billing_document_formatted_number(conn, cid, 'invoice', invoice)
         number = _credit_note_formatted_number(credit_id)
