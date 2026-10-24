@@ -958,6 +958,35 @@
         </div>
     </div>
 
+    <!-- EMP501 Modal -->
+    <div class="modal fade" id="emp501Modal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-warning text-dark"><h5 class="modal-title fw-bold">EMP501 Export</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body bg-light">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="small fw-bold" for="emp501TaxYear">Tax Year End</label>
+                            <input type="number" class="form-control border-dark" id="emp501TaxYear" min="2000" max="2200" step="1" placeholder="e.g. 2027" oninput="updateEmp501PeriodPreview()">
+                            <div class="form-text">For example, 2027 covers the tax year beginning 1 March 2026.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="small fw-bold" for="emp501SubmissionType">Submission Type</label>
+                            <select class="form-select border-dark" id="emp501SubmissionType" onchange="updateEmp501PeriodPreview()">
+                                <option value="">Select submission type</option>
+                                <option value="provisional">Provisional (Interim)</option>
+                                <option value="annual">Annual</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="alert alert-info small mt-3 mb-0" id="emp501PeriodPreview">Select a tax year and submission type to confirm the reporting period.</div>
+                    <div class="small fw-bold text-danger mt-2" id="emp501Status"></div>
+                </div>
+                <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-warning text-dark fw-bold" type="button" onclick="downloadEmp501()">Download EMP501</button></div>
+            </div>
+        </div>
+    </div>
+
     <!-- Report Modal -->
     <div class="modal fade" id="reportModal" tabindex="-1">
         <div class="modal-dialog modal-xl">
@@ -1106,6 +1135,7 @@
         const reportModal = new bootstrap.Modal(document.getElementById('reportModal'));
         const editLeaveModal = new bootstrap.Modal(document.getElementById('editLeaveModal'));
         const emp201Modal = new bootstrap.Modal(document.getElementById('emp201Modal'));
+        const emp501Modal = new bootstrap.Modal(document.getElementById('emp501Modal'));
         const ui19Modal = new bootstrap.Modal(document.getElementById('ui19Modal'));
         const irp5Modal = new bootstrap.Modal(document.getElementById('irp5Modal'));
         const interviewModal = new bootstrap.Modal(document.getElementById('interviewModal'));
@@ -2497,8 +2527,46 @@
         }
 
         function openEmp501Modal() {
-            const year = prompt("Enter the Tax Year End to export (e.g. 2026):", new Date().getFullYear());
-            if(year) window.location.href = `/export_emp501/${year}`;
+            const now = new Date();
+            const currentTaxYearEnd = now.getMonth() >= 2 ? now.getFullYear() + 1 : now.getFullYear();
+            document.getElementById('emp501TaxYear').value = currentTaxYearEnd;
+            document.getElementById('emp501SubmissionType').value = '';
+            document.getElementById('emp501Status').innerText = '';
+            updateEmp501PeriodPreview();
+            emp501Modal.show();
+        }
+
+        function updateEmp501PeriodPreview() {
+            const year = Number(document.getElementById('emp501TaxYear').value);
+            const submissionType = document.getElementById('emp501SubmissionType').value;
+            const preview = document.getElementById('emp501PeriodPreview');
+            if(!Number.isInteger(year) || year < 2000 || year > 2200 || !submissionType) {
+                preview.innerText = 'Select a tax year and submission type to confirm the reporting period.';
+                return;
+            }
+            const startYear = year - 1;
+            const endLabel = submissionType === 'provisional'
+                ? `31 August ${startYear}`
+                : `${new Date(year, 2, 0).getDate()} February ${year}`;
+            const typeLabel = submissionType === 'provisional' ? 'Provisional (Interim)' : 'Annual';
+            preview.innerText = `${typeLabel} reporting period: 1 March ${startYear} to ${endLabel}.`;
+        }
+
+        function downloadEmp501() {
+            const year = Number(document.getElementById('emp501TaxYear').value);
+            const submissionType = document.getElementById('emp501SubmissionType').value;
+            const status = document.getElementById('emp501Status');
+            status.innerText = '';
+            if(!Number.isInteger(year) || year < 2000 || year > 2200) {
+                status.innerText = 'Enter a valid four-digit tax year.';
+                return;
+            }
+            if(!['provisional', 'annual'].includes(submissionType)) {
+                status.innerText = 'Select Provisional or Annual.';
+                return;
+            }
+            emp501Modal.hide();
+            window.location.href = `/export_emp501/${encodeURIComponent(year)}?submission_type=${encodeURIComponent(submissionType)}`;
         }
 
         // --- OLD REPORT UI & LOGIC (RESTORED) ---

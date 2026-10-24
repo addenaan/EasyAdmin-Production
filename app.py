@@ -17220,6 +17220,32 @@ def _payroll_tax_certificate_ledger_summary(conn, company_id, emp_id, start_date
     }
 
 
+def _emp501_reporting_period(tax_year_value, reconciliation_period='annual'):
+    """Return the authoritative EMP501 period for a SARS tax-year end."""
+    try:
+        tax_year = int(tax_year_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Tax year must be a four-digit year, for example 2027.') from exc
+    if tax_year < 2000 or tax_year > 2200:
+        raise ValueError('Tax year must be a four-digit year, for example 2027.')
+
+    period_key = str(reconciliation_period or 'annual').strip().lower()
+    if period_key == 'provisional':
+        period_key = 'interim'
+    if period_key not in {'interim', 'annual'}:
+        raise ValueError('EMP501 submission type must be provisional or annual.')
+
+    start_date = f'{tax_year - 1}-03-01'
+    if period_key == 'interim':
+        end_date = f'{tax_year - 1}-08-31'
+        period_name = 'interim reconciliation'
+    else:
+        end_day = calendar.monthrange(tax_year, 2)[1]
+        end_date = f'{tax_year}-02-{end_day:02d}'
+        period_name = 'annual reconciliation'
+    return tax_year, period_key, start_date, end_date, period_name
+
+
 def _build_irp5_data(emp_id, tax_year):
     tax_year = int(tax_year)
     start_date = f"{tax_year-1}-03-01"
@@ -17285,36 +17311,54 @@ def download_irp5_pdf(employee_id, tax_year):
 def export_emp501(year):
     if not _session_has_payroll_read_access():
         return "Forbidden", 403
-    tax_year = int(year)
-    start_date = f"{tax_year-1}-03-01"
-    end_date = f"{tax_year}-02-{calendar.monthrange(tax_year, 2)[1]:02d}"
+    submission_type = (
+        request.args.get('submission_type')
+        or request.args.get('reconciliation_period')
+        or 'annual'
+    )
+    try:
+        tax_year, period_key, start_date, end_date, period_name = _emp501_reporting_period(
+            year, submission_type
+        )
+    except ValueError as exc:
+        return str(exc), 400
+    submission_label = 'Provisional' if period_key == 'interim' else 'Annual'
 
     conn = get_db_connection()
-    employees = conn.execute("SELECT * FROM employees WHERE company_id=?", (session['company_id'],)).fetchall()
+    try:
+        employees = conn.execute("SELECT * FROM employees WHERE company_id=?", (session['company_id'],)).fetchall()
 
-    si = io.StringIO()
-    cw = csv.writer(si)
-    cw.writerow(['Internal Use', 'Emp Number', 'Name', 'ID/Passport', 'Tax Number', 'PAYE Ref',
-                 'Code 3601 (Salary/Wages + Current-period Bonus)', 'Code 3605 (Annual Payment)',
-                 'Code 3607 (Overtime)', 'Transport reimbursement (unclassified)', 'Code 3699 (Gross Employment Income)',
-                 'Code 4102 (PAYE)', 'Code 4141 (Employee + Employer UIF)', 'Code 4142 (Employer SDL)',
-                 'Code 4149 (Total Tax / SDL / UIF)', 'Compliance Note'])
+        si = io.StringIO()
+        cw = csv.writer(si)
+        cw.writerow(['Internal Use', 'Emp Number', 'Name', 'ID/Passport', 'Tax Number', 'PAYE Ref',
+                     'Code 3601 (Salary/Wages + Current-period Bonus)', 'Code 3605 (Annual Payment)',
+                     'Code 3607 (Overtime)', 'Transport reimbursement (unclassified)', 'Code 3699 (Gross Employment Income)',
+                     'Code 4102 (PAYE)', 'Code 4141 (Employee + Employer UIF)', 'Code 4142 (Employer SDL)',
+                     'Code 4149 (Total Tax / SDL / UIF)', 'Compliance Note'])
 
-    for emp in employees:
-        summary = _payroll_tax_certificate_ledger_summary(conn, session['company_id'], emp['id'], start_date, end_date)
-        if summary['payslip_count'] > 0:
-            cw.writerow([
-                'Internal Use', emp['emp_number'], emp['name'], emp['id_passport'], emp['tax_number'], emp['paye_ref'],
-                f"{summary['code_3601']:.2f}", f"{summary['code_3605']:.2f}", f"{summary['code_3607']:.2f}",
-                f"{summary['transport_unclassified']:.2f}", f"{summary['code_3699']:.2f}", f"{summary['code_4102']:.2f}",
-                f"{summary['code_4141']:.2f}", f"{summary['code_4142']:.2f}", f"{summary['code_4149']:.2f}",
-                summary['warning']
-            ])
-
-    conn.close()
-    log_action('HR & Payroll', 'Exported Document', f"Exported Ledger-backed EMP501 summary for {year}")
+        for emp in employees:
+            summary = _payroll_tax_certificate_ledger_summary(
+                conn, session['company_id'], emp['id'], start_date, end_date
+            )
+            if summary['payslip_count'] > 0:
+                cw.writerow([
+                    'Internal Use', emp['emp_number'], emp['name'], emp['id_passport'], emp['tax_number'], emp['paye_ref'],
+                    f"{summary['code_3601']:.2f}", f"{summary['code_3605']:.2f}", f"{summary['code_3607']:.2f}",
+                    f"{summary['transport_unclassified']:.2f}", f"{summary['code_3699']:.2f}", f"{summary['code_4102']:.2f}",
+                    f"{summary['code_4141']:.2f}", f"{summary['code_4142']:.2f}", f"{summary['code_4149']:.2f}",
+                    summary['warning']
+                ])
+    finally:
+        conn.close()
+    log_action(
+        'HR & Payroll',
+        'Exported Document',
+        f"Exported Ledger-backed EMP501 {period_name} for tax year {tax_year} ({start_date} to {end_date})",
+    )
     output = Response(si.getvalue(), mimetype='text/csv')
-    output.headers["Content-Disposition"] = f"attachment; filename=EMP501_Summary_{year}.csv"
+    output.headers["Content-Disposition"] = (
+        f"attachment; filename=EMP501_{submission_label}_{tax_year}.csv"
+    )
     return output
 
 
@@ -24342,23 +24386,9 @@ def _sars_parse_period(return_type, data):
         start_dt, end_dt = month_bounds_from_yyyy_mm(month_value)
         return start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d'), start_dt.strftime('%B %Y')
     if return_type == 'EMP501':
-        try:
-            tax_year = int(data.get('tax_year'))
-        except Exception as exc:
-            raise ValueError('Tax year must be a four-digit year, for example 2026.') from exc
-        if tax_year < 2000 or tax_year > 2200:
-            raise ValueError('Tax year must be a four-digit year, for example 2026.')
-        reconciliation_period = str(data.get('reconciliation_period') or 'annual').strip().lower()
-        if reconciliation_period not in {'interim', 'annual'}:
-            raise ValueError('EMP501 reconciliation period must be interim or annual.')
-        start_date = f'{tax_year - 1}-03-01'
-        if reconciliation_period == 'interim':
-            end_date = f'{tax_year - 1}-08-31'
-            period_name = 'interim reconciliation'
-        else:
-            end_day = calendar.monthrange(tax_year, 2)[1]
-            end_date = f'{tax_year}-02-{end_day:02d}'
-            period_name = 'annual reconciliation'
+        tax_year, _period_key, start_date, end_date, period_name = _emp501_reporting_period(
+            data.get('tax_year'), data.get('reconciliation_period') or 'annual'
+        )
         return start_date, end_date, f'{tax_year} tax year {period_name} ({start_date} to {end_date})'
     start_value = str(data.get('start_date') or '').strip()
     end_value = str(data.get('end_date') or '').strip()
