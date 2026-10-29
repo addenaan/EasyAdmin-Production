@@ -313,7 +313,14 @@ def build_payslip_pdf(payslip, employee, company, logo_path=None, leave_balances
 
     rows = []
     gross_note = p.get('salary_proration_note') or p.get('days_worked_display') or ''
-    rows.append((description_cell('Calculated Gross', gross_note, 'Code: 3601'), f('gross_salary', p.get('gross',0)), None, 'normal'))
+    gross_display = f('worked_gross_amount', f('gross_salary', p.get('gross',0)))
+    rows.append((description_cell('Calculated Gross', gross_note, 'Code: 3601'), gross_display, None, 'normal'))
+    paid_leave_days = f('paid_leave_days')
+    paid_leave_amount = f('paid_leave_amount')
+    if paid_leave_days > 0:
+        paid_leave_note = p.get('paid_leave_detail') or f'{paid_leave_days:.2f} paid leave day(s)'
+        rows.append((description_cell('Paid Leave', paid_leave_note, 'Code: 3601'),
+                     paid_leave_amount if paid_leave_amount > 0 else None, None, 'normal'))
     rows.append((description_cell('Overtime / Premium Pay', p.get('sundays_display') or '', 'Code: 3607'), f('overtime'), None, 'normal'))
     optional_earnings = [
         ('Reimbursable Expenses (Non-taxable)', '', '', f('reimbursable_expenses')),

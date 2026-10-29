@@ -2678,6 +2678,7 @@ def init_db():
         ('paid_annual_leave_days', 'REAL DEFAULT 0'), ('paid_sick_leave_days', 'REAL DEFAULT 0'),
         ('paid_leave_days', 'REAL DEFAULT 0'), ('paid_leave_daily_rate', 'REAL DEFAULT 0'),
         ('paid_leave_amount', 'REAL DEFAULT 0'), ('paid_leave_detail', 'TEXT'),
+        ('worked_gross_amount', 'REAL'),
         ('paid_leave_overlap_days', 'REAL DEFAULT 0'),
         ('paid_leave_included_in_monthly_salary', 'INTEGER DEFAULT 0'),
         ('termination_settlement_detected', 'INTEGER DEFAULT 0'),
@@ -4066,11 +4067,11 @@ def calculate_paid_leave_for_period(conn, company_id, emp, period_start, period_
         if paid_days > 0 and rate <= 0:
             raise ValueError('A positive ordinary daily rate is required to pay annual or sick leave for a contract employee.')
         amount = round(paid_days * rate, 2)
-        detail = f'Paid leave: {leave_summary} day(s) @ R{rate:.2f}/day; R{amount:.2f} included in gross'
+        detail = f'{leave_summary} paid leave day(s) @ R{rate:.2f}/day'
     else:
         rate = 0.0
         amount = 0.0
-        detail = f'Paid leave included in monthly salary: {leave_summary} day(s)'
+        detail = f'{leave_summary} paid leave day(s), included in monthly salary'
     if overlap_days:
         detail += f'; {overlap_days:.2f} day(s) overlapped a worked booking and were not paid again'
 
@@ -16250,7 +16251,8 @@ def _calculate_draft_payslip(conn, emp, company, data):
     )
 
     if is_daily_rate:
-        gross = contract_booking_pay['gross'] + paid_leave['paid_leave_amount']
+        worked_gross_amount = contract_booking_pay['gross']
+        gross = worked_gross_amount + paid_leave['paid_leave_amount']
         display_parts = []
         if contract_booking_pay['full_day_count']:
             display_parts.append(f"{contract_booking_pay['full_day_count']} full day @ R{base_salary:.2f}")
@@ -16258,27 +16260,11 @@ def _calculate_draft_payslip(conn, emp, company, data):
             display_parts.append(f"{contract_booking_pay['half_day_count']} half day @ R{half_day_rate:.2f}")
         if contract_booking_pay['special_day_count']:
             display_parts.append(f"{contract_booking_pay['special_day_count']} special day @ R{special_daily_rate:.2f}")
-        if paid_leave['paid_leave_days']:
-            display_parts.append(
-                f"{paid_leave['paid_annual_leave_days']:.2f} paid annual + "
-                f"{paid_leave['paid_sick_leave_days']:.2f} paid sick day(s) @ R{daily_rate:.2f}"
-            )
-        if paid_leave['paid_leave_overlap_days']:
-            display_parts.append(
-                f"{paid_leave['paid_leave_overlap_days']:.2f} leave day(s) overlapped bookings (not paid twice)"
-            )
         days_worked_display = f"({', '.join(display_parts)})" if display_parts else '(No bookings worked)'
     else:
-        gross = payable_base_salary
-        display_parts = []
-        if inactive_salary_note:
-            display_parts.append(inactive_salary_note.strip('()'))
-        if paid_leave['paid_leave_days']:
-            display_parts.append(
-                f"Paid leave included in monthly salary: {paid_leave['paid_annual_leave_days']:.2f} annual + "
-                f"{paid_leave['paid_sick_leave_days']:.2f} sick day(s)"
-            )
-        days_worked_display = f"({', '.join(display_parts)})" if display_parts else ''
+        worked_gross_amount = payable_base_salary
+        gross = worked_gross_amount
+        days_worked_display = inactive_salary_note
 
     transport_amount = 0.0
     if company and dict(company).get('transport_policy') in ['standard', 'yes']:
@@ -16293,6 +16279,7 @@ def _calculate_draft_payslip(conn, emp, company, data):
     bonus_tax_treatment = normalize_bonus_tax_treatment(data.get('bonus_tax_treatment') or 'current_period')
     settlement = calculate_final_leave_payout(conn, emp, session['company_id'], month_start, month_end, payroll_cutoff, data)
     overtime_amount = round(overtime_amount, 2)
+    worked_gross_amount = round(worked_gross_amount, 2)
     gross = round(gross, 2)
     transport_amount = round(transport_amount, 2)
     period_taxable = gross + overtime_amount
@@ -16334,7 +16321,7 @@ def _calculate_draft_payslip(conn, emp, company, data):
             "name": emp['name'], 
             "emp_num": emp['emp_number'] or 'N/A', 
             "id_num": emp['id_passport'] or 'N/A', 
-            "gross": f"R {gross:.2f}", 
+            "gross": f"R {worked_gross_amount:.2f}", 
             "days_worked_display": days_worked_display, 
             "overtime": f"R {overtime_amount:.2f}", 
             "sundays_display": sundays_display, 
@@ -16382,6 +16369,7 @@ def _calculate_draft_payslip(conn, emp, company, data):
             "booking_period_start": booking_period_start.strftime('%Y-%m-%d'),
             "booking_period_end": booking_period_end.strftime('%Y-%m-%d'),
             "salary_proration_note": days_worked_display,
+            "worked_gross_amount": worked_gross_amount,
             "employee_id": emp_id,
             "date": date_str,
             "gross": gross,
@@ -16446,6 +16434,10 @@ def _payslip_row_with_historical_adjustments(conn, ledger_row, company_id):
         row['adjustment_count'] = int(row.get('adjustment_count') or 0)
         row['adjustment_net_total'] = float(row.get('adjustment_net_total') or 0)
         return row
+    if row.get('worked_gross_amount') is not None:
+        row['worked_gross_amount'] = (
+            float(row.get('worked_gross_amount') or 0) + float(sums['gross_salary'] or 0)
+        )
     for field in ['gross_salary', 'overtime', 'transport', 'bonus', 'reimbursable_expenses', 'loan_repayment', 'uif', 'paye', 'net_salary']:
         row[field] = float(row.get(field) or 0) + float(sums[field] or 0)
     row['adjustment_count'] = adjustment_count
@@ -16472,7 +16464,7 @@ def _saved_employment_snapshot(row):
         'leave_payout_date', 'leave_payout_days', 'leave_payout_daily_rate', 'leave_payout_amount',
         'leave_payout_rate_basis', 'annual_leave_balance_before', 'annual_leave_balance_after',
         'paid_annual_leave_days', 'paid_sick_leave_days', 'paid_leave_days',
-        'paid_leave_daily_rate', 'paid_leave_amount', 'paid_leave_detail',
+        'paid_leave_daily_rate', 'paid_leave_amount', 'paid_leave_detail', 'worked_gross_amount',
         'paid_leave_overlap_days', 'paid_leave_included_in_monthly_salary',
         'termination_settlement_detected', 'termination_settlement_status')}
 
@@ -16489,6 +16481,13 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
     date_str = ledger_row['date'] or ''
     target_month = date_str[:7] if date_str else ''
     gross = float(ledger_row['gross_salary'] or 0)
+    paid_leave_amount = float(ledger_row.get('paid_leave_amount') or 0)
+    worked_gross_value = ledger_row.get('worked_gross_amount')
+    worked_gross = (
+        float(worked_gross_value)
+        if worked_gross_value is not None
+        else round(gross - paid_leave_amount, 2)
+    )
     overtime_amount = float(ledger_row['overtime'] or 0)
     transport_amount = float(ledger_row['transport'] or 0)
     bonus_amount = float(ledger_row['bonus'] or 0)
@@ -16517,12 +16516,12 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
         "payslip": {
             **_saved_employment_snapshot(ledger_row),
             "leave_payout_amount": f"R {float(ledger_row.get('leave_payout_amount') or 0):.2f}",
-            "paid_leave_amount": f"R {float(ledger_row.get('paid_leave_amount') or 0):.2f}",
+            "paid_leave_amount": f"R {paid_leave_amount:.2f}",
             "date": target_month,
             "name": emp['name'],
             "emp_num": emp['emp_number'] or 'N/A',
             "id_num": emp['id_passport'] or 'N/A',
-            "gross": f"R {gross:.2f}",
+            "gross": f"R {worked_gross:.2f}",
             "days_worked_display": ledger_row.get('salary_proration_note') or "(Saved to Ledger)",
             "overtime": f"R {overtime_amount:.2f}",
             "sundays_display": "",
@@ -16691,6 +16690,14 @@ def save_adjustment_payslip():
             new_uif = float(regular['uif'] or 0) + uif
             new_paye = float(regular['paye'] or 0) + paye
             leave_payout_amount = float(dict(regular).get('leave_payout_amount') or 0)
+            paid_leave_amount = float(dict(regular).get('paid_leave_amount') or 0)
+            saved_worked_gross = dict(regular).get('worked_gross_amount')
+            existing_worked_gross = (
+                float(saved_worked_gross)
+                if saved_worked_gross is not None
+                else float(regular['gross_salary'] or 0) - paid_leave_amount
+            )
+            new_worked_gross = existing_worked_gross + gross
             new_net = new_gross + new_overtime + new_bonus + new_transport + new_reimbursable + leave_payout_amount - new_uif - new_paye - new_loan
 
             # SDL is an employer cost and does not change net pay, but it must stay
@@ -16731,10 +16738,10 @@ def save_adjustment_payslip():
             )
 
             conn.execute("""UPDATE payslips
-                            SET gross_salary=?, overtime=?, transport=?, bonus=?, reimbursable_expenses=?,
+                            SET gross_salary=?, worked_gross_amount=?, overtime=?, transport=?, bonus=?, reimbursable_expenses=?,
                                 loan_repayment=?, uif=?, paye=?, sdl=?, sdl_applicable=?, net_salary=?, adjustment_reason=?
                             WHERE id=? AND company_id=?""",
-                         (new_gross, new_overtime, new_transport, new_bonus, new_reimbursable,
+                         (new_gross, new_worked_gross, new_overtime, new_transport, new_bonus, new_reimbursable,
                           new_loan, new_uif, new_paye, new_sdl, sdl_applicable_snapshot,
                           new_net, adjustment_note, regular['id'], session['company_id']))
             _commit_atomic_write(conn)

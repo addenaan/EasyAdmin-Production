@@ -173,7 +173,10 @@ class PayrollPeriodAndSpecialRateTests(unittest.TestCase):
         self.assertEqual(result['raw']['paid_annual_leave_days'], 1.0)
         self.assertEqual(result['raw']['paid_sick_leave_days'], 0.5)
         self.assertEqual(result['raw']['paid_leave_amount'], 750.0)
-        self.assertIn('paid annual', result['payslip']['days_worked_display'])
+        self.assertEqual(result['raw']['worked_gross_amount'], 1550.0)
+        self.assertEqual(result['payslip']['gross'], 'R 1550.00')
+        self.assertNotIn('paid annual', result['payslip']['days_worked_display'])
+        self.assertIn('paid leave day(s)', result['payslip']['paid_leave_detail'])
 
     def test_monthly_salary_includes_paid_leave_without_extra_earnings(self):
         self.conn.executemany(
@@ -193,7 +196,9 @@ class PayrollPeriodAndSpecialRateTests(unittest.TestCase):
         self.assertEqual(result['raw']['paid_leave_days'], 2.0)
         self.assertEqual(result['raw']['paid_leave_amount'], 0.0)
         self.assertEqual(result['raw']['paid_leave_included_in_monthly_salary'], 1)
-        self.assertIn('Paid leave included in monthly salary', result['payslip']['days_worked_display'])
+        self.assertEqual(result['raw']['worked_gross_amount'], 10000.0)
+        self.assertNotIn('paid leave', result['payslip']['days_worked_display'].lower())
+        self.assertIn('included in monthly salary', result['payslip']['paid_leave_detail'])
 
     def test_contract_leave_is_not_paid_twice_when_booking_exists_same_day(self):
         self.conn.execute(
@@ -259,8 +264,8 @@ class PayrollPeriodAndSpecialRateTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         saved = self.conn.execute(
-            '''SELECT paid_annual_leave_days, paid_sick_leave_days,
-                      paid_leave_amount, paid_leave_detail
+            '''SELECT gross_salary, worked_gross_amount, paid_annual_leave_days,
+                      paid_sick_leave_days, paid_leave_amount, paid_leave_detail
                FROM payslips WHERE company_id=? AND employee_id=9711''',
             (self.company_id,),
         ).fetchone()
@@ -268,7 +273,89 @@ class PayrollPeriodAndSpecialRateTests(unittest.TestCase):
         self.assertEqual(float(saved['paid_annual_leave_days']), 1.0)
         self.assertEqual(float(saved['paid_sick_leave_days']), 0.0)
         self.assertEqual(float(saved['paid_leave_amount']), 500.0)
-        self.assertIn('Paid leave', saved['paid_leave_detail'])
+        self.assertEqual(float(saved['worked_gross_amount']), 1550.0)
+        self.assertEqual(float(saved['gross_salary']), 2050.0)
+        self.assertIn('paid leave', saved['paid_leave_detail'])
+
+        summary = easyadmin._payroll_tax_certificate_ledger_summary(
+            self.conn, self.company_id, 9711, '2026-03-01', '2027-02-28'
+        )
+        self.assertEqual(summary['code_3601'], 2050.0)
+
+    def test_termination_leave_payout_remains_code_3605_and_in_net_pay(self):
+        payload = {
+            'employee_id': 9714,
+            'date': '2026-10-31',
+            'bonus': 0,
+            'reimbursable_expenses': 0,
+            'loan_repayment': 0,
+        }
+        with easyadmin.app.test_request_context('/api/save_payslip', method='POST', json=payload):
+            easyadmin.session['company_id'] = self.company_id
+            easyadmin.session['can_payroll'] = True
+            response = easyadmin.save_payslip()
+
+        self.assertEqual(response.status_code, 200)
+        saved_values = response.get_json()
+        self.assertGreater(saved_values['leave_payout_amount'], 0)
+        expected_net = round(
+            saved_values['gross'] + saved_values['overtime'] + saved_values['bonus']
+            + saved_values['leave_payout_amount'] + saved_values['transport']
+            + saved_values['reimbursable_expenses'] - saved_values['uif']
+            - saved_values['paye'] - saved_values['loan_repayment'],
+            2,
+        )
+        self.assertEqual(saved_values['net'], expected_net)
+        summary = easyadmin._payroll_tax_certificate_ledger_summary(
+            self.conn, self.company_id, 9714, '2026-03-01', '2027-02-28'
+        )
+        self.assertEqual(summary['code_3601'], saved_values['gross'])
+        self.assertEqual(summary['code_3605'], saved_values['leave_payout_amount'])
+
+    def test_gross_adjustment_updates_worked_gross_without_absorbing_paid_leave_line(self):
+        self.conn.execute(
+            '''INSERT INTO leave_records
+               (company_id, employee_id, date_taken, days, leave_type)
+               VALUES (?, 9711, '2026-10-15', 1, 'Sick Leave')''',
+            (self.company_id,),
+        )
+        self.conn.commit()
+        payroll_payload = {
+            'employee_id': 9711,
+            'date': '2026-10-31',
+            'payroll_start_date': '2026-09-27',
+            'payroll_end_date': '2026-10-26',
+            'bonus': 0,
+            'reimbursable_expenses': 0,
+            'loan_repayment': 0,
+        }
+        with easyadmin.app.test_request_context('/api/save_payslip', method='POST', json=payroll_payload):
+            easyadmin.session['company_id'] = self.company_id
+            easyadmin.session['can_payroll'] = True
+            response = easyadmin.save_payslip()
+        self.assertEqual(response.status_code, 200)
+
+        adjustment_payload = {
+            'employee_id': 9711,
+            'date': '2026-10-31',
+            'adjustment_reason': 'Worked gross correction',
+            'gross': 100,
+        }
+        with easyadmin.app.test_request_context('/api/save_adjustment_payslip', method='POST', json=adjustment_payload):
+            easyadmin.session['company_id'] = self.company_id
+            easyadmin.session['can_payroll'] = True
+            response = easyadmin.save_adjustment_payslip()
+        self.assertEqual(response.status_code, 200)
+
+        saved = self.conn.execute(
+            '''SELECT gross_salary, worked_gross_amount, paid_leave_amount
+               FROM payslips WHERE company_id=? AND employee_id=9711
+                 AND COALESCE(payslip_type, 'regular')='regular' ''',
+            (self.company_id,),
+        ).fetchone()
+        self.assertEqual(float(saved['worked_gross_amount']), 1650.0)
+        self.assertEqual(float(saved['paid_leave_amount']), 500.0)
+        self.assertEqual(float(saved['gross_salary']), 2150.0)
 
 
 if __name__ == '__main__':
