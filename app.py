@@ -2674,7 +2674,14 @@ def init_db():
         ('salary_proration_note', 'TEXT'), ('leave_payout_date', 'TEXT'),
         ('leave_payout_days', 'REAL DEFAULT 0'), ('leave_payout_daily_rate', 'REAL DEFAULT 0'),
         ('leave_payout_amount', 'REAL DEFAULT 0'), ('leave_payout_rate_basis', 'TEXT'),
-        ('annual_leave_balance_before', 'REAL'), ('annual_leave_balance_after', 'REAL')
+        ('annual_leave_balance_before', 'REAL'), ('annual_leave_balance_after', 'REAL'),
+        ('paid_annual_leave_days', 'REAL DEFAULT 0'), ('paid_sick_leave_days', 'REAL DEFAULT 0'),
+        ('paid_leave_days', 'REAL DEFAULT 0'), ('paid_leave_daily_rate', 'REAL DEFAULT 0'),
+        ('paid_leave_amount', 'REAL DEFAULT 0'), ('paid_leave_detail', 'TEXT'),
+        ('paid_leave_overlap_days', 'REAL DEFAULT 0'),
+        ('paid_leave_included_in_monthly_salary', 'INTEGER DEFAULT 0'),
+        ('termination_settlement_detected', 'INTEGER DEFAULT 0'),
+        ('termination_settlement_status', 'TEXT')
     ])
     for t_name, cols in loose_cols.items():
         for c_name, c_type in cols:
@@ -3955,6 +3962,130 @@ def calculate_contract_booking_pay(bookings, full_day_rate, half_day_rate, speci
     }
 
 
+def _leave_record_units_by_date(date_taken, days, emp_type):
+    """Expand a leave start date and unit count over ordinary working days."""
+    start = parse_date_safe(date_taken)
+    try:
+        remaining = max(0.0, float(days or 0))
+    except (TypeError, ValueError):
+        remaining = 0.0
+    if not start or remaining <= 0:
+        return []
+    ordinary_weekdays = get_contract_day_rules(emp_type).get('ordinary_weekdays', {0, 1, 2, 3, 4, 5})
+    current = start.date()
+    units = []
+    safety = 0
+    while remaining > 0.000001 and safety < 4000:
+        if current.weekday() in ordinary_weekdays:
+            unit = min(1.0, remaining)
+            units.append((current.strftime('%Y-%m-%d'), unit))
+            remaining -= unit
+        current += timedelta(days=1)
+        safety += 1
+    return units
+
+
+def calculate_paid_leave_for_period(conn, company_id, emp, period_start, period_end, bookings, ordinary_daily_rate):
+    """Return paid annual/sick leave included in the current payroll period.
+
+    Monthly salaries already cover paid leave, so those employees receive a day
+    breakdown without extra earnings. Booking-paid contract employees receive
+    their ordinary daily rate for approved leave records, with same-day booking
+    units removed to prevent paying the same day twice.
+    """
+    empty = {
+        'paid_annual_leave_days': 0.0,
+        'paid_sick_leave_days': 0.0,
+        'paid_leave_days': 0.0,
+        'paid_leave_daily_rate': 0.0,
+        'paid_leave_amount': 0.0,
+        'paid_leave_detail': '',
+        'paid_leave_overlap_days': 0.0,
+        'paid_leave_included_in_monthly_salary': 0,
+    }
+    if not period_start or not period_end or period_start > period_end:
+        return empty
+
+    # Include leave that started before the payroll boundary but continues into
+    # it. The current leave record stores a start date plus units, not an end date.
+    lookback_start = period_start - timedelta(days=370)
+    rows = conn.execute('''SELECT id, date_taken, days, leave_type
+                           FROM leave_records
+                           WHERE company_id=? AND employee_id=?
+                             AND date_taken>=? AND date_taken<=?
+                             AND leave_type IN ('Annual Leave', 'Sick Leave')
+                           ORDER BY date_taken ASC, id ASC''',
+                        (company_id, emp['id'], lookback_start.strftime('%Y-%m-%d'),
+                         period_end.strftime('%Y-%m-%d'))).fetchall()
+    if not rows:
+        return empty
+
+    emp_type = str(emp['emp_type'] or '').strip()
+    is_booking_paid = emp_type in CONTRACT_BOOKING_EMPLOYEE_TYPES
+    _booking_units, booking_units_by_date = calculate_booking_work_units(bookings)
+    remaining_booking_units = dict(booking_units_by_date) if is_booking_paid else {}
+    annual_days = 0.0
+    sick_days = 0.0
+    overlap_days = 0.0
+
+    period_start_key = period_start.strftime('%Y-%m-%d')
+    period_end_key = period_end.strftime('%Y-%m-%d')
+    for row in rows:
+        for date_key, requested_days in _leave_record_units_by_date(
+                row['date_taken'], row['days'], emp_type):
+            if date_key < period_start_key or date_key > period_end_key:
+                continue
+            payable_days = requested_days
+            if is_booking_paid:
+                available_overlap = max(0.0, float(remaining_booking_units.get(date_key, 0.0)))
+                overlap = min(payable_days, available_overlap)
+                payable_days -= overlap
+                overlap_days += overlap
+                remaining_booking_units[date_key] = max(0.0, available_overlap - overlap)
+            if row['leave_type'] == 'Annual Leave':
+                annual_days += payable_days
+            elif row['leave_type'] == 'Sick Leave':
+                sick_days += payable_days
+
+    annual_days = round(annual_days, 4)
+    sick_days = round(sick_days, 4)
+    paid_days = round(annual_days + sick_days, 4)
+    overlap_days = round(overlap_days, 4)
+    if paid_days <= 0 and overlap_days <= 0:
+        return empty
+
+    leave_parts = []
+    if annual_days:
+        leave_parts.append(f'{annual_days:.2f} annual')
+    if sick_days:
+        leave_parts.append(f'{sick_days:.2f} sick')
+    leave_summary = ' + '.join(leave_parts) if leave_parts else '0.00 paid leave'
+
+    if is_booking_paid:
+        rate = round(max(0.0, float(ordinary_daily_rate or 0.0)), 6)
+        if paid_days > 0 and rate <= 0:
+            raise ValueError('A positive ordinary daily rate is required to pay annual or sick leave for a contract employee.')
+        amount = round(paid_days * rate, 2)
+        detail = f'Paid leave: {leave_summary} day(s) @ R{rate:.2f}/day; R{amount:.2f} included in gross'
+    else:
+        rate = 0.0
+        amount = 0.0
+        detail = f'Paid leave included in monthly salary: {leave_summary} day(s)'
+    if overlap_days:
+        detail += f'; {overlap_days:.2f} day(s) overlapped a worked booking and were not paid again'
+
+    return {
+        'paid_annual_leave_days': annual_days,
+        'paid_sick_leave_days': sick_days,
+        'paid_leave_days': paid_days,
+        'paid_leave_daily_rate': rate,
+        'paid_leave_amount': amount,
+        'paid_leave_detail': detail,
+        'paid_leave_overlap_days': overlap_days,
+        'paid_leave_included_in_monthly_salary': 0 if is_booking_paid else 1,
+    }
+
+
 def analyse_booking_hours(bookings, emp_type, workday_hours, public_holiday_dates, deduplicate_workdays=False):
     """Classify booked work for payroll premiums and BCEA hour warnings.
 
@@ -4786,9 +4917,11 @@ def calculate_final_leave_payout(conn, emp, company_id, month_start, month_end, 
     snapshot = {'leave_payout_date': None, 'leave_payout_days': 0.0,
                 'leave_payout_daily_rate': 0.0, 'leave_payout_amount': 0.0,
                 'leave_payout_rate_basis': '', 'annual_leave_balance_before': balance,
-                'annual_leave_balance_after': balance}
+                'annual_leave_balance_after': balance,
+                'termination_settlement_detected': 0, 'termination_settlement_status': ''}
     if not inactive or not month_start.date() <= inactive.date() <= month_end.date():
         return snapshot
+    snapshot['termination_settlement_detected'] = 1
     # One settlement per recorded employment start, even if the inactive date is
     # later edited. A historical final settlement needs an explicit payroll review.
     previous = conn.execute('''SELECT id FROM payslips WHERE company_id=? AND employee_id=?
@@ -4796,6 +4929,9 @@ def calculate_final_leave_payout(conn, emp, company_id, month_start, month_end, 
                                AND COALESCE(payslip_type, 'regular')='regular' LIMIT 1''',
                             (company_id, emp['id'], parse_date_safe(emp['start_date']).strftime('%Y-%m-%d'))).fetchone()
     if previous:
+        snapshot['termination_settlement_status'] = (
+            f"Final annual-leave payout was already recorded on payslip #{previous['id']}."
+        )
         return snapshot
     days = max(0.0, float(balance))
     base = safe_money(emp['gross_salary'])
@@ -4818,9 +4954,19 @@ def calculate_final_leave_payout(conn, emp, company_id, month_start, month_end, 
     rate = round(rate, 6)
     if not 0 <= rate < float('inf') or (days > 0 and rate <= 0):
         raise ValueError('A positive salary or reviewed daily rate is required to pay unused annual leave.')
+    if days <= 0:
+        snapshot['termination_settlement_status'] = (
+            f'Last working day {inactive:%Y-%m-%d} falls in this payroll period. '
+            'No remaining annual-leave balance is available for payout.'
+        )
+        return snapshot
     snapshot.update(leave_payout_date=inactive.strftime('%Y-%m-%d'), leave_payout_days=days,
                     leave_payout_daily_rate=round(rate, 6), leave_payout_amount=round(days * round(rate, 6), 2),
-                    leave_payout_rate_basis=basis, annual_leave_balance_after=round(balance - days, 2))
+                    leave_payout_rate_basis=basis, annual_leave_balance_after=round(balance - days, 2),
+                    termination_settlement_status=(
+                        f'Last working day {inactive:%Y-%m-%d}: pay {days:.2f} annual-leave day(s) '
+                        f'at R{round(rate, 6):.6f} per day.'
+                    ))
     return snapshot
 
 def calculate_sick_leave_balance(employee_id, start_date_str, emp_type, emp_name, ref_date_str=None):
@@ -16099,8 +16245,12 @@ def _calculate_draft_payslip(conn, emp, company, data):
     if total_overtime_hours > 0: display_parts.append(f"{total_overtime_hours} hrs extra OT @1.5x")
     sundays_display = f"({', '.join(display_parts)})" if display_parts else ""
 
+    paid_leave = calculate_paid_leave_for_period(
+        conn, session['company_id'], emp, payroll_start, payroll_cutoff, bookings, daily_rate
+    )
+
     if is_daily_rate:
-        gross = contract_booking_pay['gross']
+        gross = contract_booking_pay['gross'] + paid_leave['paid_leave_amount']
         display_parts = []
         if contract_booking_pay['full_day_count']:
             display_parts.append(f"{contract_booking_pay['full_day_count']} full day @ R{base_salary:.2f}")
@@ -16108,10 +16258,27 @@ def _calculate_draft_payslip(conn, emp, company, data):
             display_parts.append(f"{contract_booking_pay['half_day_count']} half day @ R{half_day_rate:.2f}")
         if contract_booking_pay['special_day_count']:
             display_parts.append(f"{contract_booking_pay['special_day_count']} special day @ R{special_daily_rate:.2f}")
+        if paid_leave['paid_leave_days']:
+            display_parts.append(
+                f"{paid_leave['paid_annual_leave_days']:.2f} paid annual + "
+                f"{paid_leave['paid_sick_leave_days']:.2f} paid sick day(s) @ R{daily_rate:.2f}"
+            )
+        if paid_leave['paid_leave_overlap_days']:
+            display_parts.append(
+                f"{paid_leave['paid_leave_overlap_days']:.2f} leave day(s) overlapped bookings (not paid twice)"
+            )
         days_worked_display = f"({', '.join(display_parts)})" if display_parts else '(No bookings worked)'
     else:
         gross = payable_base_salary
-        days_worked_display = inactive_salary_note
+        display_parts = []
+        if inactive_salary_note:
+            display_parts.append(inactive_salary_note.strip('()'))
+        if paid_leave['paid_leave_days']:
+            display_parts.append(
+                f"Paid leave included in monthly salary: {paid_leave['paid_annual_leave_days']:.2f} annual + "
+                f"{paid_leave['paid_sick_leave_days']:.2f} sick day(s)"
+            )
+        days_worked_display = f"({', '.join(display_parts)})" if display_parts else ''
 
     transport_amount = 0.0
     if company and dict(company).get('transport_policy') in ['standard', 'yes']:
@@ -16157,7 +16324,9 @@ def _calculate_draft_payslip(conn, emp, company, data):
     return {
         "payslip": { 
             **settlement,
+            **paid_leave,
             "leave_payout_amount": f"R {settlement['leave_payout_amount']:.2f}",
+            "paid_leave_amount": f"R {paid_leave['paid_leave_amount']:.2f}",
             "payroll_start": payroll_start.strftime('%Y-%m-%d'),
             "booking_period_start": booking_period_start.strftime('%Y-%m-%d'),
             "booking_period_end": booking_period_end.strftime('%Y-%m-%d'),
@@ -16205,6 +16374,7 @@ def _calculate_draft_payslip(conn, emp, company, data):
         },
         "raw": {
             **settlement,
+            **paid_leave,
             "leave_payout_daily_rate_override": data.get('leave_payout_daily_rate_override'),
             "employment_start_date": parse_date_safe(emp['start_date']).strftime('%Y-%m-%d'),
             "payroll_start": payroll_start.strftime('%Y-%m-%d'),
@@ -16300,7 +16470,11 @@ def _saved_employment_snapshot(row):
     return {key: row.get(key) for key in (
         'employment_start_date', 'payroll_start', 'payroll_cutoff', 'booking_period_start', 'booking_period_end', 'salary_proration_note',
         'leave_payout_date', 'leave_payout_days', 'leave_payout_daily_rate', 'leave_payout_amount',
-        'leave_payout_rate_basis', 'annual_leave_balance_before', 'annual_leave_balance_after')}
+        'leave_payout_rate_basis', 'annual_leave_balance_before', 'annual_leave_balance_after',
+        'paid_annual_leave_days', 'paid_sick_leave_days', 'paid_leave_days',
+        'paid_leave_daily_rate', 'paid_leave_amount', 'paid_leave_detail',
+        'paid_leave_overlap_days', 'paid_leave_included_in_monthly_salary',
+        'termination_settlement_detected', 'termination_settlement_status')}
 
 
 def build_saved_payslip_payload(conn, emp, company, ledger_row):
@@ -16343,6 +16517,7 @@ def build_saved_payslip_payload(conn, emp, company, ledger_row):
         "payslip": {
             **_saved_employment_snapshot(ledger_row),
             "leave_payout_amount": f"R {float(ledger_row.get('leave_payout_amount') or 0):.2f}",
+            "paid_leave_amount": f"R {float(ledger_row.get('paid_leave_amount') or 0):.2f}",
             "date": target_month,
             "name": emp['name'],
             "emp_num": emp['emp_number'] or 'N/A',

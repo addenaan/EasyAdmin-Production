@@ -25,7 +25,7 @@ class PayrollPeriodAndSpecialRateTests(unittest.TestCase):
 
     def setUp(self):
         self.conn = easyadmin.get_db_connection()
-        for table in ('payslips', 'bookings', 'employees'):
+        for table in ('payslips', 'leave_records', 'bookings', 'employees'):
             self.conn.execute(f'DELETE FROM {table} WHERE company_id=?', (self.company_id,))
         self.conn.execute('DELETE FROM companies WHERE id=?', (self.company_id,))
         self.conn.execute(
@@ -60,6 +60,22 @@ class PayrollPeriodAndSpecialRateTests(unittest.TestCase):
                 gross_salary, workday_hours, uif_contributor)
                VALUES (9712, ?, 'Shift Employee', 'Shift Worker', 'Active',
                        '2026-01-01', '1990-01-01', 10000, 8, 'Yes')''',
+            (self.company_id,),
+        )
+        self.conn.execute(
+            '''INSERT INTO employees
+               (id, company_id, name, emp_type, status, start_date, date_of_birth,
+                gross_salary, workday_hours, uif_contributor)
+               VALUES (9713, ?, 'Monthly Employee', 'Full-time (5 Days)', 'Active',
+                       '2025-01-01', '1990-01-01', 10000, 8, 'Yes')''',
+            (self.company_id,),
+        )
+        self.conn.execute(
+            '''INSERT INTO employees
+               (id, company_id, name, emp_type, status, start_date, inactive_date,
+                date_of_birth, gross_salary, workday_hours, uif_contributor)
+               VALUES (9714, ?, 'Departing Employee', 'Full-time (5 Days)', 'Resigned',
+                       '2025-01-01', '2026-10-15', '1990-01-01', 10000, 8, 'Yes')''',
             (self.company_id,),
         )
         booking_rows = [
@@ -138,6 +154,121 @@ class PayrollPeriodAndSpecialRateTests(unittest.TestCase):
                 'payroll_start_date': '2026-09-27',
                 'payroll_end_date': '2026-10-26',
             })
+
+    def test_contract_paid_annual_and_sick_leave_are_added_to_gross(self):
+        self.conn.executemany(
+            '''INSERT INTO leave_records
+               (company_id, employee_id, date_taken, days, leave_type)
+               VALUES (?, 9711, ?, ?, ?)''',
+            [
+                (self.company_id, '2026-10-15', 1, 'Annual Leave'),
+                (self.company_id, '2026-10-16', 0.5, 'Sick Leave'),
+            ],
+        )
+        self.conn.commit()
+
+        result = self._draft(9711)
+
+        self.assertEqual(result['raw']['gross'], 2300.0)
+        self.assertEqual(result['raw']['paid_annual_leave_days'], 1.0)
+        self.assertEqual(result['raw']['paid_sick_leave_days'], 0.5)
+        self.assertEqual(result['raw']['paid_leave_amount'], 750.0)
+        self.assertIn('paid annual', result['payslip']['days_worked_display'])
+
+    def test_monthly_salary_includes_paid_leave_without_extra_earnings(self):
+        self.conn.executemany(
+            '''INSERT INTO leave_records
+               (company_id, employee_id, date_taken, days, leave_type)
+               VALUES (?, 9713, ?, ?, ?)''',
+            [
+                (self.company_id, '2026-10-05', 1, 'Annual Leave'),
+                (self.company_id, '2026-10-06', 1, 'Sick Leave'),
+            ],
+        )
+        self.conn.commit()
+
+        result = self._draft(9713)
+
+        self.assertEqual(result['raw']['gross'], 10000.0)
+        self.assertEqual(result['raw']['paid_leave_days'], 2.0)
+        self.assertEqual(result['raw']['paid_leave_amount'], 0.0)
+        self.assertEqual(result['raw']['paid_leave_included_in_monthly_salary'], 1)
+        self.assertIn('Paid leave included in monthly salary', result['payslip']['days_worked_display'])
+
+    def test_contract_leave_is_not_paid_twice_when_booking_exists_same_day(self):
+        self.conn.execute(
+            '''INSERT INTO leave_records
+               (company_id, employee_id, date_taken, days, leave_type)
+               VALUES (?, 9711, '2026-10-10', 1, 'Annual Leave')''',
+            (self.company_id,),
+        )
+        self.conn.commit()
+
+        result = self._draft(9711)
+
+        self.assertEqual(result['raw']['paid_annual_leave_days'], 0.5)
+        self.assertEqual(result['raw']['paid_leave_overlap_days'], 0.5)
+        self.assertEqual(result['raw']['paid_leave_amount'], 250.0)
+        self.assertEqual(result['raw']['gross'], 1800.0)
+
+    def test_multi_day_leave_is_limited_to_selected_payroll_period(self):
+        self.conn.execute(
+            '''INSERT INTO leave_records
+               (company_id, employee_id, date_taken, days, leave_type)
+               VALUES (?, 9711, '2026-10-26', 2, 'Annual Leave')''',
+            (self.company_id,),
+        )
+        self.conn.commit()
+
+        result = self._draft(9711)
+
+        self.assertEqual(result['raw']['paid_annual_leave_days'], 1.0)
+        self.assertEqual(result['raw']['paid_leave_amount'], 500.0)
+        self.assertEqual(result['raw']['gross'], 2050.0)
+
+    def test_inactive_date_exposes_automatic_termination_settlement(self):
+        result = self._draft(9714)
+
+        self.assertEqual(result['raw']['termination_settlement_detected'], 1)
+        self.assertEqual(result['raw']['leave_payout_date'], '2026-10-15')
+        self.assertGreater(result['raw']['leave_payout_days'], 0)
+        self.assertIn('Last working day 2026-10-15', result['raw']['termination_settlement_status'])
+
+    def test_finalized_payslip_preserves_paid_leave_snapshot(self):
+        self.conn.execute(
+            '''INSERT INTO leave_records
+               (company_id, employee_id, date_taken, days, leave_type)
+               VALUES (?, 9711, '2026-10-15', 1, 'Annual Leave')''',
+            (self.company_id,),
+        )
+        self.conn.commit()
+        payload = {
+            'employee_id': 9711,
+            'date': '2026-10-31',
+            'payroll_start_date': '2026-09-27',
+            'payroll_end_date': '2026-10-26',
+            'bonus': 0,
+            'reimbursable_expenses': 0,
+            'loan_repayment': 0,
+        }
+
+        with easyadmin.app.test_request_context('/api/save_payslip', method='POST', json=payload):
+            easyadmin.session['company_id'] = self.company_id
+            easyadmin.session['can_payroll'] = True
+            response = easyadmin.save_payslip()
+
+        self.assertEqual(response.status_code, 200)
+        saved = self.conn.execute(
+            '''SELECT paid_annual_leave_days, paid_sick_leave_days,
+                      paid_leave_amount, paid_leave_detail
+               FROM payslips WHERE company_id=? AND employee_id=9711''',
+            (self.company_id,),
+        ).fetchone()
+        self.assertIsNotNone(saved)
+        self.assertEqual(float(saved['paid_annual_leave_days']), 1.0)
+        self.assertEqual(float(saved['paid_sick_leave_days']), 0.0)
+        self.assertEqual(float(saved['paid_leave_amount']), 500.0)
+        self.assertIn('Paid leave', saved['paid_leave_detail'])
 
 
 if __name__ == '__main__':
