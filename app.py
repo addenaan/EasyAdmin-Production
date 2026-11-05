@@ -6213,6 +6213,18 @@ REPORT_TYPES = {
     'top_services_by_revenue': {'title': 'Top Services by Revenue', 'group': 'Finance', 'access': ('finance', 'invoicing')},
     'low_margin_services': {'title': 'Low Margin Services', 'group': 'Finance', 'access': ('finance', 'invoicing')},
 
+    # Posted-ledger accounting reports. These use the same calculation helpers as
+    # the Accounting app so Reports & Analytics cannot produce different figures.
+    'accounting_trial_balance': {'title': 'Trial Balance', 'group': 'Accounting', 'access': ('accounting',)},
+    'accounting_income_statement': {'title': 'Income Statement', 'group': 'Accounting', 'access': ('accounting',)},
+    'accounting_balance_sheet': {'title': 'Balance Sheet', 'group': 'Accounting', 'access': ('accounting',)},
+    'accounting_cash_flow': {'title': 'Cash Flow Statement', 'group': 'Accounting', 'access': ('accounting',)},
+    'accounting_general_ledger': {'title': 'General Ledger', 'group': 'Accounting', 'access': ('accounting',)},
+    'accounting_sales': {'title': 'Sales Report', 'group': 'Accounting', 'access': ('accounting',)},
+    'accounting_chart_of_accounts': {'title': 'Chart of Accounts Report', 'group': 'Accounting', 'access': ('accounting',)},
+    'accounting_vat': {'title': 'VAT Report', 'group': 'Accounting', 'access': ('accounting',)},
+    'accounting_bank_reconciliation': {'title': 'Bank Reconciliation', 'group': 'Accounting', 'access': ('accounting',)},
+
     # Phase 4 - Interviews/Hiring, Employee Admin, Payroll & Leave
     'candidate_list': {'title': 'Candidate List Report', 'group': 'Interviews & Hiring', 'access': ('hiring',)},
     'candidate_ranking': {'title': 'Candidate Ranking Report', 'group': 'Interviews & Hiring', 'access': ('hiring',)},
@@ -6232,7 +6244,19 @@ REPORT_TYPES = {
     'dates_worked_report': {'title': 'Dates Worked Report', 'group': 'Payroll & Leave', 'access': ('payroll', 'booking')}
 }
 
-REPORT_GROUP_ORDER = ['Operations', 'Clients', 'Projects', 'Invoicing', 'Finance', 'Interviews & Hiring', 'Employee Administration', 'Payroll & Leave']
+REPORT_GROUP_ORDER = ['Operations', 'Clients', 'Projects', 'Invoicing', 'Finance', 'Accounting', 'Interviews & Hiring', 'Employee Administration', 'Payroll & Leave']
+
+ACCOUNTING_SHARED_REPORT_TYPES = {
+    'accounting_trial_balance',
+    'accounting_income_statement',
+    'accounting_balance_sheet',
+    'accounting_cash_flow',
+    'accounting_general_ledger',
+    'accounting_sales',
+    'accounting_chart_of_accounts',
+    'accounting_vat',
+    'accounting_bank_reconciliation',
+}
 
 
 def _report_permissions():
@@ -6336,7 +6360,11 @@ def _report_filters(payload=None):
         'project_status': str(payload.get('project_status') or '').strip(),
         'status_filter': status_filter,
         'invoice_status': status_filter.lower(),
-        'raw_status': status_filter
+        'raw_status': status_filter,
+        'account_id': _as_int(payload.get('account_id')),
+        'bank_account_id': _as_int(payload.get('bank_account_id')),
+        'statement_balance': _report_money(payload.get('statement_balance')),
+        'statement_balance_supplied': str(payload.get('statement_balance') if payload.get('statement_balance') is not None else '').strip() != '',
     }
 
 
@@ -6634,6 +6662,147 @@ def _employee_base_where(filters, alias='e', include_suppliers=False):
     return ' AND '.join(where), params
 
 
+def _shared_accounting_report_rows(conn, company_id, report_type, filters):
+    """Return the Accounting app's posted-ledger reports in the generic report-table shape."""
+    if report_type not in ACCOUNTING_SHARED_REPORT_TYPES:
+        raise ValueError('Invalid accounting report type.')
+    company_id = int(company_id)
+    start_date = filters['start_date']
+    end_date = filters['end_date']
+    rows = []
+    summary = {'framework': 'IFRS for SMEs'}
+
+    if report_type == 'accounting_trial_balance':
+        ensure_default_accounting_accounts(conn, company_id)
+        data = _trial_balance_rows(conn, company_id, end_date)
+        debit_total = credit_total = 0.0
+        for item in data:
+            debit = _report_money(item.get('debit'))
+            credit = _report_money(item.get('credit'))
+            if abs(debit) < 0.005 and abs(credit) < 0.005:
+                continue
+            debit_total += debit
+            credit_total += credit
+            rows.append([item.get('account_code') or '', item.get('account_name') or '', debit, credit])
+        rows.append(['', 'Totals', _report_money(debit_total), _report_money(credit_total)])
+        summary.update({'as_at': end_date, 'debit_total': _report_money(debit_total), 'credit_total': _report_money(credit_total), 'balance_difference': _report_money(debit_total - credit_total)})
+        return ['Code', 'Account', 'Debit', 'Credit'], rows, summary
+
+    if report_type == 'accounting_income_statement':
+        data = _income_statement_data(conn, company_id, start_date, end_date)
+        section_labels = [
+            ('revenue', 'Revenue'), ('other_income', 'Other Income'),
+            ('cost_of_sales', 'Cost of Sales'), ('operating_expense', 'Operating Expenses'),
+            ('finance_cost', 'Finance Costs'), ('income_tax_expense', 'Income Tax Expense'),
+        ]
+        for key, label in section_labels:
+            for item in data.get('sections', {}).get(key, []) or []:
+                rows.append([label, item.get('account_code') or '', item.get('account_name') or '', _report_money(item.get('amount'))])
+            rows.append([label, '', f'Total {label}', _report_money(data.get('totals', {}).get(key))])
+            if key == 'cost_of_sales':
+                rows.append(['Summary', '', 'Gross Profit', _report_money(data.get('gross_profit'))])
+        rows.append(['Summary', '', 'Profit / (Loss)', _report_money(data.get('profit_loss'))])
+        summary.update({'revenue_total': _report_money(data.get('revenue_total')), 'gross_profit': _report_money(data.get('gross_profit')), 'expenses_total': _report_money(data.get('expenses_total')), 'profit_loss': _report_money(data.get('profit_loss'))})
+        return ['Section', 'Code', 'Account', 'Amount'], rows, summary
+
+    if report_type == 'accounting_balance_sheet':
+        data = _balance_sheet_data(conn, company_id, end_date)
+        section_labels = [
+            ('current_asset', 'Current Assets'), ('non_current_asset', 'Non-current Assets'),
+            ('current_liability', 'Current Liabilities'), ('non_current_liability', 'Non-current Liabilities'),
+            ('equity', 'Equity'),
+        ]
+        for key, label in section_labels:
+            for item in data.get('sections', {}).get(key, []) or []:
+                rows.append([label, item.get('account_code') or '', item.get('account_name') or '', _report_money(item.get('amount'))])
+            rows.append([label, '', f'Total {label}', _report_money(data.get('totals', {}).get(key))])
+            if key == 'non_current_asset':
+                rows.append(['Summary', '', 'Total Assets', _report_money(data.get('total_assets'))])
+            if key == 'equity':
+                rows.append(['Summary', '', 'Total Liabilities and Equity', _report_money(data.get('liabilities_equity_total'))])
+                rows.append(['Summary', '', 'Balance Check', _report_money(data.get('balance_check'))])
+        summary.update({'as_at': end_date, 'total_assets': _report_money(data.get('total_assets')), 'total_liabilities': _report_money(data.get('total_liabilities')), 'total_equity': _report_money(data.get('total_equity')), 'liabilities_equity_total': _report_money(data.get('liabilities_equity_total')), 'balance_check': _report_money(data.get('balance_check'))})
+        return ['Section', 'Code', 'Account', 'Amount'], rows, summary
+
+    if report_type == 'accounting_cash_flow':
+        data = _cash_flow_data(conn, company_id, start_date, end_date)
+        sections = data.get('sections') or {}
+        rows = [
+            ['Opening Cash / Bank', _report_money(data.get('opening_cash'))],
+            ['Net cash from Operating Activities', _report_money(sections.get('operating'))],
+            ['Net cash from Investing Activities', _report_money(sections.get('investing'))],
+            ['Net cash from Financing Activities', _report_money(sections.get('financing'))],
+            ['Net Cash Movement', _report_money(data.get('net_movement'))],
+            ['Closing Cash / Bank', _report_money(data.get('closing_cash'))],
+        ]
+        summary.update({'opening_cash': _report_money(data.get('opening_cash')), 'net_movement': _report_money(data.get('net_movement')), 'closing_cash': _report_money(data.get('closing_cash'))})
+        return ['Description', 'Amount'], rows, summary
+
+    if report_type == 'accounting_general_ledger':
+        _normalise_existing_cashbook_ledger_dates(conn, company_id)
+        accounts = _general_ledger_data(conn, company_id, start_date, end_date, filters.get('account_id') or None)
+        total_debit = total_credit = 0.0
+        for account in accounts:
+            code = account.get('account_code') or ''
+            name = account.get('account_name') or ''
+            rows.append([code, name, 'Opening Balance', '', '', '', '', '', '', _report_money(account.get('opening_balance')), account.get('opening_side') or ''])
+            for line in account.get('lines') or []:
+                debit = _report_money(line.get('debit'))
+                credit = _report_money(line.get('credit'))
+                total_debit += debit
+                total_credit += credit
+                rows.append([
+                    code, name, 'Transaction', line.get('journal_date') or '', line.get('reference') or '',
+                    str(line.get('source_module') or '').replace('_', ' ').title(), line.get('description') or '',
+                    debit, credit, _report_money(line.get('running_balance')), line.get('balance_side') or '',
+                ])
+            rows.append([code, name, 'Closing Balance', '', '', '', 'Account Movement', _report_money(account.get('debit_total')), _report_money(account.get('credit_total')), _report_money(account.get('closing_balance')), account.get('closing_side') or ''])
+        summary.update({'account_count': len(accounts), 'debit_total': _report_money(total_debit), 'credit_total': _report_money(total_credit)})
+        return ['Code', 'Account', 'Row Type', 'Date', 'Reference', 'Source', 'Description', 'Debit', 'Credit', 'Balance', 'Side'], rows, summary
+
+    if report_type == 'accounting_sales':
+        data = _sales_report_data(conn, company_id, start_date, end_date)
+        for item in data.get('rows') or []:
+            rows.append([item.get('date') or '', item.get('document_type') or '', item.get('reference') or '', item.get('client') or '', _report_money(item.get('excl_vat')), _report_money(item.get('vat_amount')), _report_money(item.get('total_incl_vat')), item.get('journal_reference') or ''])
+        rows.append(['', '', '', 'Totals', _report_money(data.get('sales_excl_vat')), _report_money(data.get('vat_amount')), _report_money(data.get('total_incl_vat')), ''])
+        summary.update({'sales_excl_vat': _report_money(data.get('sales_excl_vat')), 'vat_amount': _report_money(data.get('vat_amount')), 'total_incl_vat': _report_money(data.get('total_incl_vat'))})
+        return ['Date', 'Type', 'Reference', 'Client', 'Excl. VAT', 'VAT', 'Incl. VAT', 'Journal'], rows, summary
+
+    if report_type == 'accounting_chart_of_accounts':
+        ensure_default_accounting_accounts(conn, company_id)
+        data = _chart_of_accounts_report_data(conn, company_id)
+        for item in data.get('rows') or []:
+            rows.append([item.get('account_code') or '', item.get('account_name') or '', item.get('account_type_label') or '', item.get('report_section_label') or '', item.get('normal_balance') or '', item.get('cash_flow_category') or '', 'Yes' if item.get('is_cash_equivalent') else 'No', 'Active' if item.get('active') else 'Inactive'])
+        summary.update({'account_count': len(rows), 'active_account_count': sum(1 for item in data.get('rows') or [] if item.get('active'))})
+        return ['Code', 'Account', 'Type', 'Report Section', 'Normal', 'Cash Flow', 'Cash/Bank', 'Status'], rows, summary
+
+    if report_type == 'accounting_vat':
+        data = _vat_report_data(conn, company_id, start_date, end_date)
+        for item in data.get('rows') or []:
+            rows.append([item.get('date') or '', item.get('reference') or '', item.get('vat_type') or '', item.get('source') or '', item.get('description') or '', _report_money(item.get('gross_amount')), _report_money(item.get('net_amount')), _report_money(item.get('vat_amount'))])
+        rows.append(['', '', 'Summary', '', 'Output VAT-applicable sales/receipts', _report_money(data.get('output_gross')), _report_money(data.get('output_net')), _report_money(data.get('output_vat'))])
+        rows.append(['', '', 'Summary', '', 'Input VAT-applicable purchases/expenses', _report_money(data.get('input_gross')), _report_money(data.get('input_net')), _report_money(data.get('input_vat'))])
+        rows.append(['', '', 'Summary', '', 'Net VAT Payable / (Refundable)', '', '', _report_money(data.get('net_vat'))])
+        summary.update({'vat_account': data.get('vat_account') or '', 'output_vat': _report_money(data.get('output_vat')), 'input_vat': _report_money(data.get('input_vat')), 'vat_adjustments': _report_money(data.get('vat_adjustments')), 'net_vat': _report_money(data.get('net_vat'))})
+        return ['Date', 'Reference', 'VAT Type', 'Source', 'Description', 'Gross Amount', 'Net Amount', 'VAT Amount'], rows, summary
+
+    if not filters.get('statement_balance_supplied'):
+        raise ValueError('Enter the bank statement closing balance before running Bank Reconciliation.')
+    data = _bank_reconciliation_data(
+        conn, company_id, start_date, end_date,
+        filters.get('bank_account_id') or None, filters.get('statement_balance') or 0,
+    )
+    if not data.get('bank_account_id'):
+        raise ValueError('No active bank account is available for Bank Reconciliation.')
+    for item in data.get('rows') or []:
+        rows.append([item.get('date') or '', item.get('reference') or '', item.get('source') or '', item.get('description') or '', _report_money(item.get('debit')), _report_money(item.get('credit')), _report_money(item.get('movement'))])
+    rows.append(['', '', '', 'General Ledger Bank Balance', '', '', _report_money(data.get('gl_balance'))])
+    rows.append(['', '', '', 'Bank Statement Closing Balance', '', '', _report_money(data.get('statement_balance'))])
+    rows.append(['', '', '', 'Difference', '', '', _report_money(data.get('difference_amount'))])
+    summary.update({'bank_account': data.get('bank_account') or '', 'gl_balance': _report_money(data.get('gl_balance')), 'statement_balance': _report_money(data.get('statement_balance')), 'difference_amount': _report_money(data.get('difference_amount'))})
+    return ['Date', 'Reference', 'Source', 'Description', 'Debit', 'Credit', 'Movement'], rows, summary
+
+
 def _build_reports_payload(report_type, filters):
     if report_type not in REPORT_TYPES or not _report_type_allowed(report_type):
         raise PermissionError(_report_access_denied_message(report_type))
@@ -6648,7 +6817,13 @@ def _build_reports_payload(report_type, filters):
         bookings = _reports_booking_rows(conn, filters) if report_type in BOOKING_DATA_REPORT_TYPES else []
         service_map = _report_service_map(conn) if report_type in SERVICE_COST_REPORT_TYPES else {}
 
-        if report_type == 'booking_detail':
+        accounting_summary = {}
+        if report_type in ACCOUNTING_SHARED_REPORT_TYPES:
+            columns, rows, accounting_summary = _shared_accounting_report_rows(
+                conn, session['company_id'], report_type, filters
+            )
+
+        elif report_type == 'booking_detail':
             columns = ['Date', 'Day', 'Time', 'Client', 'Project', 'Service', 'Staff', 'Status', 'Invoiced', 'Attachments', 'Notes']
             for b in bookings:
                 date_part = (b.get('start') or '')[:10]
@@ -7245,6 +7420,7 @@ def _build_reports_payload(report_type, filters):
             'project_booking_count': sum(1 for b in bookings if b.get('project_id')),
             'money_total': _report_money(sum(_report_money(r[-1]) for r in rows if r and isinstance(r[-1], (int, float))))
         }
+        summary.update(accounting_summary)
         return {
             'status': 'success',
             'report_type': report_type,
@@ -7272,7 +7448,8 @@ def _reports_pdf_money_column(column_name):
     return any(token in name for token in (
         'price', 'subtotal', 'discount', 'vat', 'total', 'paid', 'balance', 'amount',
         'value', 'salary', 'cost', 'income', 'expense', 'profit', 'revenue', 'uif',
-        'paye', 'deduction', 'gross', 'net pay', 'earnings'
+        'paye', 'deduction', 'gross', 'net pay', 'earnings', 'debit', 'credit',
+        'movement', 'cash'
     ))
 
 
@@ -7364,8 +7541,19 @@ def reports_index():
     services = [dict(r) for r in conn.execute('SELECT name FROM services WHERE company_id=? ORDER BY name ASC', (cid,)).fetchall()] if operational_perms else []
     projects = [dict(r) for r in conn.execute('SELECT id, project_name, project_code, status FROM projects WHERE company_id=? ORDER BY project_name ASC', (cid,)).fetchall()] if operational_perms else []
     statuses = [r['status'] for r in conn.execute("SELECT status FROM projects WHERE company_id=? AND COALESCE(status, '')!='' GROUP BY status ORDER BY status ASC", (cid,)).fetchall()] if operational_perms else []
+    accounting_accounts = []
+    bank_accounts = []
+    if 'accounting' in perms:
+        ensure_default_accounting_accounts(conn, cid)
+        conn.commit()
+        accounting_accounts = [dict(r) for r in conn.execute(
+            '''SELECT id, account_code, account_name, account_type, COALESCE(is_cash_equivalent, 0) AS is_cash_equivalent
+               FROM accounting_accounts WHERE company_id=? AND active=1
+               ORDER BY account_code, account_name''', (cid,)
+        ).fetchall()]
+        bank_accounts = [row for row in accounting_accounts if int(row.get('is_cash_equivalent') or 0)]
     conn.close()
-    return render_template('reports_index.html', session=session, report_types=available_reports, report_groups=_group_report_types(available_reports), start_date=start_date, end_date=end_date, clients=clients, employees=employees, services=services, projects=projects, project_statuses=statuses)
+    return render_template('reports_index.html', session=session, report_types=available_reports, report_groups=_group_report_types(available_reports), start_date=start_date, end_date=end_date, clients=clients, employees=employees, services=services, projects=projects, project_statuses=statuses, accounting_accounts=accounting_accounts, bank_accounts=bank_accounts)
 
 
 @app.route('/api/reports/overview')
@@ -7577,6 +7765,15 @@ FRANCHISE_REPORT_TYPES = {
     'expected_booking_revenue': {'title': 'Expected Booking Revenue', 'group': 'Invoicing'},
     'invoice_summary': {'title': 'Invoice / Revenue Summary by Franchisee', 'group': 'Invoicing'},
     'outstanding_invoices': {'title': 'Outstanding Invoice Summary', 'group': 'Invoicing'},
+    'accounting_trial_balance': {'title': 'Trial Balance', 'group': 'Accounting'},
+    'accounting_income_statement': {'title': 'Income Statement', 'group': 'Accounting'},
+    'accounting_balance_sheet': {'title': 'Balance Sheet', 'group': 'Accounting'},
+    'accounting_cash_flow': {'title': 'Cash Flow Statement', 'group': 'Accounting'},
+    'accounting_general_ledger': {'title': 'General Ledger', 'group': 'Accounting'},
+    'accounting_sales': {'title': 'Sales Report', 'group': 'Accounting'},
+    'accounting_chart_of_accounts': {'title': 'Chart of Accounts Report', 'group': 'Accounting'},
+    'accounting_vat': {'title': 'VAT Report', 'group': 'Accounting'},
+    'accounting_bank_reconciliation': {'title': 'Bank Reconciliation', 'group': 'Accounting'},
 }
 
 
@@ -7642,10 +7839,13 @@ def _franchise_report_filters(payload=None, allowed_company_ids=None):
     end_date = _franchise_report_parse_date(str(payload.get('end_date') or ''), default_end)
     if start_date > end_date:
         start_date, end_date = end_date, start_date
-    try:
-        requested_company_id = int(payload.get('company_id') or payload.get('franchisee_company_id') or 0)
-    except Exception:
-        requested_company_id = 0
+    def _as_int(value):
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    requested_company_id = _as_int(payload.get('company_id') or payload.get('franchisee_company_id'))
     allowed_company_ids = set(int(x) for x in (allowed_company_ids or []))
     if requested_company_id and requested_company_id not in allowed_company_ids:
         raise PermissionError('Selected franchisee is not linked to your franchise group.')
@@ -7655,7 +7855,11 @@ def _franchise_report_filters(payload=None, allowed_company_ids=None):
         'company_id': requested_company_id,
         'service': str(payload.get('service') or '').strip(),
         'status_filter': str(payload.get('status_filter') or '').strip(),
-        'franchise_group_id': _franchise_user_group_id()
+        'franchise_group_id': _franchise_user_group_id(),
+        'account_id': _as_int(payload.get('account_id')),
+        'bank_account_id': _as_int(payload.get('bank_account_id')),
+        'statement_balance': _report_money(payload.get('statement_balance')),
+        'statement_balance_supplied': str(payload.get('statement_balance') if payload.get('statement_balance') is not None else '').strip() != '',
     }
 
 
@@ -7997,10 +8201,52 @@ def _build_franchise_report_payload(report_type, filters, allowed_companies, gro
         rows = []
         columns = []
         bookings = []
+        accounting_summary = {}
         if report_type in {'booking_summary', 'booking_detail', 'bookings_by_client', 'bookings_by_service', 'bookings_by_employee'}:
             bookings = _franchise_booking_rows(conn, filters, allowed_company_ids)
 
-        if report_type == 'booking_summary':
+        if report_type in ACCOUNTING_SHARED_REPORT_TYPES:
+            scoped_companies = [c for c in allowed_companies if not filters.get('company_id') or int(c['id']) == int(filters['company_id'])]
+            if report_type == 'accounting_bank_reconciliation' and len(scoped_companies) != 1:
+                raise ValueError('Select one franchisee before running Bank Reconciliation.')
+            scoped_ids = [int(c['id']) for c in scoped_companies]
+            if scoped_ids:
+                placeholders = _franchise_placeholders(scoped_ids)
+                enabled_ids = {
+                    int(r['id']) for r in conn.execute(
+                        f'''SELECT id FROM companies
+                            WHERE id IN ({placeholders}) AND COALESCE(can_accounting, 0)=1''',
+                        scoped_ids,
+                    ).fetchall()
+                }
+                scoped_companies = [c for c in scoped_companies if int(c['id']) in enabled_ids]
+            if not scoped_companies:
+                raise ValueError('The Accounting app is not active for the selected franchisee company or companies.')
+
+            report_columns = None
+            company_summaries = []
+            for company in scoped_companies:
+                company_filters = dict(filters)
+                # Account and bank IDs are tenant-specific and can only be used
+                # when one franchisee is selected in the screen.
+                if len(scoped_companies) != 1:
+                    company_filters['account_id'] = 0
+                    company_filters['bank_account_id'] = 0
+                current_columns, current_rows, current_summary = _shared_accounting_report_rows(
+                    conn, int(company['id']), report_type, company_filters
+                )
+                if report_columns is None:
+                    report_columns = current_columns
+                rows.extend([[company.get('name') or '', *row] for row in current_rows])
+                company_summaries.append({'company_id': int(company['id']), 'company_name': company.get('name') or '', **current_summary})
+            columns = ['Franchisee'] + (report_columns or [])
+            accounting_summary = {
+                'accounting_company_count': len(scoped_companies),
+                'accounting_companies': company_summaries,
+                'framework': 'IFRS for SMEs',
+            }
+
+        elif report_type == 'booking_summary':
             grouped = {}
             for b in bookings:
                 key = b.get('company_id')
@@ -8103,6 +8349,7 @@ def _build_franchise_report_payload(report_type, filters, allowed_companies, gro
             'franchisee_count': len(allowed_companies),
             'selected_franchisee': filters.get('company_id') or 'all'
         }
+        summary.update(accounting_summary)
         return {
             'status': 'success',
             'report_type': report_type,
@@ -8136,7 +8383,18 @@ def franchise_reports_index():
         start_date, end_date = _franchise_report_default_dates()
         company_ids = [c['id'] for c in allowed_companies]
         services = [dict(r) for r in conn.execute(f"SELECT name FROM services WHERE company_id IN ({_franchise_placeholders(company_ids)}) GROUP BY name ORDER BY name ASC", company_ids).fetchall()] if company_ids else []
-        return render_template('franchise_reports_index.html', session=session, group=group, group_options=group_options, selected_group_id=selected_group_id, report_types=FRANCHISE_REPORT_TYPES, report_groups=_franchise_report_groups(), franchisees=allowed_companies, services=services, start_date=start_date, end_date=end_date)
+        accounting_accounts = [dict(r) for r in conn.execute(
+            f'''SELECT a.id, a.company_id, a.account_code, a.account_name,
+                       COALESCE(a.is_cash_equivalent, 0) AS is_cash_equivalent,
+                       c.name AS company_name
+                FROM accounting_accounts a
+                JOIN companies c ON c.id=a.company_id
+                WHERE a.company_id IN ({_franchise_placeholders(company_ids)})
+                  AND a.active=1 AND COALESCE(c.can_accounting, 0)=1
+                ORDER BY c.name, a.account_code, a.account_name''', company_ids
+        ).fetchall()] if company_ids else []
+        bank_accounts = [row for row in accounting_accounts if int(row.get('is_cash_equivalent') or 0)]
+        return render_template('franchise_reports_index.html', session=session, group=group, group_options=group_options, selected_group_id=selected_group_id, report_types=FRANCHISE_REPORT_TYPES, report_groups=_franchise_report_groups(), franchisees=allowed_companies, services=services, start_date=start_date, end_date=end_date, accounting_accounts=accounting_accounts, bank_accounts=bank_accounts)
     finally:
         conn.close()
 

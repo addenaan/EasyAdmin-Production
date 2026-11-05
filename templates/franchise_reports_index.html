@@ -54,7 +54,7 @@
                 {% endif %}
                 <div class="col-md-3">
                     <label class="form-label fw-bold small">Report</label>
-                    <select id="reportType" class="form-select">
+                    <select id="reportType" class="form-select" onchange="handleFranchiseReportTypeChange()">
                         {% for group_name, reports in report_groups.items() %}
                             <optgroup label="{{ group_name }}">
                                 {% for report in reports %}<option value="{{ report.key }}">{{ report.title }}</option>{% endfor %}
@@ -64,7 +64,7 @@
                 </div>
                 <div class="col-md-3">
                     <label class="form-label fw-bold small">Franchisee</label>
-                    <select id="franchiseeCompanyId" class="form-select">
+                    <select id="franchiseeCompanyId" class="form-select" onchange="handleFranchiseReportTypeChange()">
                         <option value="0">All Franchisees</option>
                         {% for c in franchisees %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
                     </select>
@@ -87,6 +87,35 @@
                 <div class="col-md-2">
                     <label class="form-label fw-bold small">Status</label>
                     <input type="text" id="statusFilter" class="form-control" placeholder="Optional">
+                </div>
+                <div class="col-md-4 d-none" id="franchiseAccountingAccountFilter">
+                    <label class="form-label fw-bold small">General Ledger Account</label>
+                    <select id="accountId" class="form-select">
+                        <option value="">All accounts</option>
+                        {% for account in accounting_accounts %}
+                            <option value="{{ account.id }}" data-company-id="{{ account.company_id }}">{{ account.company_name }} — {{ account.account_code }} — {{ account.account_name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-6 d-none" id="franchiseBankReconciliationFields">
+                    <div class="row g-3">
+                        <div class="col-md-7">
+                            <label class="form-label fw-bold small">Bank Account</label>
+                            <select id="bankAccountId" class="form-select">
+                                <option value="">Default bank account</option>
+                                {% for account in bank_accounts %}
+                                    <option value="{{ account.id }}" data-company-id="{{ account.company_id }}">{{ account.company_name }} — {{ account.account_code }} — {{ account.account_name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label fw-bold small">Statement Closing Balance</label>
+                            <input id="statementBalance" type="number" step="0.01" class="form-control" placeholder="0.00">
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12 d-none" id="franchiseAccountingNotice">
+                    <div class="alert alert-info py-2 mb-0 small"><strong>Accounting reports:</strong> Figures come from posted Accounting entries using the same calculations as each franchisee's Accounting app. Bank Reconciliation requires one franchisee.</div>
                 </div>
                 <div class="col-md-3 d-flex gap-2">
                     <button class="btn btn-primary fw-bold flex-fill" onclick="runFranchiseReport()">Run Report</button>
@@ -130,7 +159,10 @@ function collectFilters() {
         start_date: document.getElementById('startDate').value,
         end_date: document.getElementById('endDate').value,
         service: document.getElementById('serviceFilter').value,
-        status_filter: document.getElementById('statusFilter').value
+        status_filter: document.getElementById('statusFilter').value,
+        account_id: document.getElementById('accountId')?.value || '',
+        bank_account_id: document.getElementById('bankAccountId')?.value || '',
+        statement_balance: document.getElementById('statementBalance')?.value ?? ''
     };
 }
 function switchFranchiseGroup() {
@@ -154,6 +186,10 @@ function loadOverview() {
 }
 function runFranchiseReport() {
     const filters = collectFilters();
+    if(filters.report_type === 'accounting_bank_reconciliation' && (!Number(filters.company_id) || filters.statement_balance === '')) {
+        document.getElementById('reportError').innerHTML = '<div class="alert alert-warning">Select one franchisee and enter the statement closing balance before running Bank Reconciliation.</div>';
+        return;
+    }
     document.getElementById('reportError').innerHTML = '';
     document.getElementById('reportBody').innerHTML = '<tr><td class="text-center text-muted p-4">Loading report...</td></tr>';
     fetch('/api/franchise_reports/run', {
@@ -180,10 +216,27 @@ function renderReport(res) {
         document.getElementById('reportBody').innerHTML = `<tr><td colspan="${Math.max(cols.length, 1)}" class="text-center text-muted p-4">No data found for the selected filters.</td></tr>`;
         return;
     }
-    document.getElementById('reportBody').innerHTML = res.rows.map(row => `<tr>${row.map(v => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`).join('');
+    const accountingReport = String(res.report_type || '').startsWith('accounting_');
+    document.getElementById('reportBody').innerHTML = res.rows.map(row => `<tr>${row.map((v, index) => {
+        const column = (res.columns || [])[index] || '';
+        return `<td>${escapeHtml(accountingReport ? franchiseAccountingValue(v, column) : v)}</td>`;
+    }).join('')}</tr>`).join('');
+}
+const franchiseMoneyFormatter = new Intl.NumberFormat('en-ZA', {style:'currency', currency:'ZAR'});
+function franchiseAccountingValue(value, column) {
+    const name = String(column || '').toLowerCase();
+    const numeric = typeof value === 'number' || /^-?\d+(\.\d+)?$/.test(String(value ?? '').trim());
+    if(numeric && ['amount','total','balance','debit','credit','movement','cash','vat','revenue','income','expense','profit','price','paid'].some(token => name.includes(token))) {
+        return franchiseMoneyFormatter.format(Number(value || 0));
+    }
+    return value ?? '';
 }
 function exportFranchiseCsv() {
     const f = collectFilters();
+    if(f.report_type === 'accounting_bank_reconciliation' && (!Number(f.company_id) || f.statement_balance === '')) {
+        alert('Select one franchisee and enter the statement closing balance before exporting Bank Reconciliation.');
+        return;
+    }
     const reportType = f.report_type;
     delete f.report_type;
     const q = new URLSearchParams(f).toString();
@@ -191,12 +244,38 @@ function exportFranchiseCsv() {
 }
 function exportFranchisePdf() {
     const f = collectFilters();
+    if(f.report_type === 'accounting_bank_reconciliation' && (!Number(f.company_id) || f.statement_balance === '')) {
+        alert('Select one franchisee and enter the statement closing balance before exporting Bank Reconciliation.');
+        return;
+    }
     const reportType = f.report_type;
     delete f.report_type;
     const q = new URLSearchParams(f).toString();
     window.location.href = `/export/franchise_reports/${encodeURIComponent(reportType)}.pdf?${q}`;
 }
+function filterFranchiseAccountOptions(selectId, companyId) {
+    const select = document.getElementById(selectId);
+    if(!select) return;
+    Array.from(select.options).forEach((option, index) => {
+        if(index === 0) return;
+        option.hidden = !companyId || option.dataset.companyId !== String(companyId);
+    });
+    if(select.selectedOptions[0]?.hidden) select.value = '';
+}
+function handleFranchiseReportTypeChange() {
+    const type = document.getElementById('reportType').value;
+    const companyId = document.getElementById('franchiseeCompanyId').value;
+    const isAccounting = type.startsWith('accounting_');
+    const ledger = type === 'accounting_general_ledger';
+    const reconciliation = type === 'accounting_bank_reconciliation';
+    document.getElementById('franchiseAccountingNotice').classList.toggle('d-none', !isAccounting);
+    document.getElementById('franchiseAccountingAccountFilter').classList.toggle('d-none', !ledger || !companyId || companyId === '0');
+    document.getElementById('franchiseBankReconciliationFields').classList.toggle('d-none', !reconciliation);
+    filterFranchiseAccountOptions('accountId', companyId);
+    filterFranchiseAccountOptions('bankAccountId', companyId);
+}
 document.addEventListener('DOMContentLoaded', () => {
+    handleFranchiseReportTypeChange();
     loadOverview();
     runFranchiseReport();
 });

@@ -69,7 +69,7 @@
                 <div class="row g-3">
                     <div class="col-lg-4">
                         <label class="filter-label">Report Type</label>
-                        <select id="reportType" class="form-select border-dark" onchange="runReport()">
+                        <select id="reportType" class="form-select border-dark" onchange="handleReportTypeChange(); runReport()">
                             {% for group, reports in report_groups.items() %}
                                 <optgroup label="{{ group }}">
                                     {% for report in reports %}
@@ -152,6 +152,35 @@
                             {% endfor %}
                         </select>
                     </div>
+                    <div class="col-md-5 d-none" id="accountingAccountFilter">
+                        <label class="filter-label">General Ledger Account</label>
+                        <select id="accountId" class="form-select">
+                            <option value="">All accounts</option>
+                            {% for account in accounting_accounts %}
+                                <option value="{{ account.id }}">{{ account.account_code }} — {{ account.account_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-7 d-none" id="bankReconciliationFields">
+                        <div class="row g-3">
+                            <div class="col-md-7">
+                                <label class="filter-label">Bank Account</label>
+                                <select id="bankAccountId" class="form-select">
+                                    <option value="">Default bank account</option>
+                                    {% for account in bank_accounts %}
+                                        <option value="{{ account.id }}">{{ account.account_code }} — {{ account.account_name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-md-5">
+                                <label class="filter-label">Statement Closing Balance</label>
+                                <input id="statementBalance" type="number" step="0.01" class="form-control" placeholder="0.00">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-12 d-none" id="accountingReportNotice">
+                        <div class="alert alert-info py-2 mb-0 small"><strong>Accounting reports:</strong> Figures use posted Accounting entries and the same calculations as the Accounting app. End Date is the as-at date for Trial Balance and Balance Sheet.</div>
+                    </div>
                     <div class="col-md-9 d-flex align-items-end justify-content-end">
                         <button class="btn btn-outline-secondary fw-bold" onclick="clearFilters()">Clear Optional Filters</button>
                     </div>
@@ -193,7 +222,10 @@ function getFilters() {
         employee: document.getElementById('employee').value,
         service: document.getElementById('service').value,
         status_filter: document.getElementById('statusFilter').value,
-        project_status: document.getElementById('projectStatus').value
+        project_status: document.getElementById('projectStatus').value,
+        account_id: document.getElementById('accountId')?.value || '',
+        bank_account_id: document.getElementById('bankAccountId')?.value || '',
+        statement_balance: document.getElementById('statementBalance')?.value ?? ''
     };
 }
 
@@ -201,7 +233,7 @@ function moneyMaybe(value, columnName) {
     const numeric = typeof value === 'number' || /^-?\d+(\.\d+)?$/.test(String(value || '').trim());
     if (!numeric) return value ?? '';
     const c = String(columnName || '').toLowerCase();
-    if (c.includes('price') || c.includes('total') || c.includes('cost') || c.includes('balance') || c.includes('amount') || c.includes('value') || c.includes('salary') || c.includes('paid') || c.includes('uif') || c.includes('paye') || c.includes('deduction') || c.includes('income') || c.includes('expense') || c.includes('profit') || c.includes('revenue')) {
+    if (c.includes('price') || c.includes('total') || c.includes('cost') || c.includes('balance') || c.includes('amount') || c.includes('value') || c.includes('salary') || c.includes('paid') || c.includes('uif') || c.includes('paye') || c.includes('deduction') || c.includes('income') || c.includes('expense') || c.includes('profit') || c.includes('revenue') || c.includes('debit') || c.includes('credit') || c.includes('movement') || c.includes('cash') || c.includes('vat')) {
         return moneyFormatter.format(Number(value || 0));
     }
     if (c.includes('margin') || c.includes('percent') || c.includes('%')) {
@@ -240,12 +272,13 @@ function renderReport(payload) {
     document.getElementById('reportTitle').textContent = payload.title || 'Report';
     document.getElementById('reportMeta').textContent = `Period: ${payload.filters.start_date} to ${payload.filters.end_date} | Generated: ${payload.generated_at}`;
     const summary = payload.summary || {};
-    document.getElementById('summaryBadges').innerHTML = `
-        <span class="badge bg-dark report-summary-badge me-1">Rows: ${summary.row_count || 0}</span>
-        <span class="badge bg-primary report-summary-badge me-1">Bookings: ${summary.booking_count || 0}</span>
-        <span class="badge bg-success report-summary-badge me-1">Completed: ${summary.completed_bookings || 0}</span>
-        <span class="badge bg-warning text-dark report-summary-badge">Uninvoiced: ${summary.uninvoiced_bookings || 0}</span>
-    `;
+    const isAccounting = String(payload.report_type || '').startsWith('accounting_');
+    document.getElementById('summaryBadges').innerHTML = isAccounting
+        ? `<span class="badge bg-dark report-summary-badge me-1">Rows: ${summary.row_count || 0}</span><span class="badge bg-primary report-summary-badge">Posted accounting data</span>`
+        : `<span class="badge bg-dark report-summary-badge me-1">Rows: ${summary.row_count || 0}</span>
+           <span class="badge bg-primary report-summary-badge me-1">Bookings: ${summary.booking_count || 0}</span>
+           <span class="badge bg-success report-summary-badge me-1">Completed: ${summary.completed_bookings || 0}</span>
+           <span class="badge bg-warning text-dark report-summary-badge">Uninvoiced: ${summary.uninvoiced_bookings || 0}</span>`;
     const thead = document.querySelector('#reportTable thead');
     const tbody = document.querySelector('#reportTable tbody');
     thead.innerHTML = '<tr>' + (payload.columns || []).map(c => `<th>${escapeHtml(c)}</th>`).join('') + '</tr>';
@@ -288,6 +321,10 @@ async function runReport() {
 
 function exportReportCsv() {
     const filters = getFilters();
+    if(filters.report_type === 'accounting_bank_reconciliation' && filters.statement_balance === '') {
+        alert('Enter the statement closing balance before exporting Bank Reconciliation.');
+        return;
+    }
     const reportType = filters.report_type;
     delete filters.report_type;
     const params = new URLSearchParams(filters);
@@ -296,6 +333,10 @@ function exportReportCsv() {
 
 function exportReportPdf() {
     const filters = getFilters();
+    if(filters.report_type === 'accounting_bank_reconciliation' && filters.statement_balance === '') {
+        alert('Enter the statement closing balance before exporting Bank Reconciliation.');
+        return;
+    }
     const reportType = filters.report_type;
     delete filters.report_type;
     const params = new URLSearchParams(filters);
@@ -309,11 +350,23 @@ function clearFilters() {
     document.getElementById('service').value = '';
     document.getElementById('statusFilter').value = '';
     document.getElementById('projectStatus').value = '';
+    if(document.getElementById('accountId')) document.getElementById('accountId').value = '';
+    if(document.getElementById('bankAccountId')) document.getElementById('bankAccountId').value = '';
+    if(document.getElementById('statementBalance')) document.getElementById('statementBalance').value = '';
     refreshOverview();
     runReport();
 }
 
+function handleReportTypeChange() {
+    const type = document.getElementById('reportType').value;
+    const isAccounting = type.startsWith('accounting_');
+    document.getElementById('accountingReportNotice').classList.toggle('d-none', !isAccounting);
+    document.getElementById('accountingAccountFilter').classList.toggle('d-none', type !== 'accounting_general_ledger');
+    document.getElementById('bankReconciliationFields').classList.toggle('d-none', type !== 'accounting_bank_reconciliation');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    handleReportTypeChange();
     refreshOverview();
     runReport();
 });
