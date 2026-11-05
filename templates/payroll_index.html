@@ -731,6 +731,19 @@
                             <button class="btn btn-info text-white fw-bold shadow-sm" id="btnEmailSingle" onclick="emailSinglePayslip()">📧 Email Draft</button>
                             <button class="btn btn-dark fw-bold shadow-sm" id="btnViewPayslip" onclick="downloadSinglePayslip()">⬇️ Download PDF</button>
                         </div>
+
+                        <div id="payslipEmailHistoryPanel" class="card mb-3">
+                            <div class="card-body py-3">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <div>
+                                        <h6 class="fw-bold mb-0">Email History</h6>
+                                        <div class="small text-muted">“Accepted” means the outgoing mail server accepted the message; it does not confirm inbox delivery.</div>
+                                    </div>
+                                    <span id="payslipEmailHistorySummary" class="badge bg-secondary">Not emailed</span>
+                                </div>
+                                <div id="payslipEmailHistoryBody" class="small text-muted">Loading email history...</div>
+                            </div>
+                        </div>
                         
                         <div id="bpUifEligibilityAudit" class="alert alert-light border mb-3" style="display:none;">
                             <div class="d-flex flex-wrap gap-3 align-items-center">
@@ -1164,6 +1177,72 @@
             return String(value || '').replace(/[&<>'"]/g, function(ch) {
                 return {'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch];
             });
+        }
+
+        function formatPayslipEmailTime(value) {
+            if(!value) return 'Time not recorded';
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('en-ZA');
+        }
+
+        function payslipEmailStatusBadge(status) {
+            if(status === 'accepted') return '<span class="badge bg-success">Accepted by mail server</span>';
+            if(status === 'failed') return '<span class="badge bg-danger">Failed</span>';
+            return '<span class="badge bg-warning text-dark">Sending</span>';
+        }
+
+        async function loadPayslipEmailHistory() {
+            const panel = document.getElementById('payslipEmailHistoryPanel');
+            const body = document.getElementById('payslipEmailHistoryBody');
+            const summary = document.getElementById('payslipEmailHistorySummary');
+            if(!panel || !body || !summary || !currentPayslipData?.raw) return;
+            const employeeId = currentPayslipData.raw.employee_id;
+            const payrollMonth = String(currentPayslipData.raw.date || currentPayslipData.payslip?.date || '').slice(0, 7);
+            if(!employeeId || !/^\d{4}-\d{2}$/.test(payrollMonth)) return;
+            body.innerHTML = '<div class="text-muted">Loading email history...</div>';
+            summary.className = 'badge bg-secondary';
+            summary.textContent = 'Loading...';
+            try {
+                const params = new URLSearchParams({document_type:'payslip', document_key:`${employeeId}:${payrollMonth}`});
+                const res = await fetch('/api/document_email_history?' + params.toString(), {cache:'no-store'});
+                const data = await res.json().catch(() => ({message:'Unable to load email history.'}));
+                if(!res.ok) throw new Error(data.message || 'Unable to load email history.');
+                const rows = Array.isArray(data.history) ? data.history : [];
+                const accepted = Number(data.summary?.accepted_count || 0);
+                if(accepted > 0) {
+                    summary.className = 'badge bg-success';
+                    summary.textContent = `Emailed ${accepted} time${accepted === 1 ? '' : 's'}`;
+                } else if(rows.some(row => row.status === 'failed')) {
+                    summary.className = 'badge bg-danger';
+                    summary.textContent = 'Email failed';
+                } else {
+                    summary.className = 'badge bg-secondary';
+                    summary.textContent = 'Not emailed';
+                }
+                if(!rows.length) {
+                    body.innerHTML = '<div class="text-muted">No email attempts have been recorded for this payslip.</div>';
+                    return;
+                }
+                body.innerHTML = rows.map(row => {
+                    const error = row.error_message
+                        ? `<div class="text-danger mt-1"><strong>Reason:</strong> ${escapeHtml(row.error_message)}</div>`
+                        : '';
+                    return `<div class="border-top py-2">
+                        <div class="d-flex flex-wrap justify-content-between gap-2">
+                            <strong>${formatPayslipEmailTime(row.attempted_at)}</strong>
+                            ${payslipEmailStatusBadge(row.status)}
+                        </div>
+                        <div><strong>To:</strong> ${escapeHtml(row.recipient_addresses || 'Not recorded')}</div>
+                        <div><strong>Sent by:</strong> ${escapeHtml(row.sent_by || 'Unknown user')}</div>
+                        <div><strong>Subject:</strong> ${escapeHtml(row.subject || '')}</div>
+                        ${error}
+                    </div>`;
+                }).join('');
+            } catch(err) {
+                summary.className = 'badge bg-danger';
+                summary.textContent = 'Unavailable';
+                body.innerHTML = `<div class="text-danger">${escapeHtml(err.message || 'Unable to load email history.')}</div>`;
+            }
         }
 
         function showPayrollNotification(message, type='success') {
@@ -2078,6 +2157,7 @@
                 runBtn.innerText = '✅ Calculated Successfully';
                 runBtn.disabled = false;
             }
+            loadPayslipEmailHistory();
             return true;
         }
 
@@ -2336,9 +2416,11 @@
             }).then(res => res.json().then(data => ({ok:res.ok,data}))).then(({ok,data}) => {
                 alert(data.message || (ok ? 'Email sent successfully.' : 'Unable to send email.'));
                 btn.innerText = originalText; btn.disabled = false;
+                loadPayslipEmailHistory();
             }).catch(() => {
                 alert("A server error occurred while sending the email.");
                 btn.innerText = originalText; btn.disabled = false;
+                loadPayslipEmailHistory();
             });
         }
 

@@ -207,6 +207,13 @@
                                     {% elif inv.status == 'Partially Paid/Credited' %}<span class="badge bg-primary">Partially Paid/Credited</span>
                                     {% elif inv.status == 'Settled with Credit' %}<span class="badge bg-success">Settled with Credit</span>
                                     {% else %}<span class="badge bg-danger">Unpaid</span>{% endif %}
+                                    {% if inv.accepted_count|default(0)|int > 0 %}
+                                    <div class="small text-success mt-1" title="Last accepted by the outgoing mail server: {{ inv.last_accepted_at or '' }}">📧 Emailed {{ inv.accepted_count }} time{% if inv.accepted_count|int != 1 %}s{% endif %}</div>
+                                    {% elif inv.failed_count|default(0)|int > 0 %}
+                                    <div class="small text-danger mt-1">📧 Last email failed</div>
+                                    {% else %}
+                                    <div class="small text-muted mt-1">Not emailed</div>
+                                    {% endif %}
                                 </td>
                                 <td class="col-actions">
                                     <div class="dropdown">
@@ -312,6 +319,13 @@
                                 {% elif q.status == 'Expired' %}<span class="badge bg-warning text-dark">Expired</span>
                                 {% elif q.status == 'Converted' %}<span class="badge bg-primary">Converted to Invoice</span>
                                 {% else %}<span class="badge bg-secondary">Pending</span>{% endif %}
+                                {% if q.accepted_count|default(0)|int > 0 %}
+                                <div class="small text-success mt-1" title="Last accepted by the outgoing mail server: {{ q.last_accepted_at or '' }}">📧 Emailed {{ q.accepted_count }} time{% if q.accepted_count|int != 1 %}s{% endif %}</div>
+                                {% elif q.failed_count|default(0)|int > 0 %}
+                                <div class="small text-danger mt-1">📧 Last email failed</div>
+                                {% else %}
+                                <div class="small text-muted mt-1">Not emailed</div>
+                                {% endif %}
                             </td>
                             <td class="text-center">
                                 <button class="btn btn-sm btn-outline-dark" onclick="viewQuote({{ q.id }})">👁️ View</button>
@@ -961,6 +975,17 @@
                         </div>
                     </div>
 
+                    <div id="documentEmailHistoryPanel" class="bg-white border rounded mt-3 p-3" style="display:none;">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <div>
+                                <h6 class="fw-bold mb-0">Email History</h6>
+                                <div class="small text-muted">“Accepted” means the outgoing mail server accepted the message; it does not confirm inbox delivery.</div>
+                            </div>
+                            <span id="documentEmailHistorySummary" class="badge bg-secondary">Not emailed</span>
+                        </div>
+                        <div id="documentEmailHistoryBody" class="small text-muted">Loading email history...</div>
+                    </div>
+
                 </div>
                 <div class="modal-footer justify-content-center bg-dark">
                     <button type="button" class="btn btn-danger btn-lg fw-bold px-4" onclick="downloadDocPDF()">⬇️ Download PDF</button>
@@ -1172,6 +1197,8 @@
         let currentStmtStart = "";
         let currentStmtEnd = "";
 
+        document.getElementById('docModal').addEventListener('shown.bs.modal', loadDocumentEmailHistory);
+
         document.getElementById('invDate').value = new Date().toISOString().split('T')[0];
         document.getElementById('quoteDate').value = new Date().toISOString().split('T')[0];
 
@@ -1365,6 +1392,74 @@
             return String(value || '').replace(/[&<>"']/g, function(ch) {
                 return ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'})[ch];
             });
+        }
+
+        function formatDocumentEmailTime(value) {
+            if(!value) return 'Time not recorded';
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('en-ZA');
+        }
+
+        function documentEmailStatusBadge(status) {
+            if(status === 'accepted') return '<span class="badge bg-success">Accepted by mail server</span>';
+            if(status === 'failed') return '<span class="badge bg-danger">Failed</span>';
+            return '<span class="badge bg-warning text-dark">Sending</span>';
+        }
+
+        async function loadDocumentEmailHistory() {
+            const panel = document.getElementById('documentEmailHistoryPanel');
+            const body = document.getElementById('documentEmailHistoryBody');
+            const summary = document.getElementById('documentEmailHistorySummary');
+            if(!panel || !body || !summary) return;
+            if(!['invoice', 'quote'].includes(currentDocType) || !currentDocId) {
+                panel.style.display = 'none';
+                return;
+            }
+            panel.style.display = 'block';
+            body.innerHTML = '<div class="text-muted">Loading email history...</div>';
+            summary.className = 'badge bg-secondary';
+            summary.textContent = 'Loading...';
+            try {
+                const params = new URLSearchParams({document_type: currentDocType, document_key: String(currentDocId)});
+                const res = await fetch('/api/document_email_history?' + params.toString(), {cache:'no-store'});
+                const data = await res.json().catch(() => ({message:'Unable to load email history.'}));
+                if(!res.ok) throw new Error(data.message || 'Unable to load email history.');
+                const rows = Array.isArray(data.history) ? data.history : [];
+                const accepted = Number(data.summary?.accepted_count || 0);
+                if(accepted > 0) {
+                    summary.className = 'badge bg-success';
+                    summary.textContent = `Emailed ${accepted} time${accepted === 1 ? '' : 's'}`;
+                } else if(rows.some(row => row.status === 'failed')) {
+                    summary.className = 'badge bg-danger';
+                    summary.textContent = 'Email failed';
+                } else {
+                    summary.className = 'badge bg-secondary';
+                    summary.textContent = 'Not emailed';
+                }
+                if(!rows.length) {
+                    body.innerHTML = '<div class="text-muted">No email attempts have been recorded for this document.</div>';
+                    return;
+                }
+                body.innerHTML = rows.map(row => {
+                    const error = row.error_message
+                        ? `<div class="text-danger mt-1"><strong>Reason:</strong> ${escapeJsHtml(row.error_message)}</div>`
+                        : '';
+                    return `<div class="border-top py-2">
+                        <div class="d-flex flex-wrap justify-content-between gap-2">
+                            <strong>${formatDocumentEmailTime(row.attempted_at)}</strong>
+                            ${documentEmailStatusBadge(row.status)}
+                        </div>
+                        <div><strong>To:</strong> ${escapeJsHtml(row.recipient_addresses || 'Not recorded')}</div>
+                        <div><strong>Sent by:</strong> ${escapeJsHtml(row.sent_by || 'Unknown user')}</div>
+                        <div><strong>Subject:</strong> ${escapeJsHtml(row.subject || '')}</div>
+                        ${error}
+                    </div>`;
+                }).join('');
+            } catch(err) {
+                summary.className = 'badge bg-danger';
+                summary.textContent = 'Unavailable';
+                body.innerHTML = `<div class="text-danger">${escapeJsHtml(err.message || 'Unable to load email history.')}</div>`;
+            }
         }
 
         function invoicePaymentSuggestionItems(data) {
@@ -2927,12 +3022,15 @@
                 return alert('This document type cannot be emailed as a PDF.');
             }
             fetch(endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email})})
-                .then(res => res.json()).then(data => {
+                .then(res => res.json().then(data => ({ok:res.ok, data}))).then(({ok, data}) => {
                     alert(data.message);
                     btn.innerText = "📧 Email Document"; btn.disabled = false;
+                    loadDocumentEmailHistory();
+                    refreshInvoicingLists();
                 }).catch(() => {
                     alert("A server error occurred while sending the email.");
                     btn.innerText = "📧 Email Document"; btn.disabled = false;
+                    loadDocumentEmailHistory();
                 });
         }
 

@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 import smtplib
 from email.message import EmailMessage
+from email.utils import make_msgid
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -2285,6 +2286,28 @@ def init_db():
         except Exception:
             pass
 
+    # Permanent, tenant-scoped history for emailed payslips, invoices and quotes.
+    # This is deliberately separate from the rolling 90-day audit log because
+    # users need the complete send-attempt history for the life of the document.
+    conn.execute('''CREATE TABLE IF NOT EXISTS document_email_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        document_type TEXT NOT NULL,
+        document_key TEXT NOT NULL,
+        document_id TEXT,
+        document_number TEXT,
+        recipient_addresses TEXT,
+        subject TEXT,
+        filename TEXT,
+        sent_by TEXT,
+        attempted_at TEXT NOT NULL,
+        completed_at TEXT,
+        status TEXT NOT NULL DEFAULT 'sending',
+        error_message TEXT,
+        message_id TEXT,
+        content_sha256 TEXT
+    )''')
+
     # Durable SARS preparation records. These snapshots are intentionally kept
     # separately from the rolling application audit log so an approved tax-period
     # review pack remains reproducible after the live payroll or ledger changes.
@@ -3003,6 +3026,8 @@ def init_db():
         'CREATE INDEX IF NOT EXISTS idx_audit_logs_company_timestamp_id ON audit_logs(company_id, timestamp DESC, id DESC)',
         'CREATE INDEX IF NOT EXISTS idx_audit_logs_company_id_desc ON audit_logs(company_id, id DESC)',
         'CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_document_email_history_lookup ON document_email_history(company_id, document_type, document_key, attempted_at DESC, id DESC)',
+        'CREATE INDEX IF NOT EXISTS idx_document_email_history_status ON document_email_history(company_id, status, attempted_at DESC)',
         'CREATE INDEX IF NOT EXISTS idx_bookings_company_employee_start ON bookings(company_id, employee, start)',
         'CREATE INDEX IF NOT EXISTS idx_payslips_company_employee_date ON payslips(company_id, employee_id, date)',
         'CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id)',
@@ -3125,6 +3150,102 @@ def log_action(app_name, action, details, record_type=None, record_id=None, resu
         conn.commit()
     finally:
         conn.close()
+
+
+DOCUMENT_EMAIL_HISTORY_TYPES = {'payslip', 'invoice', 'quote'}
+
+
+def _document_email_timestamp():
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def _document_email_key(document_type, *, document_id=None, employee_id=None, payroll_date=None):
+    document_type = str(document_type or '').strip().lower()
+    if document_type in {'invoice', 'quote'}:
+        return str(int(document_id))
+    if document_type == 'payslip':
+        month = str(payroll_date or '')[:7]
+        if not re.fullmatch(r'\d{4}-\d{2}', month):
+            raise ValueError('A valid payslip payroll month is required for email tracking.')
+        return f"{int(employee_id)}:{month}"
+    raise ValueError('Unsupported document type for email tracking.')
+
+
+def _start_document_email_attempt(document_type, document_key, *, document_id=None,
+                                  document_number='', recipients='', subject='', filename='',
+                                  content_sha256=''):
+    """Create an immutable send-attempt row before contacting the SMTP server."""
+    document_type = str(document_type or '').strip().lower()
+    document_key = str(document_key or '').strip()
+    if document_type not in DOCUMENT_EMAIL_HISTORY_TYPES or not document_key:
+        raise ValueError('Valid document email tracking details are required.')
+    conn = get_db_connection()
+    try:
+        cur = conn.execute(
+            '''INSERT INTO document_email_history
+               (company_id, document_type, document_key, document_id, document_number,
+                recipient_addresses, subject, filename, sent_by, attempted_at, status,
+                content_sha256)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sending', ?)''',
+            (
+                session['company_id'], document_type, document_key,
+                str(document_id) if document_id not in (None, '') else None,
+                str(document_number or '')[:250], str(recipients or '')[:2000],
+                str(subject or '')[:500], str(filename or '')[:500],
+                str(session.get('username') or 'Unknown user')[:250],
+                _document_email_timestamp(), str(content_sha256 or '')[:64],
+            ),
+        )
+        attempt_id = cur.lastrowid
+        conn.commit()
+        return attempt_id
+    finally:
+        conn.close()
+
+
+def _finish_document_email_attempt(attempt_id, status, *, recipients=None,
+                                   message_id=None, error_message=None):
+    if not attempt_id:
+        return
+    clean_status = 'accepted' if status == 'accepted' else 'failed'
+    clean_error = re.sub(r'[\r\n]+', ' ', str(error_message or '')).strip()[:1500] or None
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            '''UPDATE document_email_history
+               SET completed_at=?, status=?,
+                   recipient_addresses=COALESCE(?, recipient_addresses),
+                   message_id=COALESCE(?, message_id), error_message=?
+               WHERE id=? AND company_id=?''',
+            (
+                _document_email_timestamp(), clean_status,
+                '; '.join(recipients)[:2000] if recipients is not None else None,
+                str(message_id or '')[:500] or None, clean_error,
+                attempt_id, session['company_id'],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _document_email_summary_map(conn, company_id, document_type, document_keys):
+    keys = [str(key) for key in document_keys if key not in (None, '')]
+    if document_type not in DOCUMENT_EMAIL_HISTORY_TYPES or not keys:
+        return {}
+    placeholders = ','.join('?' for _ in keys)
+    rows = conn.execute(
+        f'''SELECT document_key,
+                   SUM(CASE WHEN status='accepted' THEN 1 ELSE 0 END) AS accepted_count,
+                   SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_count,
+                   MAX(CASE WHEN status='accepted' THEN completed_at ELSE NULL END) AS last_accepted_at,
+                   MAX(attempted_at) AS last_attempted_at
+            FROM document_email_history
+            WHERE company_id=? AND document_type=? AND document_key IN ({placeholders})
+            GROUP BY document_key''',
+        [company_id, document_type] + keys,
+    ).fetchall()
+    return {str(row['document_key']): dict(row) for row in rows}
 
 
 def log_security_event(action, details='', result='failure', record_type=None, record_id=None, company_id=None, username=None):
@@ -15160,6 +15281,63 @@ def _apply_company_email_headers(msg, settings, to_email):
     return recipients
 
 
+@app.route('/api/document_email_history')
+def api_document_email_history():
+    document_type = str(request.args.get('document_type') or '').strip().lower()
+    document_key = str(request.args.get('document_key') or '').strip()
+    if document_type not in DOCUMENT_EMAIL_HISTORY_TYPES or not document_key:
+        return jsonify({'message': 'A valid document type and document key are required.'}), 400
+    if document_type == 'payslip':
+        if not _session_has_payroll_read_access():
+            return jsonify({'message': 'Forbidden'}), 403
+    elif not _session_has_app_read('invoicing'):
+        return jsonify({'message': 'Forbidden'}), 403
+
+    cid = session['company_id']
+    conn = get_db_connection()
+    try:
+        if document_type in {'invoice', 'quote'}:
+            try:
+                record_id = int(document_key)
+            except (TypeError, ValueError):
+                return jsonify({'message': 'Invalid document reference.'}), 400
+            table = 'invoices' if document_type == 'invoice' else 'quotes'
+            if not conn.execute(f'SELECT 1 FROM {table} WHERE id=? AND company_id=?', (record_id, cid)).fetchone():
+                return jsonify({'message': 'Document not found.'}), 404
+        else:
+            match = re.fullmatch(r'(\d+):(\d{4}-\d{2})', document_key)
+            if not match:
+                return jsonify({'message': 'Invalid payslip reference.'}), 400
+            if not conn.execute('SELECT 1 FROM employees WHERE id=? AND company_id=?', (int(match.group(1)), cid)).fetchone():
+                return jsonify({'message': 'Employee not found.'}), 404
+
+        rows = [dict(row) for row in conn.execute(
+            '''SELECT id, document_type, document_key, document_id, document_number,
+                      recipient_addresses, subject, filename, sent_by, attempted_at,
+                      completed_at, status, error_message, message_id, content_sha256
+               FROM document_email_history
+               WHERE company_id=? AND document_type=? AND document_key=?
+               ORDER BY attempted_at DESC, id DESC
+               LIMIT 200''',
+            (cid, document_type, document_key),
+        ).fetchall()]
+    finally:
+        conn.close()
+    accepted_count = sum(1 for row in rows if row.get('status') == 'accepted')
+    failed_count = sum(1 for row in rows if row.get('status') == 'failed')
+    return jsonify({
+        'document_type': document_type,
+        'document_key': document_key,
+        'history': rows,
+        'summary': {
+            'attempt_count': len(rows),
+            'accepted_count': accepted_count,
+            'failed_count': failed_count,
+            'last_accepted_at': next((row.get('completed_at') for row in rows if row.get('status') == 'accepted'), None),
+        },
+    })
+
+
 def _build_admin_payslip_pdf_from_payload(data):
     data = data or {}
     emp_id = int(data.get('employee_id') or 0)
@@ -15227,6 +15405,26 @@ def api_email_payslip_pdf():
         return jsonify({'message':str(exc)}), 400
     if not emp.get('email'):
         return jsonify({'message':'Employee has no email address saved in their profile.'}), 400
+    date_text = str((data.get('payslip') or {}).get('date') or data.get('date') or '')
+    prefix = 'Draft Payslip' if data.get('draft') else 'Payslip'
+    filename = f"{prefix.replace(' ','_')}_{secure_filename(emp.get('name') or 'Employee')}_{secure_filename(date_text)}.pdf"
+    subject = f"{prefix} - {date_text}"
+    try:
+        pdf_bytes = _standard_validate_pdf_bytes(pdf_bytes)
+        document_key = _document_email_key(
+            'payslip', employee_id=emp.get('id'), payroll_date=date_text
+        )
+        payslip_values = dict(data.get('payslip') or {})
+        attempt_id = _start_document_email_attempt(
+            'payslip', document_key,
+            document_id=payslip_values.get('regular_payslip_id'),
+            document_number=f"{prefix} - {emp.get('name')} - {date_text[:7]}",
+            recipients=emp.get('email'), subject=subject, filename=filename,
+            content_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+        )
+    except Exception:
+        app.logger.exception('Unable to create payslip email history before sending.')
+        return jsonify({'message': 'Unable to create the email history record. The email was not sent.'}), 500
     conn = get_db_connection()
     try:
         settings_rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (session['company_id'],)).fetchall()
@@ -15234,16 +15432,16 @@ def api_email_payslip_pdf():
         conn.close()
     settings = {r['key']:r['value'] for r in settings_rows}
     if not settings.get('smtp_server') or not settings.get('smtp_user') or not settings.get('smtp_pass'):
+        _finish_document_email_attempt(attempt_id, 'failed', error_message='SMTP settings are incomplete.')
         return jsonify({'message':'SMTP settings are incomplete. Please configure them in Settings.'}), 400
-    date_text = str((data.get('payslip') or {}).get('date') or data.get('date') or '')
-    prefix = 'Draft Payslip' if data.get('draft') else 'Payslip'
-    filename = f"{prefix.replace(' ','_')}_{secure_filename(emp.get('name') or 'Employee')}_{secure_filename(date_text)}.pdf"
+    smtp_accepted = False
     try:
         msg = EmailMessage()
-        msg['Subject'] = f"{prefix} - {date_text}"
+        msg['Subject'] = subject
+        msg['Message-ID'] = make_msgid()
         recipients = _apply_company_email_headers(msg, settings, emp.get('email'))
         msg.set_content(f"Dear {emp.get('name')},\n\nPlease find attached your {prefix.lower()} for {date_text}.\n\nKind regards,\n{session.get('company_name')}")
-        msg.add_attachment(_standard_validate_pdf_bytes(pdf_bytes), maintype='application', subtype='pdf', filename=filename)
+        msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename=filename)
         port = int(settings.get('smtp_port',465))
         if port == 587:
             with smtplib.SMTP(settings['smtp_server'], port, timeout=10) as server:
@@ -15251,9 +15449,27 @@ def api_email_payslip_pdf():
         else:
             with smtplib.SMTP_SSL(settings['smtp_server'], port, timeout=10) as server:
                 server.login(settings['smtp_user'],settings['smtp_pass']); server.send_message(msg)
-        log_action('HR & Payroll','Emailed Payslip PDF',f"{emp.get('name')} | {'; '.join(recipients)}")
+        smtp_accepted = True
+        _finish_document_email_attempt(
+            attempt_id, 'accepted', recipients=recipients, message_id=msg.get('Message-ID')
+        )
+        log_action('HR & Payroll','Emailed Payslip PDF',f"{emp.get('name')} | {date_text} | {'; '.join(recipients)}", record_type='payslip', record_id=document_key)
         return jsonify({'message':'Email sent successfully!'})
+    except ValueError as exc:
+        _finish_document_email_attempt(attempt_id, 'failed', error_message=exc)
+        return jsonify({'message': str(exc)}), 400
     except Exception as exc:
+        if smtp_accepted:
+            app.logger.exception('Payslip email was accepted but its history could not be finalized attempt_id=%s', attempt_id)
+            return jsonify({'message': 'Email was accepted by the mail server, but Easy Admin could not finalize its history record. Please contact support before resending.'}), 200
+        try:
+            _finish_document_email_attempt(
+                attempt_id, 'failed', recipients=locals().get('recipients'),
+                message_id=locals().get('msg').get('Message-ID') if locals().get('msg') else None,
+                error_message=exc,
+            )
+        except Exception:
+            app.logger.exception('Unable to finalize failed payslip email history attempt_id=%s', attempt_id)
         return jsonify({'message':f'Error sending email: {exc}'}), 500
 
 
@@ -15269,14 +15485,31 @@ def email_payslip():
     
     s_dict = {r['key']: r['value'] for r in settings_rows}
     if not emp or not emp['email']: return jsonify({"message": "Employee has no email address saved in their profile."}), 400
-    if not s_dict.get('smtp_server') or not s_dict.get('smtp_user') or not s_dict.get('smtp_pass'): return jsonify({"message": "SMTP settings are incomplete. Please configure them in Settings."}), 400
-        
+    try:
+        pdf_bytes = _standard_validate_pdf_bytes(pdf_file.read())
+        document_key = _document_email_key('payslip', employee_id=emp_id, payroll_date=date_str)
+        subject = f"Payslip - {date_str}"
+        filename = f"Payslip_{secure_filename(emp['name'])}_{secure_filename(date_str)}.pdf"
+        attempt_id = _start_document_email_attempt(
+            'payslip', document_key,
+            document_number=f"Payslip - {emp['name']} - {str(date_str)[:7]}",
+            recipients=emp['email'], subject=subject, filename=filename,
+            content_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+        )
+    except Exception:
+        app.logger.exception('Unable to create legacy payslip email history before sending.')
+        return jsonify({"message": "Unable to create the email history record. The email was not sent."}), 500
+    if not s_dict.get('smtp_server') or not s_dict.get('smtp_user') or not s_dict.get('smtp_pass'):
+        _finish_document_email_attempt(attempt_id, 'failed', error_message='SMTP settings are incomplete.')
+        return jsonify({"message": "SMTP settings are incomplete. Please configure them in Settings."}), 400
+    smtp_accepted = False
     try:
         msg = EmailMessage()
-        msg['Subject'] = f"Payslip - {date_str}"
+        msg['Subject'] = subject
+        msg['Message-ID'] = make_msgid()
         recipients = _apply_company_email_headers(msg, s_dict, emp['email'])
         msg.set_content(f"Dear {emp['name']},\n\nPlease find your attached payslip for {date_str}.\n\nKind regards,\n{session.get('company_name')}")
-        msg.add_attachment(pdf_file.read(), maintype='application', subtype='pdf', filename=f"Payslip_{emp['name']}_{date_str}.pdf")
+        msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename=filename)
         
         port = int(s_dict.get('smtp_port', 465))
         if port == 587:
@@ -15288,12 +15521,28 @@ def email_payslip():
             with smtplib.SMTP_SSL(s_dict['smtp_server'], port, timeout=10) as server:
                 server.login(s_dict['smtp_user'], s_dict['smtp_pass'])
                 server.send_message(msg)
-            
-        log_action('HR & Payroll', 'Emailed Payslip', f"Successfully sent digital payslip to {emp['name']} for {date_str} ({'; '.join(recipients)})")
+
+        smtp_accepted = True
+        _finish_document_email_attempt(
+            attempt_id, 'accepted', recipients=recipients, message_id=msg.get('Message-ID')
+        )
+        log_action('HR & Payroll', 'Emailed Payslip', f"Successfully sent digital payslip to {emp['name']} for {date_str} ({'; '.join(recipients)})", record_type='payslip', record_id=document_key)
         return jsonify({"message": "Email sent successfully!"})
     except ValueError as e:
+        _finish_document_email_attempt(attempt_id, 'failed', error_message=e)
         return jsonify({"message": str(e)}), 400
-    except Exception as e: 
+    except Exception as e:
+        if smtp_accepted:
+            app.logger.exception('Legacy payslip email was accepted but its history could not be finalized attempt_id=%s', attempt_id)
+            return jsonify({"message": "Email was accepted by the mail server, but Easy Admin could not finalize its history record. Please contact support before resending."}), 200
+        try:
+            _finish_document_email_attempt(
+                attempt_id, 'failed', recipients=locals().get('recipients'),
+                message_id=locals().get('msg').get('Message-ID') if locals().get('msg') else None,
+                error_message=e,
+            )
+        except Exception:
+            app.logger.exception('Unable to finalize failed legacy payslip email history attempt_id=%s', attempt_id)
         return jsonify({"message": f"Error sending email: {str(e)}"}), 500
 
 
@@ -18061,9 +18310,18 @@ def invoicing_workspace(section):
 
     # Assign calculated invoice numbers directly for the dashboard table
     # and calculate outstanding amount from actual recorded payments.
+    invoice_email_summaries = _document_email_summary_map(
+        conn, cid, 'invoice', [row['id'] for row in invoices]
+    )
     formatted_invoices = []
     for inv in invoices:
         d = dict(inv)
+        d.update(invoice_email_summaries.get(str(d['id']), {
+            'accepted_count': 0,
+            'failed_count': 0,
+            'last_accepted_at': None,
+            'last_attempted_at': None,
+        }))
         d['formatted_num'] = _billing_document_formatted_number(conn, cid, 'invoice', d)
         project = None
         if d.get('project_id'):
@@ -18088,9 +18346,18 @@ def invoicing_workspace(section):
         d['outstanding_amount'] = totals['outstanding']
         formatted_invoices.append(d)
 
+    quote_email_summaries = _document_email_summary_map(
+        conn, cid, 'quote', [row['id'] for row in quotes]
+    )
     formatted_quotes = []
     for q in quotes:
         d = dict(q)
+        d.update(quote_email_summaries.get(str(d['id']), {
+            'accepted_count': 0,
+            'failed_count': 0,
+            'last_accepted_at': None,
+            'last_attempted_at': None,
+        }))
         d['formatted_num'] = _billing_document_formatted_number(conn, cid, 'quote', d)
         formatted_quotes.append(d)
 
@@ -19453,17 +19720,39 @@ def _qty_text(value):
     return f"{qty:.2f}".rstrip('0').rstrip('.')
 
 
-def _send_pdf_email(pdf_bytes, filename, email, doc_name, client_name):
+def _send_pdf_email(pdf_bytes, filename, email, doc_name, client_name, *,
+                    document_type=None, document_key=None, document_id=None,
+                    document_number=None):
     pdf_bytes = _standard_validate_pdf_bytes(pdf_bytes)
     conn = get_db_connection()
     settings_rows = conn.execute('SELECT key, value FROM settings WHERE company_id=?', (session['company_id'],)).fetchall()
     conn.close()
     s_dict = {r['key']: r['value'] for r in settings_rows}
+    subject = f"{doc_name.replace('_', ' ')} from {session.get('company_name')}"
+    attempt_id = None
+    if document_type in DOCUMENT_EMAIL_HISTORY_TYPES:
+        try:
+            attempt_id = _start_document_email_attempt(
+                document_type, document_key, document_id=document_id,
+                document_number=document_number or doc_name,
+                recipients=email, subject=subject, filename=filename,
+                content_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+            )
+        except Exception:
+            app.logger.exception(
+                'Unable to create %s email history before sending document_id=%s.',
+                document_type, document_id,
+            )
+            return {"message": "Unable to create the email history record. The email was not sent."}, 500
     if not s_dict.get('smtp_server') or not s_dict.get('smtp_user') or not s_dict.get('smtp_pass'):
+        if attempt_id:
+            _finish_document_email_attempt(attempt_id, 'failed', error_message='SMTP settings are incomplete.')
         return {"message": "SMTP settings are incomplete. Please configure your Email & Calendar Settings in the Hub."}, 400
+    smtp_accepted = False
     try:
         msg = EmailMessage()
-        msg['Subject'] = f"{doc_name.replace('_', ' ')} from {session.get('company_name')}"
+        msg['Subject'] = subject
+        msg['Message-ID'] = make_msgid()
         recipients = _apply_company_email_headers(msg, s_dict, email)
         msg.set_content(f"Dear {client_name},\n\nPlease find attached your {doc_name.replace('_', ' ')}.\n\nThank you for your business.\n\nKind regards,\n{session.get('company_name')}")
         msg.add_attachment(pdf_bytes, maintype='application', subtype='pdf', filename=filename)
@@ -19477,11 +19766,33 @@ def _send_pdf_email(pdf_bytes, filename, email, doc_name, client_name):
             with smtplib.SMTP_SSL(s_dict['smtp_server'], port, timeout=10) as server:
                 server.login(s_dict['smtp_user'], s_dict['smtp_pass'])
                 server.send_message(msg)
-        log_action('Invoicing', 'Emailed Document', f"Sent {doc_name} to {'; '.join(recipients)}")
+        smtp_accepted = True
+        if attempt_id:
+            _finish_document_email_attempt(
+                attempt_id, 'accepted', recipients=recipients, message_id=msg.get('Message-ID')
+            )
+        log_action(
+            'Invoicing', 'Emailed Document', f"Sent {doc_name} to {'; '.join(recipients)}",
+            record_type=document_type, record_id=document_key,
+        )
         return {"message": f"Email sent successfully to {len(recipients)} recipient{'s' if len(recipients) != 1 else ''}!"}, 200
     except ValueError as e:
+        if attempt_id:
+            _finish_document_email_attempt(attempt_id, 'failed', error_message=e)
         return {"message": str(e)}, 400
     except Exception as e:
+        if smtp_accepted:
+            app.logger.exception('Document email was accepted but its history could not be finalized attempt_id=%s', attempt_id)
+            return {"message": "Email was accepted by the mail server, but Easy Admin could not finalize its history record. Please contact support before resending."}, 200
+        if attempt_id:
+            try:
+                _finish_document_email_attempt(
+                    attempt_id, 'failed', recipients=locals().get('recipients'),
+                    message_id=locals().get('msg').get('Message-ID') if locals().get('msg') else None,
+                    error_message=e,
+                )
+            except Exception:
+                app.logger.exception('Unable to finalize failed document email history attempt_id=%s', attempt_id)
         return {"message": f"Error sending email: {str(e)}"}, 500
 
 
@@ -20082,7 +20393,12 @@ def email_invoice_pdf(inv_id):
     except Exception:
         app.logger.exception('Invoice PDF generation failed before email invoice_id=%s company_id=%s', inv_id, session.get('company_id'))
         return jsonify({'message': 'Unable to generate the invoice PDF. The email was not sent.'}), 500
-    result, status = _send_pdf_email(pdf_bytes, payload['filename'], email, payload['title'] + '_' + payload['number'], payload.get('client_name') or 'Client')
+    result, status = _send_pdf_email(
+        pdf_bytes, payload['filename'], email,
+        payload['title'] + '_' + payload['number'], payload.get('client_name') or 'Client',
+        document_type='invoice', document_key=_document_email_key('invoice', document_id=inv_id),
+        document_id=inv_id, document_number=payload['number'],
+    )
     return jsonify(result), status
 
 
@@ -20102,7 +20418,12 @@ def email_quote_pdf(q_id):
     except Exception:
         app.logger.exception('Quote PDF generation failed before email quote_id=%s company_id=%s', q_id, session.get('company_id'))
         return jsonify({'message': 'Unable to generate the quote PDF. The email was not sent.'}), 500
-    result, status = _send_pdf_email(pdf_bytes, payload['filename'], email, payload['title'] + '_' + payload['number'], payload.get('client_name') or 'Client')
+    result, status = _send_pdf_email(
+        pdf_bytes, payload['filename'], email,
+        payload['title'] + '_' + payload['number'], payload.get('client_name') or 'Client',
+        document_type='quote', document_key=_document_email_key('quote', document_id=q_id),
+        document_id=q_id, document_number=payload['number'],
+    )
     return jsonify(result), status
 
 
